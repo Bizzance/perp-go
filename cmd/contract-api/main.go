@@ -38,9 +38,10 @@ func main() {
 	tradeRepo := repo.NewTradeRepo(dbConn)
 	txRepo := repo.NewTxRepo(dbConn)
 	fundingRepo := repo.NewFundingRepo(dbConn)
+	riskLimitRepo := repo.NewRiskLimitRepo(dbConn)
 
 	markPriceSvc := service.NewMarkPriceService(rdb)
-	positionSvc := service.NewPositionService(positionRepo, coinRepo, markPriceSvc)
+	positionSvc := service.NewPositionService(positionRepo, riskLimitRepo, markPriceSvc)
 	accountSvc := service.NewAccountService(accountRepo, positionSvc, txRepo)
 	fundingSvc := service.NewFundingService(rdb, coinRepo, positionRepo, fundingRepo, accountSvc, txRepo, markPriceSvc)
 

@@ -23,7 +23,6 @@ type LiquidationService struct {
 	orders        *repo.OrderRepo
 	positions     *repo.PositionRepo
 	positionSvc   *PositionService
-	coins         *repo.CoinRepo
 	markPrice     *MarkPriceService
 	accounts      *AccountService
 	fund          *InsuranceFundService
@@ -31,11 +30,11 @@ type LiquidationService struct {
 }
 
 func NewLiquidationService(engine *EngineService, orders *repo.OrderRepo, positions *repo.PositionRepo,
-	positionSvc *PositionService, coins *repo.CoinRepo, markPrice *MarkPriceService, accounts *AccountService,
+	positionSvc *PositionService, markPrice *MarkPriceService, accounts *AccountService,
 	fund *InsuranceFundService, timeoutMillis int64) *LiquidationService {
 	return &LiquidationService{
 		engine: engine, orders: orders, positions: positions, positionSvc: positionSvc,
-		coins: coins, markPrice: markPrice, accounts: accounts, fund: fund, timeoutMillis: timeoutMillis,
+		markPrice: markPrice, accounts: accounts, fund: fund, timeoutMillis: timeoutMillis,
 	}
 }
 
@@ -95,13 +94,17 @@ func (s *LiquidationService) queueLiquidation(ctx context.Context, p model.Posit
 	if err != nil || !ok {
 		return // 上一轮已经在强平中，跳过
 	}
-	coin, err := s.coins.FindBySymbol(ctx, p.Symbol)
 	mark, hasMark := s.markPrice.Get(ctx, p.Symbol)
-	if err != nil || coin == nil || !hasMark {
+	if !hasMark {
 		s.positions.ClearLiquidating(ctx, p.ID)
 		return
 	}
-	buffer := mark.Mul(coin.MaintenanceMarginRate).Mul(decimal.NewFromInt(protectPriceBufferMultiplier))
+	tier, err := s.positionSvc.TierFor(ctx, p.Symbol, p.Volume.Mul(mark))
+	if err != nil || tier == nil {
+		s.positions.ClearLiquidating(ctx, p.ID)
+		return
+	}
+	buffer := mark.Mul(tier.MaintenanceMarginRate).Mul(decimal.NewFromInt(protectPriceBufferMultiplier))
 	protectPrice := mark.Sub(buffer)
 	if p.Side == model.SideShort {
 		protectPrice = mark.Add(buffer)

@@ -75,20 +75,33 @@ type Account struct {
 }
 
 type Coin struct {
+	Symbol               string          `db:"symbol"`
+	BaseCoinScale        int32           `db:"base_coin_scale"`
+	PriceScale           int32           `db:"price_scale"`
+	Enable               bool            `db:"enable"`
+	MakerFee             decimal.Decimal `db:"maker_fee"`
+	TakerFee             decimal.Decimal `db:"taker_fee"`
+	PriceTick            decimal.Decimal `db:"price_tick"`
+	VolumeStep           decimal.Decimal `db:"volume_step"`
+	MinVolume            decimal.Decimal `db:"min_volume"`
+	MaxVolume            decimal.Decimal `db:"max_volume"`
+	FundingIntervalHours int32           `db:"funding_interval_hours"`
+	FundingRateCap       decimal.Decimal `db:"funding_rate_cap"`
+}
+
+// RiskLimitTier 保证金分档(风险限额)：维持保证金率/最大杠杆按仓位名义价值分档，仓位越大
+// 风险越高、维持保证金率越高、允许的杠杆越低——取代原来"整个合约一个固定维持保证金率/
+// 最大杠杆"的简化。MaintenanceAmount是速算扣除数，让跨档位时维持保证金的计算连续，不会在
+// 档位边界出现跳变，公式=名义价值*MaintenanceMarginRate-MaintenanceAmount，见
+// PositionService.TierFor
+type RiskLimitTier struct {
+	ID                    uint64          `db:"id"`
 	Symbol                string          `db:"symbol"`
-	BaseCoinScale         int32           `db:"base_coin_scale"`
-	PriceScale            int32           `db:"price_scale"`
-	Enable                bool            `db:"enable"`
-	MaxLeverage           uint32          `db:"max_leverage"`
-	MakerFee              decimal.Decimal `db:"maker_fee"`
-	TakerFee              decimal.Decimal `db:"taker_fee"`
+	Tier                  int32           `db:"tier"`
+	MaxNotional           decimal.Decimal `db:"max_notional"` // 本档名义价值上限，0=不限(最后一档)
 	MaintenanceMarginRate decimal.Decimal `db:"maintenance_margin_rate"`
-	PriceTick             decimal.Decimal `db:"price_tick"`
-	VolumeStep            decimal.Decimal `db:"volume_step"`
-	MinVolume             decimal.Decimal `db:"min_volume"`
-	MaxVolume             decimal.Decimal `db:"max_volume"`
-	FundingIntervalHours  int32           `db:"funding_interval_hours"`
-	FundingRateCap        decimal.Decimal `db:"funding_rate_cap"`
+	MaintenanceAmount     decimal.Decimal `db:"maintenance_amount"`
+	MaxLeverage           uint32          `db:"max_leverage"`
 }
 
 type Order struct {
@@ -138,12 +151,13 @@ func (p *Position) UnrealizedPnl(markPrice decimal.Decimal) decimal.Decimal {
 	return p.AvgEntryPrice.Sub(markPrice).Mul(p.Volume)
 }
 
-// LiquidationPrice 单仓强平价估算(逐仓式公式，仅供展示参考)——照抄Java版推导：
-// 多头：liqPrice = (avgEntryPrice*N - positionMargin) / (N*(1-mmr))
-// 空头：liqPrice = (avgEntryPrice*N + positionMargin) / (N*(1+mmr))
+// LiquidationPrice 单仓强平价估算(逐仓式公式，仅供展示参考)——维持保证金要求按分档公式
+// notional*mmr-maintenanceAmount推导：
+// 多头：liqPrice = (avgEntryPrice*N - positionMargin - maintenanceAmount) / (N*(1-mmr))
+// 空头：liqPrice = (avgEntryPrice*N + positionMargin + maintenanceAmount) / (N*(1+mmr))
 // 全仓真实强平以LiquidationService里"账户权益 vs 全部仓位维持保证金要求之和"为准，这个值
 // 只在没有其它持仓、也不考虑available缓冲时才精确，MVP先用这个简化公式做展示
-func (p *Position) LiquidationPrice(mmr decimal.Decimal) decimal.Decimal {
+func (p *Position) LiquidationPrice(mmr, maintenanceAmount decimal.Decimal) decimal.Decimal {
 	if p.Volume.IsZero() {
 		return decimal.Zero
 	}
@@ -153,13 +167,13 @@ func (p *Position) LiquidationPrice(mmr decimal.Decimal) decimal.Decimal {
 		if denom.Sign() <= 0 {
 			return decimal.Zero
 		}
-		return decimal.Max(decimal.Zero, entryTimesN.Sub(p.PositionMargin).Div(denom))
+		return decimal.Max(decimal.Zero, entryTimesN.Sub(p.PositionMargin).Sub(maintenanceAmount).Div(denom))
 	}
 	denom := p.Volume.Mul(decimal.NewFromInt(1).Add(mmr))
 	if denom.Sign() <= 0 {
 		return decimal.Zero
 	}
-	return decimal.Max(decimal.Zero, entryTimesN.Add(p.PositionMargin).Div(denom))
+	return decimal.Max(decimal.Zero, entryTimesN.Add(p.PositionMargin).Add(maintenanceAmount).Div(denom))
 }
 
 type Trade struct {

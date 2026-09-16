@@ -42,9 +42,10 @@ func main() {
 	txRepo := repo.NewTxRepo(conn)
 	fundRepo := repo.NewInsuranceFundRepo(conn)
 	fundingRepo := repo.NewFundingRepo(conn)
+	riskLimitRepo := repo.NewRiskLimitRepo(conn)
 
 	markPriceSvc := service.NewMarkPriceService(rdb)
-	positionSvc := service.NewPositionService(positionRepo, coinRepo, markPriceSvc)
+	positionSvc := service.NewPositionService(positionRepo, riskLimitRepo, markPriceSvc)
 	accountSvc := service.NewAccountService(accountRepo, positionSvc, txRepo)
 	settlementSvc := service.NewSettlementService(accountSvc, positionRepo, coinRepo, txRepo)
 	fundSvc := service.NewInsuranceFundService(fundRepo)
@@ -52,7 +53,7 @@ func main() {
 
 	matchingEngine := matching.NewEngine()
 	engineSvc := service.NewEngineService(matchingEngine, orderRepo, tradeRepo, accountSvc, positionSvc, settlementSvc, markPriceSvc, fundSvc)
-	liquidationSvc := service.NewLiquidationService(engineSvc, orderRepo, positionRepo, positionSvc, coinRepo, markPriceSvc, accountSvc, fundSvc, cfg.LiquidationOrderTimeoutMs)
+	liquidationSvc := service.NewLiquidationService(engineSvc, orderRepo, positionRepo, positionSvc, markPriceSvc, accountSvc, fundSvc, cfg.LiquidationOrderTimeoutMs)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()

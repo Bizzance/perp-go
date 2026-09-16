@@ -117,7 +117,15 @@ func (s *Server) addOrder(c *gin.Context) {
 	action := model.OrderAction(c.PostForm("action"))
 	orderType := model.OrderType(c.DefaultPostForm("type", "LIMIT"))
 	leverage, err := decimal.NewFromString(c.DefaultPostForm("leverage", "1"))
-	if err != nil {
+	// maxSaneLeverage是不区分开平仓、不查分档配置的兜底上限——只用来挡掉明显离谱/会导致
+	// 下面uint32(leverage.IntPart())溢出截断成垃圾值的输入。真正按分档算出来的tier.MaxLeverage
+	// 只在下面ActionOpen分支里校验，是刻意的：leverage这个字段只有开仓会用来算需要冻结多少
+	// 保证金(见settlement.go的ApplyOpenFill)，平仓不创建新仓位/新风险，不需要经过分档校验，
+	// 而且分档校验依赖risk_limit_tiers有配置，一旦要求平仓也必须过这一关，配置缺失或删除时
+	// 反而会把用户已有仓位卡死平不掉——两害相权，让平仓单的leverage只挡这道跟合约配置无关的
+	// 离谱值兜底，是本次分档改动反复权衡后的结论，不是遗漏
+	const maxSaneLeverage = 1000
+	if err != nil || leverage.Sign() <= 0 || leverage.GreaterThan(decimal.NewFromInt(maxSaneLeverage)) {
 		fail(c, 400, "leverage参数不合法")
 		return
 	}
@@ -127,9 +135,13 @@ func (s *Server) addOrder(c *gin.Context) {
 		fail(c, 400, "合约不存在或已下架")
 		return
 	}
-	if leverage.Sign() <= 0 || leverage.GreaterThan(decimal.NewFromInt(int64(coin.MaxLeverage))) {
-		fail(c, 400, "杠杆倍数超出该合约允许的范围")
-		return
+	// 只有MARKET单定价、开仓分档判断这两处要用标记价格，LIMIT+CLOSE(平仓最常见的形态)完全
+	// 用不上，按需取一次就好；但凡要用就只取这一次、后面复用同一个值，避免读两次标记价格中间
+	// 恰好更新导致两处判断用了不一致的值
+	var mark decimal.Decimal
+	var hasMark bool
+	if orderType == model.OrderTypeMarket || action == model.ActionOpen {
+		mark, hasMark = s.markPrice.Get(c.Request.Context(), symbol)
 	}
 
 	var price decimal.Decimal
@@ -144,7 +156,6 @@ func (s *Server) addOrder(c *gin.Context) {
 			return
 		}
 	} else {
-		mark, hasMark := s.markPrice.Get(c.Request.Context(), symbol)
 		if !hasMark {
 			fail(c, 400, "该合约暂无标记价格，市价单无法估算数量")
 			return
@@ -190,6 +201,69 @@ func (s *Server) addOrder(c *gin.Context) {
 
 	requiredMargin := amount.Mul(price).Div(leverage)
 	if action == model.ActionOpen {
+		// 分档判断的名义价值不能只看已成交仓位：这个uid在同一symbol+side上如果还挂着别的没成交的
+		// 开仓单，每一笔单独提交时都看不到彼此，会各自按"当前还没有仓位/挂单垫底"通过校验，等
+		// 行情走到这些价位一起成交，合并起来的真实仓位可能远超单笔校验时的档位——顺序提交多笔
+		// 远离盘口的限价单就能稳定触发，所以这里除了已成交仓位，还要把这个方向上全部还在排队的
+		// OPEN单也算进去。这段"读现有仓位/挂单→算档位→冻结保证金"整体不是原子的，并发对同一
+		// uid+symbol+side提交多笔请求，每一笔读到的都是对方还没提交时的旧状态，理论上仍能绕开——
+		// 这套系统一直没有为这类极端并发加锁(FreezeMargin等其它地方同样如此)，属于已知、接受的
+		// MVP简化，这里只堵顺序提交这条更容易触发、不需要精确时机就能稳定复现的路径
+		existingNotional := decimal.Zero
+		existing, err := s.positions.Find(c.Request.Context(), uid, symbol, side)
+		if err != nil {
+			fail(c, 500, err.Error())
+			return
+		}
+		if existing != nil {
+			// 用标记价估这个已有仓位当前值多少钱，没有标记价才退回持仓均价——不能用这笔新委托
+			// 自己填的价格估：限价单的价格是用户随便填的，可以故意报一个远低于市价的价格，
+			// 把existingNotional算得远小于真实值，从而蹭到一个本不该适用的低档高杠杆
+			valuePrice := existing.AvgEntryPrice
+			if hasMark {
+				valuePrice = mark
+			}
+			existingNotional = existing.Volume.Mul(valuePrice)
+		}
+		activeOrders, err := s.orders.FindActiveByUID(c.Request.Context(), uid, symbol)
+		if err != nil {
+			fail(c, 500, err.Error())
+			return
+		}
+		for _, o := range activeOrders {
+			if o.Side == side && o.Action == model.ActionOpen {
+				// 这里必须用挂单自己的o.Price，不能像上面现有仓位那样退回标记价：这些是已经
+				// 通过校验、真实挂在簿子上的委托，o.Price不是"用户随便填的、可能被拿来做局的
+				// 报价"，而是它成交时会用到的真实价格(排队单成交价=挂单自己的限价，不是标记价)。
+				// 之前这里写成跟现有仓位一样固定退回标记价，恰好把这个函数本要防的"顺序挂多笔
+				// 远离盘口限价单"场景反向搞成了漏洞：挂单价格越是远离标记价(正是最该被算重的
+				// 情况)，标记价对它的估值就越失真、越偏小
+				existingNotional = existingNotional.Add(o.RemainingAmount().Mul(o.Price))
+			}
+		}
+		// 这笔新委托自己的名义价值同样不能只信submitted price：SHORT+OPEN在撮合引擎里是卖方向，
+		// 挂一个远低于市价的价格属于"吃单价"，会立刻按盘口对手的真实价格成交，不是按这个填的低价——
+		// 用max(price, markPrice)取更保守的那个当分档判断的基准。这个防护依赖有标记价格可用，
+		// 一个从没成交过的全新symbol(hasMark=false)防不住这一招，是contract-api这边看不到
+		// contract-engine盘口真实成交价这个更大架构问题的一角，跟下单冻结保证金用submitted price
+		// 而不是真实成交价是同一个根因，MVP阶段先记录、不在这里单独打补丁
+		orderNotionalPrice := price
+		if hasMark && mark.GreaterThan(price) {
+			orderNotionalPrice = mark
+		}
+		tier, err := s.positions.TierFor(c.Request.Context(), symbol, existingNotional.Add(amount.Mul(orderNotionalPrice)))
+		if err != nil {
+			fail(c, 500, err.Error())
+			return
+		}
+		if tier == nil {
+			fail(c, 400, "该合约未配置保证金分档，暂不允许开仓")
+			return
+		}
+		if leverage.GreaterThan(decimal.NewFromInt(int64(tier.MaxLeverage))) {
+			fail(c, 400, "杠杆倍数超出当前仓位名义价值对应档位允许的范围")
+			return
+		}
 		if err := s.accounts.FreezeMargin(c.Request.Context(), uid, requiredMargin); err != nil {
 			fail(c, 500, err.Error())
 			return
@@ -311,8 +385,8 @@ func (s *Server) positionCurrent(c *gin.Context) {
 			if p.PositionMargin.Sign() > 0 {
 				v.Roe = v.UnrealizedPnl.Div(p.PositionMargin)
 			}
-			if coin, err := s.coins.FindBySymbol(c.Request.Context(), p.Symbol); err == nil && coin != nil {
-				v.LiquidationPrice = p.LiquidationPrice(coin.MaintenanceMarginRate)
+			if tier, err := s.positions.TierFor(c.Request.Context(), p.Symbol, v.NotionalValue); err == nil && tier != nil {
+				v.LiquidationPrice = p.LiquidationPrice(tier.MaintenanceMarginRate, tier.MaintenanceAmount)
 			}
 		}
 		views = append(views, v)

@@ -1,6 +1,6 @@
 -- framework-go 第一期(MVP)表结构，独立新库(建议库名 perpgo)。
--- 账户(无信用额度)、合约配置(固定维持保证金率，不分档)、委托/持仓/成交、标记价格、指数价格与
--- 资金费率结算、保险基金。不建：信用账户、条件单、逐仓模式、风控分档表——这些是后续阶段。
+-- 账户(无信用额度)、合约配置与保证金分档、委托/持仓/成交、标记价格、指数价格与资金费率结算、
+-- 保险基金。不建：信用账户、条件单、逐仓模式——这些是后续阶段。
 
 CREATE DATABASE IF NOT EXISTS perpgo DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE perpgo;
@@ -18,16 +18,14 @@ CREATE TABLE IF NOT EXISTS accounts (
   UNIQUE KEY uk_accounts_uid (uid)
 ) ENGINE=InnoDB;
 
--- 合约配置：MVP阶段维持保证金率是每个symbol一个固定值，不做按名义价值分档
+-- 合约配置：维持保证金率/最大杠杆按名义价值分档，见下面的risk_limit_tiers表
 CREATE TABLE IF NOT EXISTS coins (
   symbol                    VARCHAR(32) NOT NULL,
   base_coin_scale           TINYINT UNSIGNED NOT NULL DEFAULT 8 COMMENT '标的币数量精度(小数位数)',
   price_scale               TINYINT UNSIGNED NOT NULL DEFAULT 2 COMMENT '价格展示精度(小数位数)',
   enable                    TINYINT(1) NOT NULL DEFAULT 1,
-  max_leverage              INT UNSIGNED NOT NULL DEFAULT 100,
   maker_fee                 DECIMAL(8,6) NOT NULL DEFAULT 0.000200,
   taker_fee                 DECIMAL(8,6) NOT NULL DEFAULT 0.000500,
-  maintenance_margin_rate   DECIMAL(8,6) NOT NULL DEFAULT 0.005000 COMMENT '固定维持保证金率，MVP不分档',
   price_tick                DECIMAL(18,8) NOT NULL DEFAULT 0 COMMENT '价格最小变动单位，0=不校验',
   volume_step                DECIMAL(18,8) NOT NULL DEFAULT 0 COMMENT '数量步长，0=不校验',
   min_volume                DECIMAL(18,8) NOT NULL DEFAULT 0,
@@ -36,6 +34,22 @@ CREATE TABLE IF NOT EXISTS coins (
   funding_rate_cap          DECIMAL(10,6) NOT NULL DEFAULT 0.007500 COMMENT '资金费率上下限，0=不限制',
   created_at                DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (symbol)
+) ENGINE=InnoDB;
+
+-- 保证金分档(风险限额)：一个symbol配多档，按tier(1开始)从小到大对应名义价值从低到高。
+-- maintenance_amount是速算扣除数，让跨档位时维持保证金连续，公式=名义价值*maintenance_margin_rate
+-- -maintenance_amount，见internal/service/position.go的TierFor/MaintenanceMarginTotal。
+-- 每个symbol必须至少配一档，没有配置分档的合约不允许开仓(风控判断没有依据)
+CREATE TABLE IF NOT EXISTS risk_limit_tiers (
+  id                      BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  symbol                  VARCHAR(32) NOT NULL,
+  tier                    TINYINT UNSIGNED NOT NULL COMMENT '档位序号，从1开始，越大风险越高',
+  max_notional            DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT '本档名义价值上限，0=不限(最后一档)',
+  maintenance_margin_rate DECIMAL(8,6) NOT NULL,
+  maintenance_amount      DECIMAL(26,16) NOT NULL DEFAULT 0,
+  max_leverage            INT UNSIGNED NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_risk_limit_tiers_symbol_tier (symbol, tier)
 ) ENGINE=InnoDB;
 
 -- 委托单
@@ -76,7 +90,8 @@ CREATE TABLE IF NOT EXISTS positions (
   version           INT UNSIGNED NOT NULL DEFAULT 0,
   update_time       BIGINT UNSIGNED NOT NULL,
   PRIMARY KEY (id),
-  UNIQUE KEY uk_positions_uid_symbol_side (uid, symbol, side)
+  UNIQUE KEY uk_positions_uid_symbol_side (uid, symbol, side),
+  KEY idx_positions_symbol (symbol) COMMENT '资金费率结算按symbol批量查仓位用，uid_symbol_side联合键因为uid在最前面覆盖不到这个查询'
 ) ENGINE=InnoDB;
 
 -- 成交记录
@@ -146,9 +161,25 @@ CREATE TABLE IF NOT EXISTS funding_rate_history (
   UNIQUE KEY uk_funding_rate_history_symbol_time (symbol, funding_time)
 ) ENGINE=InnoDB;
 
--- 演示用初始合约配置，跟Java版本地环境的BTCUSDT/ETHUSDT参数对齐，方便对照测试
-INSERT INTO coins (symbol, base_coin_scale, price_scale, max_leverage, maker_fee, taker_fee, maintenance_margin_rate, min_volume)
+-- 演示用初始合约配置，方便本地对照测试
+INSERT INTO coins (symbol, base_coin_scale, price_scale, maker_fee, taker_fee, min_volume)
 VALUES
-  ('BTCUSDT', 3, 1, 125, 0.000200, 0.000500, 0.005000, 0.001),
-  ('ETHUSDT', 2, 2, 100, 0.000200, 0.000500, 0.005000, 0.01)
+  ('BTCUSDT', 3, 1, 0.000200, 0.000500, 0.001),
+  ('ETHUSDT', 2, 2, 0.000200, 0.000500, 0.01)
+ON DUPLICATE KEY UPDATE symbol = symbol;
+
+-- 演示用保证金分档：maintenance_amount(速算扣除数)是按"跨档位维持保证金连续"手工算好的常量，
+-- 不是运行时推导——每一档的值=上一档在其上限名义价值处的维持保证金，减去本档费率在同一个
+-- 名义价值下算出来的数值，公式推导见表头注释
+INSERT INTO risk_limit_tiers (symbol, tier, max_notional, maintenance_margin_rate, maintenance_amount, max_leverage)
+VALUES
+  ('BTCUSDT', 1, 50000,      0.004000, 0,      125),
+  ('BTCUSDT', 2, 250000,     0.005000, 50,     100),
+  ('BTCUSDT', 3, 1000000,    0.006500, 425,    50),
+  ('BTCUSDT', 4, 5000000,    0.010000, 3925,   20),
+  ('BTCUSDT', 5, 0,          0.025000, 78925,  5),
+  ('ETHUSDT', 1, 50000,      0.004000, 0,      100),
+  ('ETHUSDT', 2, 250000,     0.005000, 50,     75),
+  ('ETHUSDT', 3, 1000000,    0.006500, 425,    40),
+  ('ETHUSDT', 4, 0,          0.015000, 8925,   10)
 ON DUPLICATE KEY UPDATE symbol = symbol;
