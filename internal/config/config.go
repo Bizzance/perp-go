@@ -16,6 +16,7 @@ type Config struct {
 	LiquidationOrderTimeoutMs int64 // 强平单挂单排队超时兜底阈值
 	RiskScanIntervalMs        int64 // 强平扫描周期
 	MarkPriceEmaAlpha         float64
+	FundingSampleIntervalMs   int64 // 资金费率溢价采样周期，采样越密集TWAP越准
 }
 
 func envOr(key, def string) string {
@@ -34,6 +35,7 @@ func Load() Config {
 		APIAddr:                   envOr("PERP_API_ADDR", ":7001"),
 		LiquidationOrderTimeoutMs: 10_000,
 		RiskScanIntervalMs:        2_000,
-		MarkPriceEmaAlpha:         1.0, // 跟Java版local profile一致：标记价=最新成交价，不做平滑
+		MarkPriceEmaAlpha:         1.0, // 标记价=最新成交价，不做平滑
+		FundingSampleIntervalMs:   60_000,
 	}
 }

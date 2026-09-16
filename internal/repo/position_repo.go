@@ -30,11 +30,18 @@ func (r *PositionRepo) FindByUID(ctx context.Context, uid uint64) ([]model.Posit
 	return positions, err
 }
 
-// FindAllOpen 风控扫描用：全部还有仓位的账户uid去重列表
+// FindAllOpenUIDs 风控扫描用：全部还有仓位的账户uid去重列表
 func (r *PositionRepo) FindAllOpenUIDs(ctx context.Context) ([]uint64, error) {
 	var uids []uint64
 	err := r.db.SelectContext(ctx, &uids, `SELECT DISTINCT uid FROM positions WHERE volume > 0`)
 	return uids, err
+}
+
+// FindOpenBySymbol 资金费率结算用：这个symbol下全部还有仓位的记录，不分uid
+func (r *PositionRepo) FindOpenBySymbol(ctx context.Context, symbol string) ([]model.Position, error) {
+	var positions []model.Position
+	err := r.db.SelectContext(ctx, &positions, `SELECT * FROM positions WHERE symbol = ? AND volume > 0`, symbol)
+	return positions, err
 }
 
 // ApplyOpenFill 开仓/加仓：加权平均开仓价、累加保证金——照抄Java版ContractPositionService.

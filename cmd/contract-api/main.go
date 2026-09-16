@@ -17,11 +17,11 @@ import (
 func main() {
 	cfg := config.Load()
 
-	conn, err := db.Connect(cfg.MySQLDSN)
+	dbConn, err := db.Connect(cfg.MySQLDSN)
 	if err != nil {
 		log.Fatalf("connect mysql: %v", err)
 	}
-	defer conn.Close()
+	defer dbConn.Close()
 
 	rdb, err := cache.Connect(cfg.RedisAddr, cfg.RedisPass)
 	if err != nil {
@@ -31,18 +31,20 @@ func main() {
 	producer := mq.NewProducer(cfg.KafkaBrokers)
 	defer producer.Close()
 
-	accountRepo := repo.NewAccountRepo(conn)
-	coinRepo := repo.NewCoinRepo(conn)
-	orderRepo := repo.NewOrderRepo(conn)
-	positionRepo := repo.NewPositionRepo(conn)
-	tradeRepo := repo.NewTradeRepo(conn)
-	txRepo := repo.NewTxRepo(conn)
+	accountRepo := repo.NewAccountRepo(dbConn)
+	coinRepo := repo.NewCoinRepo(dbConn)
+	orderRepo := repo.NewOrderRepo(dbConn)
+	positionRepo := repo.NewPositionRepo(dbConn)
+	tradeRepo := repo.NewTradeRepo(dbConn)
+	txRepo := repo.NewTxRepo(dbConn)
+	fundingRepo := repo.NewFundingRepo(dbConn)
 
 	markPriceSvc := service.NewMarkPriceService(rdb)
 	positionSvc := service.NewPositionService(positionRepo, coinRepo, markPriceSvc)
 	accountSvc := service.NewAccountService(accountRepo, positionSvc, txRepo)
+	fundingSvc := service.NewFundingService(rdb, coinRepo, positionRepo, fundingRepo, accountSvc, txRepo, markPriceSvc)
 
-	srv := api.NewServer(accountSvc, positionSvc, coinRepo, orderRepo, tradeRepo, markPriceSvc, producer)
+	srv := api.NewServer(accountSvc, positionSvc, coinRepo, orderRepo, tradeRepo, markPriceSvc, fundingSvc, producer)
 	log.Printf("contract-api listening on %s", cfg.APIAddr)
 	if err := srv.Router().Run(cfg.APIAddr); err != nil {
 		log.Fatalf("http server error: %v", err)

@@ -1,9 +1,6 @@
--- framework-go 第一期(MVP)表结构，独立新库(建议库名 perpgo)，不跟Java版
--- 00_framework 共享任何表——两边完全独立，字段命名走Go/snake_case习惯，不是照抄Java版字段名。
---
--- 范围对齐 ~/.claude/plans/elegant-plotting-pie.md 里"framework-go"一节的MVP范围：
--- 账户(无信用额度)、合约配置(固定维持保证金率，不分档)、委托/持仓/成交、标记价格、保险基金。
--- 不建：信用账户、条件单、资金费率历史、风控分档表——这些是后续阶段。
+-- framework-go 第一期(MVP)表结构，独立新库(建议库名 perpgo)。
+-- 账户(无信用额度)、合约配置(固定维持保证金率，不分档)、委托/持仓/成交、标记价格、指数价格与
+-- 资金费率结算、保险基金。不建：信用账户、条件单、逐仓模式、风控分档表——这些是后续阶段。
 
 CREATE DATABASE IF NOT EXISTS perpgo DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE perpgo;
@@ -35,6 +32,8 @@ CREATE TABLE IF NOT EXISTS coins (
   volume_step                DECIMAL(18,8) NOT NULL DEFAULT 0 COMMENT '数量步长，0=不校验',
   min_volume                DECIMAL(18,8) NOT NULL DEFAULT 0,
   max_volume                DECIMAL(18,8) NOT NULL DEFAULT 0 COMMENT '0=不限制',
+  funding_interval_hours    INT UNSIGNED NOT NULL DEFAULT 8 COMMENT '资金费率结算周期(小时)，对齐到从0点起的整点边界',
+  funding_rate_cap          DECIMAL(10,6) NOT NULL DEFAULT 0.007500 COMMENT '资金费率上下限，0=不限制',
   created_at                DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (symbol)
 ) ENGINE=InnoDB;
@@ -130,6 +129,21 @@ CREATE TABLE IF NOT EXISTS insurance_fund_ledger (
   remark        VARCHAR(255) NOT NULL DEFAULT '',
   create_time   BIGINT UNSIGNED NOT NULL,
   PRIMARY KEY (id)
+) ENGINE=InnoDB;
+
+-- 资金费率结算历史：每个symbol每个结算周期一行，funding_time是对齐到整点边界的周期时间戳，
+-- 同一个symbol同一个funding_time只会结算一次(FundingService.SettleIfDue靠查这张表判断
+-- 有没有结算过)，同时也是给客户端展示历史费率用的
+CREATE TABLE IF NOT EXISTS funding_rate_history (
+  id            BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  symbol        VARCHAR(32) NOT NULL,
+  funding_time  BIGINT UNSIGNED NOT NULL COMMENT '结算周期对齐后的毫秒时间戳',
+  rate          DECIMAL(10,6) NOT NULL COMMENT '这个周期的资金费率，已经clamp到funding_rate_cap',
+  mark_price    DECIMAL(18,8) NOT NULL,
+  index_price   DECIMAL(18,8) NOT NULL,
+  create_time   BIGINT UNSIGNED NOT NULL,
+  PRIMARY KEY (id),
+  UNIQUE KEY uk_funding_rate_history_symbol_time (symbol, funding_time)
 ) ENGINE=InnoDB;
 
 -- 演示用初始合约配置，跟Java版本地环境的BTCUSDT/ETHUSDT参数对齐，方便对照测试

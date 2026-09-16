@@ -26,12 +26,17 @@ type Server struct {
 	orders    *repo.OrderRepo
 	trades    *repo.TradeRepo
 	markPrice *service.MarkPriceService
+	funding   *service.FundingService
 	producer  *mq.Producer
 }
 
 func NewServer(accounts *service.AccountService, positions *service.PositionService, coins *repo.CoinRepo,
-	orders *repo.OrderRepo, trades *repo.TradeRepo, markPrice *service.MarkPriceService, producer *mq.Producer) *Server {
-	return &Server{accounts: accounts, positions: positions, coins: coins, orders: orders, trades: trades, markPrice: markPrice, producer: producer}
+	orders *repo.OrderRepo, trades *repo.TradeRepo, markPrice *service.MarkPriceService, funding *service.FundingService,
+	producer *mq.Producer) *Server {
+	return &Server{
+		accounts: accounts, positions: positions, coins: coins, orders: orders, trades: trades,
+		markPrice: markPrice, funding: funding, producer: producer,
+	}
 }
 
 func (s *Server) Router() *gin.Engine {
@@ -44,6 +49,9 @@ func (s *Server) Router() *gin.Engine {
 	r.GET("/order/history", s.orderHistory)
 	r.GET("/position/current", s.positionCurrent)
 	r.GET("/trade/history", s.tradeHistory)
+	r.GET("/funding/rate", s.fundingRate)
+	r.GET("/funding/history", s.fundingHistory)
+	r.POST("/index-price", s.setIndexPrice)
 	return r
 }
 
@@ -119,12 +127,20 @@ func (s *Server) addOrder(c *gin.Context) {
 		fail(c, 400, "合约不存在或已下架")
 		return
 	}
+	if leverage.Sign() <= 0 || leverage.GreaterThan(decimal.NewFromInt(int64(coin.MaxLeverage))) {
+		fail(c, 400, "杠杆倍数超出该合约允许的范围")
+		return
+	}
 
 	var price decimal.Decimal
 	if orderType == model.OrderTypeLimit {
 		price, err = decimal.NewFromString(c.PostForm("price"))
 		if err != nil || price.Sign() <= 0 {
 			fail(c, 400, "限价单price参数不合法")
+			return
+		}
+		if coin.PriceTick.Sign() > 0 && !price.Mod(coin.PriceTick).IsZero() {
+			fail(c, 400, "price不符合最小变动单位")
 			return
 		}
 	} else {
@@ -157,6 +173,18 @@ func (s *Server) addOrder(c *gin.Context) {
 	}
 	if amount.Sign() <= 0 {
 		fail(c, 400, "数量必须大于0")
+		return
+	}
+	if coin.MinVolume.Sign() > 0 && amount.LessThan(coin.MinVolume) {
+		fail(c, 400, "数量低于该合约最小下单量")
+		return
+	}
+	if coin.MaxVolume.Sign() > 0 && amount.GreaterThan(coin.MaxVolume) {
+		fail(c, 400, "数量超出该合约最大下单量")
+		return
+	}
+	if coin.VolumeStep.Sign() > 0 && !amount.Mod(coin.VolumeStep).IsZero() {
+		fail(c, 400, "数量不符合最小步长")
 		return
 	}
 
@@ -303,4 +331,49 @@ func (s *Server) tradeHistory(c *gin.Context) {
 		return
 	}
 	ok(c, trades)
+}
+
+func (s *Server) fundingRate(c *gin.Context) {
+	symbol := c.Query("symbol")
+	coin, err := s.coins.FindBySymbol(c.Request.Context(), symbol)
+	if err != nil || coin == nil {
+		fail(c, 400, "合约不存在")
+		return
+	}
+	now := service.NowMillis()
+	ok(c, gin.H{
+		"symbol":          symbol,
+		"estimatedRate":   s.funding.EstimateRate(c.Request.Context(), *coin),
+		"nextFundingTime": s.funding.NextFundingTime(*coin, now),
+	})
+}
+
+func (s *Server) fundingHistory(c *gin.Context) {
+	symbol := c.Query("symbol")
+	records, err := s.funding.History(c.Request.Context(), symbol, 100)
+	if err != nil {
+		fail(c, 500, err.Error())
+		return
+	}
+	ok(c, records)
+}
+
+// setIndexPrice 外部行情源(MVP阶段先靠脚本/运营手动喂，以后换成接入币安行情的适配器)推送
+// 指数价格——资金费率结算依赖这个值，见FundingService
+func (s *Server) setIndexPrice(c *gin.Context) {
+	symbol := c.PostForm("symbol")
+	if symbol == "" {
+		fail(c, 400, "symbol参数不能为空")
+		return
+	}
+	price, err := decimal.NewFromString(c.PostForm("price"))
+	if err != nil || price.Sign() <= 0 {
+		fail(c, 400, "price参数不合法")
+		return
+	}
+	if err := s.markPrice.SetIndexPrice(c.Request.Context(), symbol, price); err != nil {
+		fail(c, 500, err.Error())
+		return
+	}
+	ok(c, nil)
 }

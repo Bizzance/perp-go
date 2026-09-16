@@ -1,5 +1,5 @@
 // contract-engine：撮合+风控引擎进程。消费Kafka里的下单/撤单事件，维护每个symbol的内存
-// 订单簿，定时扫描做全仓强平判断——见plan文件"项目结构"一节。
+// 订单簿，定时扫描做全仓强平判断，定时采样+结算资金费率——见plan文件"项目结构"一节。
 package main
 
 import (
@@ -41,12 +41,14 @@ func main() {
 	tradeRepo := repo.NewTradeRepo(conn)
 	txRepo := repo.NewTxRepo(conn)
 	fundRepo := repo.NewInsuranceFundRepo(conn)
+	fundingRepo := repo.NewFundingRepo(conn)
 
 	markPriceSvc := service.NewMarkPriceService(rdb)
 	positionSvc := service.NewPositionService(positionRepo, coinRepo, markPriceSvc)
 	accountSvc := service.NewAccountService(accountRepo, positionSvc, txRepo)
 	settlementSvc := service.NewSettlementService(accountSvc, positionRepo, coinRepo, txRepo)
 	fundSvc := service.NewInsuranceFundService(fundRepo)
+	fundingSvc := service.NewFundingService(rdb, coinRepo, positionRepo, fundingRepo, accountSvc, txRepo, markPriceSvc)
 
 	matchingEngine := matching.NewEngine()
 	engineSvc := service.NewEngineService(matchingEngine, orderRepo, tradeRepo, accountSvc, positionSvc, settlementSvc, markPriceSvc, fundSvc)
@@ -93,6 +95,20 @@ func main() {
 				return
 			case <-ticker.C:
 				liquidationSvc.RiskScanOnce(ctx)
+			}
+		}
+	}()
+
+	go func() {
+		ticker := time.NewTicker(time.Duration(cfg.FundingSampleIntervalMs) * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				fundingSvc.SampleOnce(ctx)
+				fundingSvc.SettleIfDue(ctx, time.Now().UnixMilli())
 			}
 		}
 	}()

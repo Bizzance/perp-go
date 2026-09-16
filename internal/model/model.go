@@ -63,6 +63,7 @@ const (
 	TxFee              = "FEE"               // 交易手续费(负数)
 	TxRealizedPnl      = "REALIZED_PNL"      // 平仓已实现盈亏(可正可负)
 	TxLiquidationClear = "LIQUIDATION_CLEAR" // 强平结算后清算维持保证金缓冲进保险基金，用户侧记为负数
+	TxFundingFee       = "FUNDING_FEE"       // 资金费率结算，多头/空头互相划转，可正可负
 )
 
 type Account struct {
@@ -86,6 +87,8 @@ type Coin struct {
 	VolumeStep            decimal.Decimal `db:"volume_step"`
 	MinVolume             decimal.Decimal `db:"min_volume"`
 	MaxVolume             decimal.Decimal `db:"max_volume"`
+	FundingIntervalHours  int32           `db:"funding_interval_hours"`
+	FundingRateCap        decimal.Decimal `db:"funding_rate_cap"`
 }
 
 type Order struct {
@@ -176,4 +179,16 @@ type InsuranceFund struct {
 	ID      uint64          `db:"id"`
 	Balance decimal.Decimal `db:"balance"`
 	Version uint32          `db:"version"`
+}
+
+// FundingRateRecord 一个symbol一个资金费率结算周期的落库记录——审计+客户端历史费率查询用，
+// 见FundingService.SettleIfDue
+type FundingRateRecord struct {
+	ID          uint64          `db:"id"`
+	Symbol      string          `db:"symbol"`
+	FundingTime int64           `db:"funding_time"`
+	Rate        decimal.Decimal `db:"rate"`
+	MarkPrice   decimal.Decimal `db:"mark_price"`
+	IndexPrice  decimal.Decimal `db:"index_price"`
+	CreateTime  int64           `db:"create_time"`
 }

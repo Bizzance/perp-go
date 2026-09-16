@@ -1,5 +1,9 @@
 .vscode/
 .idea/
 
+.claude/
+CLAUDE.md
+
+temp/
 bin/
 *.log
