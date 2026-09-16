@@ -1,0 +1,152 @@
+package service
+
+import (
+	"context"
+	"errors"
+	"time"
+
+	"github.com/shopspring/decimal"
+
+	"perp-go/internal/model"
+	"perp-go/internal/repo"
+)
+
+var ErrInsufficientMargin = errors.New("可用余额不足，无法冻结保证金")
+
+type AccountService struct {
+	accounts  *repo.AccountRepo
+	positions *PositionService
+	tx        *repo.TxRepo
+}
+
+func NewAccountService(accounts *repo.AccountRepo, positions *PositionService, tx *repo.TxRepo) *AccountService {
+	return &AccountService{accounts: accounts, positions: positions, tx: tx}
+}
+
+func (s *AccountService) GetOrCreate(ctx context.Context, uid uint64) (*model.Account, error) {
+	return s.accounts.GetOrCreate(ctx, uid)
+}
+
+// AdjustBalance 合作方资金注入/扣减——amount正数=加钱，负数=扣钱，MVP阶段不做HMAC鉴权，
+// 由调用方(handler)在鉴权中间件补上之前先用明文uid参数占位，见plan文件
+func (s *AccountService) AdjustBalance(ctx context.Context, uid uint64, amount decimal.Decimal) error {
+	if amount.IsZero() {
+		return errors.New("调整金额不能为0")
+	}
+	acc, err := s.accounts.GetOrCreate(ctx, uid)
+	if err != nil {
+		return err
+	}
+	if err := s.accounts.SettleToAvailable(ctx, acc.ID, amount); err != nil {
+		return err
+	}
+	return s.tx.Insert(ctx, uid, "USDT", model.TxDeposit, amount, time.Now().UnixMilli())
+}
+
+// FreezeMargin 挂单开仓冻结保证金：available够就直接冻结；不够时看"available+全部持仓
+// 未实现盈亏"够不够——币安式"持仓浮盈也能当买力开新仓"，够就强制冻结、允许available变负。
+// 照抄这次会话给Java版ContractAccountService.freezeMargin做的同名改动，见plan文件。
+func (s *AccountService) FreezeMargin(ctx context.Context, uid uint64, amount decimal.Decimal) error {
+	acc, err := s.accounts.GetOrCreate(ctx, uid)
+	if err != nil {
+		return err
+	}
+	ok, err := s.accounts.FreezeFromAvailable(ctx, acc.ID, amount)
+	if err != nil {
+		return err
+	}
+	if ok {
+		return nil
+	}
+	fresh, err := s.accounts.FindFreshAvailable(ctx, acc.ID)
+	if err != nil {
+		return err
+	}
+	totalUnrealized, err := s.positions.TotalUnrealizedPnl(ctx, uid)
+	if err != nil {
+		return err
+	}
+	if fresh.Add(totalUnrealized).GreaterThanOrEqual(amount) {
+		return s.accounts.FreezeForceIntoNegative(ctx, acc.ID, amount)
+	}
+	return ErrInsufficientMargin
+}
+
+func (s *AccountService) UnfreezeMargin(ctx context.Context, uid uint64, amount decimal.Decimal) error {
+	acc, err := s.accounts.GetOrCreate(ctx, uid)
+	if err != nil {
+		return err
+	}
+	ok, err := s.accounts.UnfreezeMargin(ctx, acc.ID, amount)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return errors.New("冻结保证金不足")
+	}
+	return nil
+}
+
+func (s *AccountService) DecreaseFrozenMargin(ctx context.Context, uid uint64, amount decimal.Decimal) error {
+	acc, err := s.accounts.GetOrCreate(ctx, uid)
+	if err != nil {
+		return err
+	}
+	_, err = s.accounts.DecreaseFrozenMargin(ctx, acc.ID, amount)
+	return err
+}
+
+func (s *AccountService) SettleToAvailable(ctx context.Context, uid uint64, amount decimal.Decimal) error {
+	acc, err := s.accounts.GetOrCreate(ctx, uid)
+	if err != nil {
+		return err
+	}
+	return s.accounts.SettleToAvailable(ctx, acc.ID, amount)
+}
+
+func (s *AccountService) DeductFee(ctx context.Context, uid uint64, fee decimal.Decimal) error {
+	if fee.Sign() <= 0 {
+		return nil
+	}
+	acc, err := s.accounts.GetOrCreate(ctx, uid)
+	if err != nil {
+		return err
+	}
+	return s.accounts.DeductFee(ctx, acc.ID, fee)
+}
+
+func (s *AccountService) FindFreshAvailable(ctx context.Context, uid uint64) (decimal.Decimal, error) {
+	acc, err := s.accounts.GetOrCreate(ctx, uid)
+	if err != nil {
+		return decimal.Zero, err
+	}
+	return s.accounts.FindFreshAvailable(ctx, acc.ID)
+}
+
+// AccountView 查询接口用：账户原始字段+现算的未实现盈亏/权益，照抄这次会话给Java版
+// ContractAccountService.fillEquity做的同名改动
+type AccountView struct {
+	UID                uint64          `json:"uid"`
+	Available          decimal.Decimal `json:"available"`
+	FrozenMargin       decimal.Decimal `json:"frozenMargin"`
+	TotalUnrealizedPnl decimal.Decimal `json:"totalUnrealizedPnl"`
+	Equity             decimal.Decimal `json:"equity"`
+}
+
+func (s *AccountService) View(ctx context.Context, uid uint64) (*AccountView, error) {
+	acc, err := s.accounts.GetOrCreate(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+	total, err := s.positions.TotalUnrealizedPnl(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+	return &AccountView{
+		UID:                uid,
+		Available:          acc.Available,
+		FrozenMargin:       acc.FrozenMargin,
+		TotalUnrealizedPnl: total,
+		Equity:             acc.Available.Add(total),
+	}, nil
+}

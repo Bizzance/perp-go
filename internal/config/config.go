@@ -1,0 +1,39 @@
+// Package config 加载本地开发用的配置——MVP阶段直接用环境变量+默认值，不引入额外的配置文件
+// 格式/库，跟这个项目"本地跑起来简单"的一贯要求一致。
+package config
+
+import "os"
+
+type Config struct {
+	MySQLDSN     string // 形如 user:pass@tcp(host:port)/dbname?parseTime=true
+	RedisAddr    string
+	RedisPass    string
+	KafkaBrokers []string
+
+	APIAddr string // contract-api 监听地址
+
+	// 撮合/风控相关的可调参数，先用固定默认值，跟Java版local profile的量级对齐
+	LiquidationOrderTimeoutMs int64 // 强平单挂单排队超时兜底阈值
+	RiskScanIntervalMs        int64 // 强平扫描周期
+	MarkPriceEmaAlpha         float64
+}
+
+func envOr(key, def string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
+}
+
+func Load() Config {
+	return Config{
+		MySQLDSN:                  envOr("PERP_MYSQL_DSN", "perpgo:local123@tcp(127.0.0.1:3306)/perpgo?parseTime=true&loc=Local"),
+		RedisAddr:                 envOr("PERP_REDIS_ADDR", "127.0.0.1:6379"),
+		RedisPass:                 envOr("PERP_REDIS_PASS", "local123"),
+		KafkaBrokers:              []string{envOr("PERP_KAFKA_BROKER", "127.0.0.1:9092")},
+		APIAddr:                   envOr("PERP_API_ADDR", ":7001"),
+		LiquidationOrderTimeoutMs: 10_000,
+		RiskScanIntervalMs:        2_000,
+		MarkPriceEmaAlpha:         1.0, // 跟Java版local profile一致：标记价=最新成交价，不做平滑
+	}
+}
