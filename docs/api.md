@@ -228,3 +228,24 @@ HTTP响应`"结束本轮请求已提交"`只表示请求已受理，不代表撤
   "price": 64800.5
 }
 ```
+
+## 订单簿深度（`contract-engine`进程，不是`contract-api`）
+
+订单簿只存在于`contract-engine`进程的内存里，这一个接口不在上面`contract-api`的端口
+（默认`:7001`）上，而是`contract-engine`自己的轻量HTTP服务（默认`:7002`，
+`PERP_ENGINE_HTTP_ADDR`可配），理由见 [order-book.md](order-book.md#为什么深度接口开在contract-engine而不是contract-api)。
+
+### `GET /depth?symbol=BTCUSDT&levels=20`
+
+`levels`可省略，默认20档。返回按价格聚合的深度快照，不含单笔委托的uid/orderID：
+
+```json
+{
+  "code": 200,
+  "message": "success",
+  "data": {
+    "Bids": [{"Price": "64800", "Volume": "1.5", "Count": 3}],
+    "Asks": [{"Price": "64810", "Volume": "0.8", "Count": 1}]
+  }
+}
+```

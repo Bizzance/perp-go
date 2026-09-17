@@ -33,6 +33,22 @@ func (r *OrderRepo) FindByOrderID(ctx context.Context, orderID uint64) (*model.O
 	return &o, err
 }
 
+// FindByOrderIDs 批量按order_id查询——自成交保护一次撮合可能摘掉好几笔自己的挂单，
+// 批量查一次比每笔单独查一次(N次DB往返)更快，见EngineService.SubmitOrder
+func (r *OrderRepo) FindByOrderIDs(ctx context.Context, orderIDs []uint64) ([]model.Order, error) {
+	if len(orderIDs) == 0 {
+		return nil, nil
+	}
+	query, args, err := sqlx.In(`SELECT * FROM orders WHERE order_id IN (?)`, orderIDs)
+	if err != nil {
+		return nil, err
+	}
+	query = r.db.Rebind(query)
+	var orders []model.Order
+	err = r.db.SelectContext(ctx, &orders, query, args...)
+	return orders, err
+}
+
 func (r *OrderRepo) FindActiveByUID(ctx context.Context, uid uint64, symbol string) ([]model.Order, error) {
 	var orders []model.Order
 	if symbol == "" {

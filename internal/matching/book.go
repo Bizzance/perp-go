@@ -1,6 +1,7 @@
 package matching
 
 import (
+	"sort"
 	"sync"
 
 	"github.com/shopspring/decimal"
@@ -40,135 +41,275 @@ type RestingOrder struct {
 
 // Fill 一次撮合成交——taker是主动进来吃单的一方(incoming)，maker是原来挂在簿子上被动等到的一方
 type Fill struct {
-	Price      decimal.Decimal // 价格
-	Volume     decimal.Decimal //
+	Price      decimal.Decimal
+	Volume     decimal.Decimal
 	MakerOrder *RestingOrder
 	TakerOrder *RestingOrder
 }
 
-// Book 单个symbol的订单簿——bids/asks各自按"价格优先、同价格先进先出"排序，用简单切片+
-// 每次插入排序：MVP阶段成交量级不需要更高级的数据结构(跳表/红黑树)，先用最直接的实现
-type Book struct {
-	mu   sync.Mutex
-	bids []*RestingOrder // 买盘，价格从高到低
-	asks []*RestingOrder // 卖盘，价格从低到高
+// orderNode 双向链表节点，同时是map查找的目标——O(1)按orderID撤单靠的是map[orderID]*orderNode
+// 直接定位到链表节点，从链表摘除是O(1)（有prev/next指针，不用像切片那样整体搬移）
+type orderNode struct {
+	order      *RestingOrder
+	prev, next *orderNode
+	level      *priceLevel // 直接指回所在价格档位，撤单时不需要再按价格二分查找一次
 }
 
-func NewBook() *Book { return &Book{} }
+// priceLevel 一个价格档位：这个价格上排队的全部委托，按时间优先的FIFO双向链表，另外维护
+// 档位汇总量/笔数，深度查询(Depth)和撮合时判断"这一档还有没有单"都是O(1)读取，不用遍历链表
+type priceLevel struct {
+	price       decimal.Decimal
+	head, tail  *orderNode
+	totalVolume decimal.Decimal
+	count       int
+}
 
-// 尝试撮合一笔新进来的委托，返回成交列表+撮合完之后还剩多少量。
-// LIMIT单剩余量>0时，由调用方决定要不要挂回簿子(调CancelableRest)；
-// MARKET单剩余量直接由调用方释放，不挂簿。
-func (b *Book) Match(order *RestingOrder) []Fill {
+// pushBack 挂到这一档队尾(价格-时间优先里"时间"这个维度的体现)
+func (pl *priceLevel) pushBack(order *RestingOrder) *orderNode {
+	node := &orderNode{order: order, level: pl}
+	if pl.tail == nil {
+		pl.head, pl.tail = node, node
+	} else {
+		node.prev = pl.tail
+		pl.tail.next = node
+		pl.tail = node
+	}
+	pl.totalVolume = pl.totalVolume.Add(order.Remaining)
+	pl.count++
+	return node
+}
+
+// Book 单个symbol的订单簿：bids/asks各自是按价格排序的档位数组(sort.Search二分定位最优价/
+// 插入点)，每个档位内部是按时间先后排队的FIFO双向链表，另外一个map支持O(1)按orderID撤单——
+// 用"档位数组+组内链表"而不是红黑树/跳表，是因为活跃价格档位数量远小于挂单笔数，best
+// price/撮合热路径直接读数组端点是O(1)，档位本身的增删(只在某个价格第一次/最后一次有单时
+// 发生)频率远低于订单的挂/撤/成交，详见docs/order-book.md
+// mu用RWMutex而不是普通Mutex：Depth()是唯一的只读操作，而且是这个订单簿唯一会被外部
+// (HTTP深度查询接口)高频调用的入口，用读写锁让多个并发的深度查询之间不用互相排队，只有
+// 真正改状态的Match/Rest/Cancel才需要独占锁——减少深度查询接口跟撮合热路径抢锁的开销
+type Book struct {
+	mu   sync.RWMutex
+	bids []*priceLevel // 价格从高到低
+	asks []*priceLevel // 价格从低到高
+	byID map[uint64]*orderNode
+}
+
+func NewBook() *Book {
+	return &Book{byID: make(map[uint64]*orderNode)}
+}
+
+// findLevelIndex 在有序档位数组里二分查找price对应的档位。buy=true表示数组按价格从高到低
+// 排序(bids)，false表示从低到高(asks)。没精确找到时返回的索引是"应该插入的位置"，
+// 跟sort.Search的约定一致，插入/查找共用同一个函数
+func findLevelIndex(levels []*priceLevel, price decimal.Decimal, buy bool) (int, bool) {
+	i := sort.Search(len(levels), func(i int) bool {
+		if buy {
+			return levels[i].price.LessThanOrEqual(price)
+		}
+		return levels[i].price.GreaterThanOrEqual(price)
+	})
+	if i < len(levels) && levels[i].price.Equal(price) {
+		return i, true
+	}
+	return i, false
+}
+
+func insertLevelAt(levels []*priceLevel, i int, pl *priceLevel) []*priceLevel {
+	levels = append(levels, nil)
+	copy(levels[i+1:], levels[i:])
+	levels[i] = pl
+	return levels
+}
+
+func removeLevelAt(levels []*priceLevel, i int) []*priceLevel {
+	return append(levels[:i], levels[i+1:]...)
+}
+
+// getOrCreateLevel 找到(或创建)price对应的档位——找不到就在正确的位置插入一个新档位，
+// 保持数组有序
+func (b *Book) getOrCreateLevel(price decimal.Decimal, buy bool) *priceLevel {
+	levels := b.bids
+	if !buy {
+		levels = b.asks
+	}
+	i, found := findLevelIndex(levels, price, buy)
+	if found {
+		return levels[i]
+	}
+	pl := &priceLevel{price: price}
+	levels = insertLevelAt(levels, i, pl)
+	if buy {
+		b.bids = levels
+	} else {
+		b.asks = levels
+	}
+	return pl
+}
+
+// removeLevelFromIndex 档位空了，从档位数组里摘掉——只在某个价格最后一笔挂单被吃完/撤销
+// 时才会调用，频率远低于订单级别的操作
+func (b *Book) removeLevelFromIndex(pl *priceLevel, buy bool) {
+	levels := b.bids
+	if !buy {
+		levels = b.asks
+	}
+	i, found := findLevelIndex(levels, pl.price, buy)
+	if !found {
+		return
+	}
+	levels = removeLevelAt(levels, i)
+	if buy {
+		b.bids = levels
+	} else {
+		b.asks = levels
+	}
+}
+
+// unlinkAndMaybeRemoveLevel 纯链表摘除+count--+map删除，档位空了顺带从档位数组里摘掉——
+// 不碰totalVolume，调用方(applyFill/cancelNode)已经按各自的场景把汇总量减好了
+func (b *Book) unlinkAndMaybeRemoveLevel(node *orderNode, buy bool) {
+	pl := node.level
+	if node.prev != nil {
+		node.prev.next = node.next
+	} else {
+		pl.head = node.next
+	}
+	if node.next != nil {
+		node.next.prev = node.prev
+	} else {
+		pl.tail = node.prev
+	}
+	pl.count--
+	delete(b.byID, node.order.OrderID)
+	if pl.head == nil {
+		b.removeLevelFromIndex(pl, buy)
+	}
+}
+
+// applyFill 处理一笔成交对某个挂单节点的影响：减少这个节点的剩余量、同步减少所在档位的
+// 汇总量；如果这个节点被完全吃掉，顺带从链表/map/档位数组里摘除
+func (b *Book) applyFill(node *orderNode, vol decimal.Decimal, buy bool) {
+	node.order.Remaining = node.order.Remaining.Sub(vol)
+	node.level.totalVolume = node.level.totalVolume.Sub(vol)
+	if node.order.Remaining.Sign() <= 0 {
+		b.unlinkAndMaybeRemoveLevel(node, buy)
+	}
+}
+
+// cancelNode 撤销/自成交摘除一个还没被成交动过的节点：把它剩余的全部量从档位汇总里扣掉，
+// 然后摘除——跟applyFill的区别是这里节点的Remaining还没被改动过，要按"全部剩余量"扣
+func (b *Book) cancelNode(node *orderNode, buy bool) {
+	node.level.totalVolume = node.level.totalVolume.Sub(node.order.Remaining)
+	b.unlinkAndMaybeRemoveLevel(node, buy)
+}
+
+// Match 尝试撮合一笔新进来的委托，返回成交列表 + 因为自成交保护被摘掉的maker委托列表。
+// LIMIT单未完全成交的剩余部分，由调用方决定要不要调Rest挂回簿子；MARKET单剩余量直接由
+// 调用方释放，不挂簿。
+//
+// 自成交保护(STP，取消maker模式)：撮合过程中如果对手盘(maker)跟主动吃单方(taker)是
+// 同一个uid，不产生这笔成交——把这个maker摘掉(当正常撤单处理，调用方要负责退保证金)，
+// taker继续往下尝试撮合。不打乱队列里其他人的排队顺序(自己的单子被摘掉后，后面排队的人
+// 自然前移)，也不让taker因为撞到自己的单子就吃不到别人的流动性，是主流交易所的默认STP行为
+func (b *Book) Match(order *RestingOrder) (fills []Fill, selfCanceled []*RestingOrder) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
-	var fills []Fill
 	isMarket := order.Price.IsZero() // 价格为0就是市价单
 	if order.Direction == Buy {
-		// 买单
 		for order.Remaining.Sign() > 0 && len(b.asks) > 0 {
-			best := b.asks[0] // 卖一
-			if !isMarket && best.Price.GreaterThan(order.Price) {
-				// 限价单且订单价小于卖一价
+			level := b.asks[0] // 卖一档
+			if !isMarket && level.price.GreaterThan(order.Price) {
 				break
 			}
-			// 可撮合：
-			// 1.市价单
-			// 2.限价单，订单价格大于卖一价
-			vol := decimal.Min(order.Remaining, best.Remaining)
-			fills = append(fills, Fill{Price: best.Price, Volume: vol, MakerOrder: best, TakerOrder: order})
-			order.Remaining = order.Remaining.Sub(vol)
-			best.Remaining = best.Remaining.Sub(vol)
-			if best.Remaining.Sign() <= 0 {
-				b.asks = b.asks[1:]
+			node := level.head // 这一档排在最前面的委托
+			if node.order.UID == order.UID {
+				selfCanceled = append(selfCanceled, node.order)
+				b.cancelNode(node, false)
+				continue
 			}
+			vol := decimal.Min(order.Remaining, node.order.Remaining)
+			fills = append(fills, Fill{Price: level.price, Volume: vol, MakerOrder: node.order, TakerOrder: order})
+			order.Remaining = order.Remaining.Sub(vol)
+			b.applyFill(node, vol, false)
 		}
 	} else {
-		// 卖单
 		for order.Remaining.Sign() > 0 && len(b.bids) > 0 {
-			best := b.bids[0] // 买一
-			if !isMarket && best.Price.LessThan(order.Price) {
-				// 限价单且买一价小于订单价格
+			level := b.bids[0] // 买一档
+			if !isMarket && level.price.LessThan(order.Price) {
 				break
 			}
-			// 可撮合：
-			// 1.市价单
-			// 2.限价单，订单价小于买一价
-			vol := decimal.Min(order.Remaining, best.Remaining)
-			fills = append(fills, Fill{Price: best.Price, Volume: vol, MakerOrder: best, TakerOrder: order})
-			order.Remaining = order.Remaining.Sub(vol)
-			best.Remaining = best.Remaining.Sub(vol)
-			if best.Remaining.Sign() <= 0 {
-				b.bids = b.bids[1:]
+			node := level.head
+			if node.order.UID == order.UID {
+				selfCanceled = append(selfCanceled, node.order)
+				b.cancelNode(node, true)
+				continue
 			}
+			vol := decimal.Min(order.Remaining, node.order.Remaining)
+			fills = append(fills, Fill{Price: level.price, Volume: vol, MakerOrder: node.order, TakerOrder: order})
+			order.Remaining = order.Remaining.Sub(vol)
+			b.applyFill(node, vol, true)
 		}
 	}
-	return fills
+	return fills, selfCanceled
 }
 
-// 把未完全成交的LIMIT单剩余部分挂进簿子，按价格-时间优先插入到正确位置
+// Rest 把未完全成交的LIMIT单剩余部分挂进簿子，按价格-时间优先插入到正确位置
 func (b *Book) Rest(order *RestingOrder) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if order.Direction == Buy {
-		b.bids = insertSorted(b.bids, order, func(a, x *RestingOrder) bool {
-			if !a.Price.Equal(x.Price) {
-				return a.Price.GreaterThan(x.Price) // 买盘价格从高到低
-			}
-			return a.EntryTime < x.EntryTime
-		})
-	} else {
-		b.asks = insertSorted(b.asks, order, func(a, x *RestingOrder) bool {
-			if !a.Price.Equal(x.Price) {
-				return a.Price.LessThan(x.Price) // 卖盘价格从低到高
-			}
-			return a.EntryTime < x.EntryTime
-		})
-	}
+	buy := order.Direction == Buy
+	level := b.getOrCreateLevel(order.Price, buy)
+	b.byID[order.OrderID] = level.pushBack(order)
 }
 
-// Cancel 从簿子里摘掉一笔委托，返回被摘掉时还剩多少量(调用方要把这部分保证金退回)
+// Cancel 从簿子里摘掉一笔委托，返回被摘掉时还剩多少量(调用方要把这部分保证金退回)，
+// O(1)(map查找定位节点+链表摘除)，档位是否需要从数组里摘除是唯一的O(log m)+O(m)开销
+// (m=档位数)，只在这一档最后一笔单被摘掉时才发生
 func (b *Book) Cancel(orderID uint64) (decimal.Decimal, bool) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
-	if r, ok := removeByID(b.bids, orderID); ok {
-		b.bids = r.remaining
-		return r.order.Remaining, true
+	node, ok := b.byID[orderID]
+	if !ok {
+		return decimal.Zero, false
 	}
-	if r, ok := removeByID(b.asks, orderID); ok {
-		b.asks = r.remaining
-		return r.order.Remaining, true
-	}
-	return decimal.Zero, false
+	remaining := node.order.Remaining
+	b.cancelNode(node, node.order.Direction == Buy)
+	return remaining, true
 }
 
-type removeResult struct {
-	remaining []*RestingOrder
-	order     *RestingOrder
+// PriceLevel 深度快照里聚合后的一档——只暴露价格/总量/笔数，不暴露单笔委托的uid/orderID，
+// 公开的深度数据不该泄露个人挂单归属
+type PriceLevel struct {
+	Price  decimal.Decimal
+	Volume decimal.Decimal // 这一档全部挂单剩余量之和
+	Count  int             // 这一档挂单笔数
 }
 
-func removeByID(list []*RestingOrder, orderID uint64) (removeResult, bool) {
-	for i, o := range list {
-		if o.OrderID == orderID {
-			out := make([]*RestingOrder, 0, len(list)-1)
-			out = append(out, list[:i]...)
-			out = append(out, list[i+1:]...)
-			return removeResult{remaining: out, order: o}, true
-		}
-	}
-	return removeResult{}, false
+type DepthSnapshot struct {
+	Bids []PriceLevel // 价格从高到低
+	Asks []PriceLevel // 价格从低到高
 }
 
-func insertSorted(list []*RestingOrder, item *RestingOrder, less func(a, x *RestingOrder) bool) []*RestingOrder {
-	i := 0
-	for i < len(list) && less(list[i], item) {
-		i++
+// Depth 按档位聚合的订单簿快照，最多返回每边maxLevels档，<=0表示不限（返回全部档位）
+func (b *Book) Depth(maxLevels int) DepthSnapshot {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return DepthSnapshot{
+		Bids: snapshotLevels(b.bids, maxLevels),
+		Asks: snapshotLevels(b.asks, maxLevels),
 	}
-	out := make([]*RestingOrder, 0, len(list)+1)
-	out = append(out, list[:i]...)
-	out = append(out, item)
-	out = append(out, list[i:]...)
+}
+
+func snapshotLevels(levels []*priceLevel, maxLevels int) []PriceLevel {
+	n := len(levels)
+	if maxLevels > 0 && maxLevels < n {
+		n = maxLevels
+	}
+	out := make([]PriceLevel, n)
+	for i := 0; i < n; i++ {
+		out[i] = PriceLevel{Price: levels[i].price, Volume: levels[i].totalVolume, Count: levels[i].count}
+	}
 	return out
 }
 

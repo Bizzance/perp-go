@@ -12,8 +12,9 @@ type Config struct {
 	RedisPass    string
 	KafkaBrokers []string
 
-	APIAddr string // contract-api 监听地址
-	NodeID  uint64 // service.NextID用的雪花算法node id，不同进程/实例必须不同
+	APIAddr        string // contract-api 监听地址
+	EngineHTTPAddr string // contract-engine自己的轻量HTTP服务监听地址(目前只有订单簿深度查询)
+	NodeID         uint64 // service.NextID用的雪花算法node id，不同进程/实例必须不同
 
 	// 撮合/风控相关的可调参数，先用固定默认值
 	LiquidationOrderTimeoutMs int64 // 强平单挂单排队超时兜底阈值
@@ -49,6 +50,7 @@ func Load(defaultNodeID uint64) Config {
 		RedisPass:                 envOr("PERP_REDIS_PASS", "local123"),
 		KafkaBrokers:              []string{envOr("PERP_KAFKA_BROKER", "127.0.0.1:9092")},
 		APIAddr:                   envOr("PERP_API_ADDR", ":7001"),
+		EngineHTTPAddr:            envOr("PERP_ENGINE_HTTP_ADDR", ":7002"),
 		NodeID:                    nodeID,
 		LiquidationOrderTimeoutMs: 10_000,
 		RiskScanIntervalMs:        2_000,

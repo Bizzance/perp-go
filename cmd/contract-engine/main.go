@@ -10,6 +10,7 @@ import (
 	"syscall"
 	"time"
 
+	"perp-go/internal/api"
 	"perp-go/internal/cache"
 	"perp-go/internal/config"
 	"perp-go/internal/db"
@@ -142,6 +143,14 @@ func main() {
 			case <-ticker.C:
 				conditionalOrderSvc.ScanOnce(ctx)
 			}
+		}
+	}()
+
+	engineSrv := api.NewEngineServer(matchingEngine, coinRepo)
+	go func() {
+		log.Printf("contract-engine http(深度查询等) listening on %s", cfg.EngineHTTPAddr)
+		if err := engineSrv.Router().Run(cfg.EngineHTTPAddr); err != nil {
+			log.Fatalf("contract-engine http server error: %v", err)
 		}
 	}()
 

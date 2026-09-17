@@ -67,11 +67,41 @@ func (e *EngineService) SubmitOrder(ctx context.Context, order *model.Order, ent
 	}
 	// 拿到订单对应的订单簿
 	book := e.matchingEngine.BookFor(order.Symbol)
-	fills := book.Match(resting)
+	fills, selfCanceled := book.Match(resting)
 
 	for _, f := range fills {
 		if err := e.settleOneFill(ctx, order, f); err != nil {
 			log.Printf("[ERROR] settle fill failed, orderId=%d: %v", order.OrderID, err)
+		}
+	}
+	// 自成交保护(STP)摘掉的maker：book.Match内部已经把它们从订单簿里摘掉了，这里只需要
+	// 按正常撤单的收尾逻辑处理DB状态+退保证金。用RestingOrder.Remaining(book.Match返回的、
+	// 摘除时刻内存里权威的剩余量)，不用再去DB反查——两者理论上一致，但直接用内存值更直接。
+	// 一笔taker可能一次撮合摘掉好几笔自己的挂单(比如大额市价单扫过自己挂的一串限价单)，
+	// 批量查一次DB(FindByOrderIDs)而不是每笔单独查一次，避免N次DB往返串行拖慢下单主流程
+	if len(selfCanceled) > 0 {
+		ids := make([]uint64, len(selfCanceled))
+		for i, c := range selfCanceled {
+			ids[i] = c.OrderID
+		}
+		orders, err := e.orders.FindByOrderIDs(ctx, ids)
+		if err != nil {
+			log.Printf("[ERROR] 自成交保护撤单批量查询委托记录失败: %v", err)
+		} else {
+			byID := make(map[uint64]model.Order, len(orders))
+			for _, o := range orders {
+				byID[o.OrderID] = o
+			}
+			for _, canceled := range selfCanceled {
+				o, found := byID[canceled.OrderID]
+				if !found {
+					log.Printf("[ERROR] 自成交保护撤单找不到委托记录, orderId=%d", canceled.OrderID)
+					continue
+				}
+				if err := e.finalizeOrderCancel(ctx, &o, canceled.Remaining); err != nil {
+					log.Printf("[ERROR] 自成交保护撤单收尾失败, orderId=%d: %v", canceled.OrderID, err)
+				}
+			}
 		}
 	}
 
@@ -317,8 +347,24 @@ func (e *EngineService) CancelOrder(ctx context.Context, o *model.Order) error {
 	if !ok {
 		remaining = o.RemainingAmount()
 	}
-	if _, err := e.orders.MarkCanceled(ctx, o.OrderID, NowMillis()); err != nil {
+	return e.finalizeOrderCancel(ctx, o, remaining)
+}
+
+// finalizeOrderCancel 统一负责"标记DB为CANCELED+按剩余量释放冻结保证金"——CancelOrder
+// (正常撤单接口触发)和自成交保护(book.Match内部摘除maker，见SubmitOrder)都要走到这一步，
+// 只是"从订单簿摘除"这一步各自的时机/方式不同(前者显式调book.Cancel，后者book.Match内部
+// 已经摘完了)，DB落库+保证金释放的逻辑完全一样，不应该写两份
+func (e *EngineService) finalizeOrderCancel(ctx context.Context, o *model.Order, remaining decimal.Decimal) error {
+	marked, err := e.orders.MarkCanceled(ctx, o.OrderID, NowMillis())
+	if err != nil {
 		return err
+	}
+	if !marked {
+		// MarkCanceled的WHERE status IN ('open','partially_filled')没匹配到行，说明这笔
+		// 委托已经被别的路径终结过了(比如正常撤单和自成交保护并发撞到同一笔单子，或者
+		// CloseRound用的是撤单前拍的旧快照、这笔单子已经在别处被处理完)——不能再往下走释放
+		// 保证金，否则同一笔冻结会被重复释放，凭空多出一笔钱
+		return nil
 	}
 	if o.Action == model.ActionOpen && remaining.Sign() > 0 {
 		// 按剩余比例分别算这笔委托冻结的available/credit部分该释放多少，不能笼统释放到

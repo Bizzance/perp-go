@@ -10,8 +10,11 @@
     - `LONG+OPEN`、`SHORT+CLOSE` 都是买方（要拉高价格才能成交）
     - `SHORT+OPEN`、`LONG+CLOSE` 都是卖方
     - 见`matching.DirectionOf`
+- 同一个uid的买卖单不会互相撮合（自成交保护），撮合过程中撞上自己的挂单会把那笔挂单摘掉
+  当撤单处理，taker继续往下吃非自己的流动性
 
-订单簿用简单切片+每次插入排序实现，MVP阶段成交量级不需要更高级的数据结构（跳表/红黑树）。
+数据结构（价格档位数组二分定位+组内FIFO链表+orderID索引map，O(1)撤单）、自成交保护的
+具体行为、深度查询接口，详见 [order-book.md](order-book.md)。
 
 ## 下单校验链（`POST /order/add`）
 
