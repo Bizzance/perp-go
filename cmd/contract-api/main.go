@@ -15,7 +15,8 @@ import (
 )
 
 func main() {
-	cfg := config.Load()
+	cfg := config.Load(0) // contract-api默认node id=0，跟contract-engine(默认1)区分开
+	service.InitNodeID(cfg.NodeID)
 
 	dbConn, err := db.Connect(cfg.MySQLDSN)
 	if err != nil {

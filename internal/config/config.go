@@ -1,6 +1,10 @@
 package config
 
-import "os"
+import (
+	"log"
+	"os"
+	"strconv"
+)
 
 type Config struct {
 	MySQLDSN     string // 形如 user:pass@tcp(host:port)/dbname?parseTime=true
@@ -9,6 +13,7 @@ type Config struct {
 	KafkaBrokers []string
 
 	APIAddr string // contract-api 监听地址
+	NodeID  uint64 // service.NextID用的雪花算法node id，不同进程/实例必须不同
 
 	// 撮合/风控相关的可调参数，先用固定默认值
 	LiquidationOrderTimeoutMs int64 // 强平单挂单排队超时兜底阈值
@@ -25,13 +30,26 @@ func envOr(key, def string) string {
 	return def
 }
 
-func Load() Config {
+// Load defaultNodeID是这个进程类型没设PERP_NODE_ID环境变量时用的默认node id——单实例
+// 部署时contract-api/contract-engine各自传一个固定值(见各自main.go)，不需要额外配置就能
+// 保证两边不撞。要横向扩展(同一进程类型跑多个实例)必须显式设PERP_NODE_ID区分，不能指望
+// 默认值——多个实例传同一个defaultNodeID会导致NextID理论上生成重复ID
+func Load(defaultNodeID uint64) Config {
+	nodeID := defaultNodeID
+	if v := os.Getenv("PERP_NODE_ID"); v != "" {
+		parsed, err := strconv.ParseUint(v, 10, 64)
+		if err != nil {
+			log.Fatalf("PERP_NODE_ID不合法: %v", err)
+		}
+		nodeID = parsed
+	}
 	return Config{
 		MySQLDSN:                  envOr("PERP_MYSQL_DSN", "perpgo:local123@tcp(127.0.0.1:3306)/perpgo?parseTime=true&loc=Local"),
 		RedisAddr:                 envOr("PERP_REDIS_ADDR", "127.0.0.1:6379"),
 		RedisPass:                 envOr("PERP_REDIS_PASS", "local123"),
 		KafkaBrokers:              []string{envOr("PERP_KAFKA_BROKER", "127.0.0.1:9092")},
 		APIAddr:                   envOr("PERP_API_ADDR", ":7001"),
+		NodeID:                    nodeID,
 		LiquidationOrderTimeoutMs: 10_000,
 		RiskScanIntervalMs:        2_000,
 		MarkPriceEmaAlpha:         1.0, // 标记价=最新成交价，不做平滑
