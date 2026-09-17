@@ -9,6 +9,9 @@ USE perpgo;
 CREATE TABLE IF NOT EXISTS accounts (
   id             BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   uid            BIGINT UNSIGNED NOT NULL,
+  is_insured     TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否投保：0-不投保，1-投保',
+  round          BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '轮数',
+  credit         DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT '信用额度',
   available      DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT '可用余额，可能为负(全仓下用持仓浮盈当买力借出去的部分)',
   frozen_margin  DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT '挂单冻结保证金',
   version        INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '乐观锁版本号，MVP阶段原子UPDATE为主，这个字段先留着备用',
@@ -17,6 +20,29 @@ CREATE TABLE IF NOT EXISTS accounts (
   PRIMARY KEY (id),
   UNIQUE KEY uk_accounts_uid (uid)
 ) ENGINE=InnoDB;
+
+-- 给已经建过表的库补上is_insured/round/credit这几列，理由跟下面coins表那几条ALTER一样：
+-- CREATE TABLE IF NOT EXISTS对已存在的accounts表是no-op，不会补上这几个新列
+SET @sql := (SELECT IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'accounts' AND COLUMN_NAME = 'is_insured') = 0,
+  'ALTER TABLE accounts ADD COLUMN is_insured TINYINT(1) NOT NULL DEFAULT 0 COMMENT ''是否投保：0-不投保，1-投保'' AFTER uid',
+  'SELECT 1'
+));
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @sql := (SELECT IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'accounts' AND COLUMN_NAME = 'round') = 0,
+  'ALTER TABLE accounts ADD COLUMN round BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT ''轮数'' AFTER is_insured',
+  'SELECT 1'
+));
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @sql := (SELECT IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'accounts' AND COLUMN_NAME = 'credit') = 0,
+  'ALTER TABLE accounts ADD COLUMN credit DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT ''信用额度'' AFTER round',
+  'SELECT 1'
+));
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 -- 合约配置：维持保证金率/最大杠杆按名义价值分档，见下面的risk_limit_tiers表
 CREATE TABLE IF NOT EXISTS coins (
@@ -100,9 +126,9 @@ CREATE TABLE IF NOT EXISTS orders (
   order_id       BIGINT UNSIGNED NOT NULL COMMENT '雪花ID或类似的分布式唯一ID，应用层生成',
   uid            BIGINT UNSIGNED NOT NULL,
   symbol         VARCHAR(32) NOT NULL,
-  side           ENUM('LONG','SHORT') NOT NULL,
-  action         ENUM('OPEN','CLOSE') NOT NULL,
-  type           ENUM('LIMIT','MARKET') NOT NULL,
+  side           ENUM('long','short') NOT NULL,
+  action         ENUM('open','close') NOT NULL,
+  type           ENUM('limit','market') NOT NULL,
   price          DECIMAL(18,8) NOT NULL DEFAULT 0 COMMENT '市价单恒为0',
   amount         DECIMAL(26,16) NOT NULL COMMENT '标的币数量',
   traded_amount  DECIMAL(26,16) NOT NULL DEFAULT 0,
@@ -111,7 +137,7 @@ CREATE TABLE IF NOT EXISTS orders (
   leverage       INT UNSIGNED NOT NULL,
   reduce_only    TINYINT(1) NOT NULL DEFAULT 0,
   liquidation    TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否强平单——结算后要走保险基金穿仓/盈余清算分支',
-  status         ENUM('NEW','PARTIALLY_FILLED','FILLED','CANCELED') NOT NULL DEFAULT 'NEW',
+  status         ENUM('open','partially_filled','filled','canceled','rejected') NOT NULL DEFAULT 'open',
   create_time    BIGINT UNSIGNED NOT NULL COMMENT '毫秒时间戳，撮合引擎按这个做时间优先排序',
   update_time    BIGINT UNSIGNED NOT NULL,
   PRIMARY KEY (order_id),
@@ -119,22 +145,36 @@ CREATE TABLE IF NOT EXISTS orders (
   KEY idx_orders_symbol_status (symbol, status)
 ) ENGINE=InnoDB;
 
+-- 给已经建过表的库把side/action/type/status这几个ENUM列改成小写取值(对齐合作方API的
+-- 大小写约定)，同时给status补上rejected这个新状态。MODIFY COLUMN在这里是安全的幂等操作：
+-- ENUM在存储层是按位置索引存的，只要新枚举列表里各个取值的先后顺序跟旧的一一对应(这里只是
+-- 把每个值原地改成小写、在末尾追加rejected)，已有数据不需要任何转换，读出来的值自动就是
+-- 新的小写形式——不是"改列表定义"和"数据"两件事，是同一件事
+ALTER TABLE orders MODIFY COLUMN side ENUM('long','short') NOT NULL;
+ALTER TABLE orders MODIFY COLUMN action ENUM('open','close') NOT NULL;
+ALTER TABLE orders MODIFY COLUMN type ENUM('limit','market') NOT NULL;
+ALTER TABLE orders MODIFY COLUMN status ENUM('open','partially_filled','filled','canceled','rejected') NOT NULL DEFAULT 'open';
+
 -- 持仓：全仓保证金，一个(uid,symbol,side)一行
 CREATE TABLE IF NOT EXISTS positions (
   id                BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   uid               BIGINT UNSIGNED NOT NULL,
   symbol            VARCHAR(32) NOT NULL,
-  side              ENUM('LONG','SHORT') NOT NULL,
+  side              ENUM('long','short') NOT NULL,
   volume            DECIMAL(26,16) NOT NULL DEFAULT 0,
   avg_entry_price   DECIMAL(18,8) NOT NULL DEFAULT 0,
   position_margin   DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT '记账用名义值，全仓下不是真锁定的钱',
   leverage          INT UNSIGNED NOT NULL DEFAULT 1,
-  status            ENUM('NORMAL','LIQUIDATING','CLOSED') NOT NULL DEFAULT 'NORMAL',
+  status            ENUM('normal','liquidating','closed') NOT NULL DEFAULT 'normal',
   version           INT UNSIGNED NOT NULL DEFAULT 0,
   update_time       BIGINT UNSIGNED NOT NULL,
   PRIMARY KEY (id),
   UNIQUE KEY uk_positions_uid_symbol_side (uid, symbol, side)
 ) ENGINE=InnoDB;
+
+-- 同上，把positions的side/status也改成小写取值，理由和安全性说明见orders表那几条MODIFY
+ALTER TABLE positions MODIFY COLUMN side ENUM('long','short') NOT NULL;
+ALTER TABLE positions MODIFY COLUMN status ENUM('normal','liquidating','closed') NOT NULL DEFAULT 'normal';
 
 -- 资金费率结算按symbol批量查仓位用，uk_positions_uid_symbol_side因为uid在最前面覆盖不到
 -- 这个查询。MySQL的CREATE INDEX不支持IF NOT EXISTS(实测报语法错误，跟上面coins表ALTER

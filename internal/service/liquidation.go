@@ -24,16 +24,29 @@ type LiquidationService struct {
 	timeoutMillis int64
 }
 
-func NewLiquidationService(engine *EngineService, orders *repo.OrderRepo, positions *repo.PositionRepo,
-	positionSvc *PositionService, markPrice *MarkPriceService, accounts *AccountService,
-	fund *InsuranceFundService, timeoutMillis int64) *LiquidationService {
+func NewLiquidationService(
+	engine *EngineService,
+	orders *repo.OrderRepo,
+	positions *repo.PositionRepo,
+	positionSvc *PositionService,
+	markPrice *MarkPriceService,
+	accounts *AccountService,
+	fund *InsuranceFundService,
+	timeoutMillis int64,
+) *LiquidationService {
 	return &LiquidationService{
-		engine: engine, orders: orders, positions: positions, positionSvc: positionSvc,
-		markPrice: markPrice, accounts: accounts, fund: fund, timeoutMillis: timeoutMillis,
+		engine:        engine,
+		orders:        orders,
+		positions:     positions,
+		positionSvc:   positionSvc,
+		markPrice:     markPrice,
+		accounts:      accounts,
+		fund:          fund,
+		timeoutMillis: timeoutMillis,
 	}
 }
 
-// RiskScanOnce 全部有仓位的账户扫一遍
+// 全部有仓位的账户扫一遍
 func (s *LiquidationService) RiskScanOnce(ctx context.Context) {
 	uids, err := s.positions.FindAllOpenUIDs(ctx)
 	if err != nil {
@@ -48,7 +61,7 @@ func (s *LiquidationService) RiskScanOnce(ctx context.Context) {
 }
 
 func (s *LiquidationService) checkAndLiquidate(ctx context.Context, uid uint64) error {
-	maintTotal, positions, err := s.positionSvc.MaintenanceMarginTotal(ctx, uid)
+	maintainTotal, positions, err := s.positionSvc.MaintenanceMarginTotal(ctx, uid)
 	if err != nil || len(positions) == 0 {
 		return err
 	}
@@ -61,7 +74,7 @@ func (s *LiquidationService) checkAndLiquidate(ctx context.Context, uid uint64) 
 		return err
 	}
 	equity := available.Add(totalUnrealized)
-	if equity.GreaterThan(maintTotal) {
+	if equity.GreaterThan(maintainTotal) {
 		return nil
 	}
 	// 过滤掉已经在LIQUIDATING的仓位(上一轮扫描已经挂出强平单、还在排队/等超时兜底)——不然
@@ -77,7 +90,7 @@ func (s *LiquidationService) checkAndLiquidate(ctx context.Context, uid uint64) 
 	if len(pending) == 0 {
 		return nil
 	}
-	log.Printf("[WARN] 触发全仓联合强平, uid=%d, 账户权益=%s, 维持保证金要求=%s, 仓位数=%d", uid, equity, maintTotal, len(pending))
+	log.Printf("[WARN] 触发全仓联合强平, uid=%d, 账户权益=%s, 维持保证金要求=%s, 仓位数=%d", uid, equity, maintainTotal, len(pending))
 	for _, p := range pending {
 		s.queueLiquidation(ctx, p)
 	}
@@ -108,9 +121,20 @@ func (s *LiquidationService) queueLiquidation(ctx context.Context, p model.Posit
 	orderID := NextID()
 	now := NowMillis()
 	o := &model.Order{
-		OrderID: orderID, UID: p.UID, Symbol: p.Symbol, Side: p.Side, Action: model.ActionClose,
-		Type: model.OrderTypeLimit, Price: protectPrice, Amount: p.Volume, Leverage: p.Leverage,
-		ReduceOnly: true, Liquidation: true, Status: model.OrderStatusNew, CreateTime: now, UpdateTime: now,
+		OrderID:     orderID,
+		UID:         p.UID,
+		Symbol:      p.Symbol,
+		Side:        p.Side,
+		Action:      model.ActionClose,
+		Type:        model.OrderTypeLimit,
+		Price:       protectPrice,
+		Amount:      p.Volume,
+		Leverage:    p.Leverage,
+		ReduceOnly:  true,
+		Liquidation: true,
+		Status:      model.OrderStatusOpen,
+		CreateTime:  now,
+		UpdateTime:  now,
 	}
 	log.Printf("[WARN] 触发强平-挂单排队, uid=%d, symbol=%s, side=%s, volume=%s, markPrice=%s, 保护价=%s",
 		p.UID, p.Symbol, p.Side, p.Volume, mark, protectPrice)
@@ -148,7 +172,8 @@ func (s *LiquidationService) settleTimeoutFallback(ctx context.Context, orderID 
 		return
 	}
 	closeVolume := p.Volume
-	log.Printf("[WARN] 触发强平超时兜底直接结算, uid=%d, symbol=%s, side=%s, volume=%s, markPrice=%s", o.UID, o.Symbol, o.Side, closeVolume, mark)
+	log.Printf("[WARN] 触发强平超时兜底直接结算, uid=%d, symbol=%s, side=%s, volume=%s, markPrice=%s",
+		o.UID, o.Symbol, o.Side, closeVolume, mark)
 
 	now := NowMillis()
 	if err := s.orders.ApplyFill(ctx, orderID, closeVolume, mark, model.OrderStatusFilled, now); err != nil {

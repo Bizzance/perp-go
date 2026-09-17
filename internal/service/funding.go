@@ -21,17 +21,28 @@ type FundingService struct {
 	markPrice *MarkPriceService
 }
 
-func NewFundingService(c *cache.Cache, coins *repo.CoinRepo, positions *repo.PositionRepo, funding *repo.FundingRepo,
-	accounts *AccountService, tx *repo.TxRepo, markPrice *MarkPriceService) *FundingService {
+func NewFundingService(
+	c *cache.Cache,
+	coins *repo.CoinRepo,
+	positions *repo.PositionRepo,
+	funding *repo.FundingRepo,
+	accounts *AccountService,
+	tx *repo.TxRepo,
+	markPrice *MarkPriceService,
+) *FundingService {
 	return &FundingService{
-		cache: c, coins: coins, positions: positions, funding: funding,
-		accounts: accounts, tx: tx, markPrice: markPrice,
+		cache:     c,
+		coins:     coins,
+		positions: positions,
+		funding:   funding,
+		accounts:  accounts,
+		tx:        tx,
+		markPrice: markPrice,
 	}
 }
 
-// SampleOnce 给每个启用的合约采一次样：溢价率=(标记价格-指数价格)/指数价格，累加进这个symbol
-// 当前资金费率周期的累加器，结算时取累加器的均值当TWAP。标记价/指数价任一缺失就跳过——不能当0
-// 处理，那样会把溢价算成一个错误的、有偏向性的值
+// 给每个启用的合约采一次样：溢价率=(标记价格-指数价格)/指数价格，累加进这个symbol当前资金费率周期的累加器，结算时取累加器的均值当TWAP。
+// 标记价/指数价任一缺失就跳过——不能当0处理，那样会把溢价算成一个错误的、有偏向性的值
 func (s *FundingService) SampleOnce(ctx context.Context) {
 	coins, err := s.coins.FindAllEnabled(ctx)
 	if err != nil {
@@ -51,7 +62,7 @@ func (s *FundingService) SampleOnce(ctx context.Context) {
 	}
 }
 
-// SettleIfDue 给每个启用的合约判断是否跨过了下一个结算时间点，跨过了就结算这一周期
+// 给每个启用的合约判断是否跨过了下一个结算时间点，跨过了就结算这一周期
 func (s *FundingService) SettleIfDue(ctx context.Context, now int64) {
 	coins, err := s.coins.FindAllEnabled(ctx)
 	if err != nil {
@@ -65,7 +76,7 @@ func (s *FundingService) SettleIfDue(ctx context.Context, now int64) {
 	}
 }
 
-// fundingBoundary 结算周期边界不单独存"下次结算时间"，直接从当前时间和结算周期长度算出来——
+// 结算周期边界不单独存"下次结算时间"，直接从当前时间和结算周期长度算出来——
 // 对齐到从Unix纪元(0点)起的整点边界，interval=8小时时天然落在UTC 00:00/08:00/16:00
 func fundingBoundary(now, intervalMs int64) int64 { return (now / intervalMs) * intervalMs }
 
@@ -108,7 +119,7 @@ func (s *FundingService) settleSymbolIfDue(ctx context.Context, coin model.Coin,
 	return s.cache.ResetFundingAccumulator(ctx, coin.Symbol)
 }
 
-// settlePositions 按费率给这个symbol下每个仓位划转资金费：多头视角的资金费=名义价值*费率，
+// 按费率给这个symbol下每个仓位划转资金费：多头视角的资金费=名义价值*费率，
 // 正数=多头要付出去的钱；空头是多头的镜像，符号相反，跟真实的多空力量对比无关，统一走这一个公式。
 // 结算记录已经落库、这个周期不会重试，单个仓位划转失败只记日志、不中断其它仓位的结算——
 // 中断整批的话，排在后面的仓位会白白错过这一期资金费，比只错过这一个仓位的影响更大
@@ -137,7 +148,7 @@ func (s *FundingService) settlePositions(ctx context.Context, symbol string, rat
 	}
 }
 
-// EstimateRate 查询接口/结算共用：当前周期到目前为止的TWAP均值，clamp到±FundingRateCap——
+// 查询接口/结算共用：当前周期到目前为止的TWAP均值，clamp到±FundingRateCap——
 // 主流交易所结算前展示的"预测资金费率"也是同样的实时估算值，不是等结算那一刻才有数
 func (s *FundingService) EstimateRate(ctx context.Context, coin model.Coin) decimal.Decimal {
 	sum, count, err := s.cache.GetFundingAccumulator(ctx, coin.Symbol)
@@ -152,7 +163,7 @@ func (s *FundingService) EstimateRate(ctx context.Context, coin model.Coin) deci
 	return decimal.Max(rateCap.Neg(), decimal.Min(rate, rateCap))
 }
 
-// NextFundingTime 查询接口用：下一个结算时间点
+// 查询接口用：下一个结算时间点
 func (s *FundingService) NextFundingTime(coin model.Coin, now int64) int64 {
 	intervalMs := int64(coin.FundingIntervalHours) * 3600_000
 	if intervalMs <= 0 {

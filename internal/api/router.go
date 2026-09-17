@@ -1,7 +1,3 @@
-// Package api 是contract-api进程的Gin路由/handler层。MVP阶段鉴权用明文uid参数占位
-// (不做HMAC/token校验)，接口设计上uid都是独立传参，方便后续直接换成鉴权中间件注入，
-// 不用改业务代码——见plan文件"明确不做"一节。GET查询接口走query string，POST写接口统一
-// 用JSON body(Content-Type: application/json)+ShouldBindJSON，不用表单编码。
 package api
 
 import (
@@ -129,19 +125,16 @@ func (s *Server) accountInfo(c *gin.Context) {
 }
 
 type addOrderRequest struct {
-	UID    uint64            `json:"uid" binding:"required"`
-	Symbol string            `json:"symbol" binding:"required"`
-	Side   model.Side        `json:"side" binding:"required"`
-	Action model.OrderAction `json:"action" binding:"required"`
-	Type   model.OrderType   `json:"type"`
-	// Leverage/MarginAmount/Amount用指针而不是值类型：JSON里"字段没传"和"字段传了显式的0"
-	// 必须能区分开——没传时才套默认值/走另一个字段，显式传0要老老实实地报错，不能悄悄当成
-	// "没传"处理掉，那样一个总是把零值字段也序列化出来的客户端库会把真实的输入错误悄悄丢掉
-	Leverage     *decimal.Decimal `json:"leverage"`
-	Price        decimal.Decimal  `json:"price"`
-	MarginAmount *decimal.Decimal `json:"marginAmount"`
-	Amount       *decimal.Decimal `json:"amount"`
-	ReduceOnly   bool             `json:"reduceOnly"`
+	UID          uint64            `json:"uid" binding:"required"`
+	Symbol       string            `json:"symbol" binding:"required"`
+	Side         model.Side        `json:"side" binding:"required"`
+	Action       model.OrderAction `json:"action" binding:"required"`
+	Type         model.OrderType   `json:"type"`
+	Leverage     *decimal.Decimal  `json:"leverage"`
+	Price        decimal.Decimal   `json:"price"`
+	MarginAmount *decimal.Decimal  `json:"marginAmount"`
+	Amount       *decimal.Decimal  `json:"amount"`
+	ReduceOnly   bool              `json:"reduceOnly"`
 }
 
 func (s *Server) addOrder(c *gin.Context) {
@@ -278,7 +271,22 @@ func (s *Server) addOrder(c *gin.Context) {
 		return
 	}
 
-	requiredMargin := amount.Mul(price).Div(leverage)
+	// orderNotionalPrice是这笔委托自己名义价值/冻结保证金的估值基准，只对SHORT+OPEN生效：
+	// SHORT+OPEN在撮合引擎里是卖方向，挂一个远低于市价的价格属于"吃单价"，会立刻按盘口
+	// 对手的真实价格成交，不是按这个填的低价，所以要用max(price, markPrice)取更保守的
+	// 那个，冻结保证金/分档校验都按这个来，不能只信submitted price。LONG+OPEN反过来：
+	// 远低于市价的价格是完全合法的被动挂单(买跌)，只会按这个低价成交，如果同样套
+	// max(price,markPrice)会把这类正常订单的保证金/名义价值算得比真实值更大——这个防护
+	// 依赖有标记价格可用，一个从没成交过的全新symbol(hasMark=false)防不住这一招
+	orderNotionalPrice := price
+	if side == model.SideShort && hasMark && mark.GreaterThan(price) {
+		orderNotionalPrice = mark
+	}
+	// 冻结保证金用orderNotionalPrice而不是price本身：SHORT+OPEN报一个远低于市价的吃单价，
+	// 真实会按对手的高价成交，如果冻结按这个低价算，会把这笔仓位真实该占用的保证金严重
+	// 低估。这里先按保守估计冻结，等真正成交、知道真实成交价之后，settlement.go的
+	// SettleFill会用真实成交价重算，多退少补，不会让这部分差额一直悬在available里
+	requiredMargin := amount.Mul(orderNotionalPrice).Div(leverage)
 	if action == model.ActionOpen {
 		// 分档判断的名义价值不能只看已成交仓位：这个uid在同一symbol+side上如果还挂着别的没成交的
 		// 开仓单，每一笔单独提交时都看不到彼此，会各自按"当前还没有仓位/挂单垫底"通过校验，等
@@ -320,20 +328,8 @@ func (s *Server) addOrder(c *gin.Context) {
 				existingNotional = existingNotional.Add(o.RemainingAmount().Mul(o.Price))
 			}
 		}
-		// 这笔新委托自己的名义价值同样不能只信submitted price，但只对SHORT+OPEN生效：
-		// SHORT+OPEN在撮合引擎里是卖方向，挂一个远低于市价的价格属于"吃单价"，会立刻按盘口
-		// 对手的真实价格成交，不是按这个填的低价，所以要用max(price, markPrice)取更保守的
-		// 那个当分档判断的基准。LONG+OPEN反过来：远低于市价的价格是完全合法的被动挂单(买
-		// 跌)，只会按这个低价成交，如果同样套max(price,markPrice)会把这类正常订单的名义
-		// 价值算得比真实值更大，可能因此被判进不该适用的更严档位、平白无故拒单——这个防护
-		// 依赖有标记价格可用，一个从没成交过的全新symbol(hasMark=false)防不住这一招，是
-		// contract-api这边看不到contract-engine盘口真实成交价这个更大架构问题的一角，跟
-		// 下单冻结保证金用submitted price而不是真实成交价是同一个根因，MVP阶段先记录、
-		// 不在这里单独打补丁
-		orderNotionalPrice := price
-		if side == model.SideShort && hasMark && mark.GreaterThan(price) {
-			orderNotionalPrice = mark
-		}
+		// 这笔新委托自己的名义价值用orderNotionalPrice(上面已经算好，SHORT+OPEN时是
+		// max(price,markPrice))，跟冻结保证金用的是同一个基准，两处口径必须一致
 		tier, err := s.positions.TierFor(c.Request.Context(), symbol, existingNotional.Add(amount.Mul(orderNotionalPrice)))
 		if err != nil {
 			fail(c, 500, err.Error())
@@ -356,9 +352,19 @@ func (s *Server) addOrder(c *gin.Context) {
 	orderID := service.NextID()
 	now := service.NowMillis()
 	o := &model.Order{
-		OrderID: orderID, UID: uid, Symbol: symbol, Side: side, Action: action, Type: orderType,
-		Price: price, Amount: amount, Leverage: uint32(leverage.IntPart()),
-		ReduceOnly: req.ReduceOnly, Status: model.OrderStatusNew, CreateTime: now, UpdateTime: now,
+		OrderID:    orderID,
+		UID:        uid,
+		Symbol:     symbol,
+		Side:       side,
+		Action:     action,
+		Type:       orderType,
+		Price:      price,
+		Amount:     amount,
+		Leverage:   uint32(leverage.IntPart()),
+		ReduceOnly: req.ReduceOnly,
+		Status:     model.OrderStatusOpen,
+		CreateTime: now,
+		UpdateTime: now,
 	}
 	if action == model.ActionOpen {
 		o.FrozenMargin = requiredMargin
@@ -369,9 +375,16 @@ func (s *Server) addOrder(c *gin.Context) {
 	}
 
 	evt := events.OrderSubmitEvent{
-		OrderID: orderID, UID: uid, Symbol: symbol, Side: string(side), Action: string(action),
-		Type: string(orderType), Price: price.String(), Amount: amount.String(),
-		Leverage: o.Leverage, ReduceOnly: o.ReduceOnly,
+		OrderID:    orderID,
+		UID:        uid,
+		Symbol:     symbol,
+		Side:       string(side),
+		Action:     string(action),
+		Type:       string(orderType),
+		Price:      price.String(),
+		Amount:     amount.String(),
+		Leverage:   o.Leverage,
+		ReduceOnly: o.ReduceOnly,
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -525,8 +538,7 @@ type setIndexPriceRequest struct {
 	Price  decimal.Decimal `json:"price"`
 }
 
-// setIndexPrice 外部行情源(MVP阶段先靠脚本/运营手动喂，以后换成接入币安行情的适配器)推送
-// 指数价格——资金费率结算依赖这个值，见FundingService
+// 外部行情源(MVP阶段先靠脚本/运营手动喂，以后换成接入币安行情的适配器)推送指数价格——资金费率结算依赖这个值，见FundingService
 func (s *Server) setIndexPrice(c *gin.Context) {
 	var req setIndexPriceRequest
 	if !bindJSON(c, &req) {

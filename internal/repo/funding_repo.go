@@ -12,7 +12,7 @@ type FundingRepo struct{ db *sqlx.DB }
 
 func NewFundingRepo(db *sqlx.DB) *FundingRepo { return &FundingRepo{db: db} }
 
-// LastFundingTime 这个symbol最近一次结算落库的周期时间点，从没结算过返回0——
+// 这个symbol最近一次结算落库的周期时间点，从没结算过返回0——
 // FundingService.SettleIfDue靠这个判断"当前的结算周期边界是不是已经结算过了"
 func (r *FundingRepo) LastFundingTime(ctx context.Context, symbol string) (int64, error) {
 	var t int64

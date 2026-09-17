@@ -10,7 +10,7 @@ import (
 )
 
 type EngineService struct {
-	matchingEngine *matching.Engine
+	matchingEngine *matching.Engine // 撮合引擎，里面有多个orderbook，每个币种一个orderbook
 	orders         *repo.OrderRepo
 	trades         *repo.TradeRepo
 	accounts       *AccountService
@@ -20,36 +20,58 @@ type EngineService struct {
 	fund           *InsuranceFundService
 }
 
-func NewEngineService(matchingEngine *matching.Engine, orders *repo.OrderRepo, trades *repo.TradeRepo,
-	accounts *AccountService, positionSvc *PositionService, settlement *SettlementService, markPrice *MarkPriceService,
-	fund *InsuranceFundService) *EngineService {
+func NewEngineService(
+	matchingEngine *matching.Engine,
+	orders *repo.OrderRepo,
+	trades *repo.TradeRepo,
+	accounts *AccountService,
+	positionSvc *PositionService,
+	settlement *SettlementService,
+	markPrice *MarkPriceService,
+	fund *InsuranceFundService,
+) *EngineService {
 	return &EngineService{
-		matchingEngine: matchingEngine, orders: orders, trades: trades,
-		accounts: accounts, positionSvc: positionSvc, settlement: settlement, markPrice: markPrice, fund: fund,
+		matchingEngine: matchingEngine,
+		orders:         orders,
+		trades:         trades,
+		accounts:       accounts,
+		positionSvc:    positionSvc,
+		settlement:     settlement,
+		markPrice:      markPrice,
+		fund:           fund,
 	}
 }
 
-// SubmitOrder 委托已经由调用方落库(status=NEW)——正常用户下单在contract-api那边落库+冻结
-// 保证金之后才发Kafka事件过来；强平单由liquidation.go在这里落库。这个方法负责真正的撮合+
-// 结算+挂簿/释放。
-func (e *EngineService) SubmitOrder(ctx context.Context, o *model.Order, entryTime int64) error {
+// 委托已经由调用方落库(status=OPEN)——正常用户下单在contract-api那边落库+冻结保证金之后才发Kafka事件过来；
+// 强平单由liquidation.go在这里落库。
+// 这个方法负责真正的撮合+结算+挂簿/释放。
+func (e *EngineService) SubmitOrder(ctx context.Context, order *model.Order, entryTime int64) error {
+	// 进入订单簿的order，只包含了下单的order中的一部分必要数据
 	resting := &matching.RestingOrder{
-		OrderID: o.OrderID, UID: o.UID, Side: o.Side, Action: o.Action,
-		Direction: matching.DirectionOf(o.Side, o.Action), Price: o.Price, Remaining: o.RemainingAmount(),
-		EntryTime: entryTime, ReduceOnly: o.ReduceOnly, Liquidation: o.Liquidation,
+		OrderID:     order.OrderID,
+		UID:         order.UID,
+		Side:        order.Side,
+		Action:      order.Action,
+		Direction:   matching.DirectionOf(order.Side, order.Action),
+		Price:       order.Price,
+		Remaining:   order.RemainingAmount(),
+		EntryTime:   entryTime,
+		ReduceOnly:  order.ReduceOnly,
+		Liquidation: order.Liquidation,
 	}
-	book := e.matchingEngine.BookFor(o.Symbol)
+	// 拿到订单对应的订单簿
+	book := e.matchingEngine.BookFor(order.Symbol)
 	fills := book.Match(resting)
 
 	for _, f := range fills {
-		if err := e.settleOneFill(ctx, o, f); err != nil {
-			log.Printf("[ERROR] settle fill failed, orderId=%d: %v", o.OrderID, err)
+		if err := e.settleOneFill(ctx, order, f); err != nil {
+			log.Printf("[ERROR] settle fill failed, orderId=%d: %v", order.OrderID, err)
 		}
 	}
 
 	// LIMIT单还有剩余量就挂回簿子；MARKET单/剩余为0就不挂——市价单吃不满剩下的量直接释放
 	// (释放动作由调用方在SubmitOrder返回后，根据委托最终状态决定要不要unfreeze剩余冻结保证金)
-	if resting.Remaining.Sign() > 0 && o.Type == model.OrderTypeLimit {
+	if resting.Remaining.Sign() > 0 && order.Type == model.OrderTypeLimit {
 		book.Rest(resting)
 	}
 	return nil
@@ -82,23 +104,23 @@ func (e *EngineService) settleOneFill(ctx context.Context, incoming *model.Order
 		{f.MakerOrder.OrderID, f.MakerOrder.UID, f.MakerOrder.Side, f.MakerOrder.Action, true, f.MakerOrder.Liquidation},
 		{f.TakerOrder.OrderID, f.TakerOrder.UID, f.TakerOrder.Side, f.TakerOrder.Action, false, f.TakerOrder.Liquidation},
 	} {
-		o, err := e.orders.FindByOrderID(ctx, side.orderID)
-		if err != nil || o == nil {
+		order, err := e.orders.FindByOrderID(ctx, side.orderID)
+		if err != nil || order == nil {
 			log.Printf("[ERROR] order not found while settling fill, orderId=%d", side.orderID)
 			continue
 		}
 		newStatus := model.OrderStatusPartiallyFilled
-		if o.TradedAmount.Add(f.Volume).GreaterThanOrEqual(o.Amount) {
+		if order.TradedAmount.Add(f.Volume).GreaterThanOrEqual(order.Amount) {
 			newStatus = model.OrderStatusFilled
 		}
 		if err := e.orders.ApplyFill(ctx, side.orderID, f.Volume, f.Price, newStatus, now); err != nil {
 			return err
 		}
-		if _, err := e.settlement.SettleFill(ctx, o, f.Volume, f.Price, side.isMaker, now); err != nil {
+		if _, err := e.settlement.SettleFill(ctx, order, f.Volume, f.Price, side.isMaker, now); err != nil {
 			return err
 		}
 		if side.liquidation {
-			if err := e.HandleLiquidationSettleAftermath(ctx, o.Symbol, side.uid); err != nil {
+			if err := e.HandleLiquidationSettleAftermath(ctx, order.Symbol, side.uid); err != nil {
 				log.Printf("[ERROR] liquidation aftermath failed, uid=%d: %v", side.uid, err)
 			}
 		}

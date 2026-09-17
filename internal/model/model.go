@@ -5,8 +5,8 @@ import "github.com/shopspring/decimal"
 type Side string
 
 const (
-	SideLong  Side = "LONG"
-	SideShort Side = "SHORT"
+	SideLong  Side = "long"
+	SideShort Side = "short"
 )
 
 func (s Side) Opposite() Side {
@@ -19,55 +19,59 @@ func (s Side) Opposite() Side {
 type OrderAction string
 
 const (
-	ActionOpen  OrderAction = "OPEN"
-	ActionClose OrderAction = "CLOSE"
+	ActionOpen  OrderAction = "open"
+	ActionClose OrderAction = "close"
 )
 
 type OrderType string
 
 const (
-	OrderTypeLimit  OrderType = "LIMIT"
-	OrderTypeMarket OrderType = "MARKET"
+	OrderTypeLimit  OrderType = "limit"
+	OrderTypeMarket OrderType = "market"
 )
 
 type OrderStatus string
 
 const (
-	OrderStatusNew             OrderStatus = "NEW"
-	OrderStatusPartiallyFilled OrderStatus = "PARTIALLY_FILLED"
-	OrderStatusFilled          OrderStatus = "FILLED"
-	OrderStatusCanceled        OrderStatus = "CANCELED"
+	OrderStatusOpen            OrderStatus = "open"
+	OrderStatusPartiallyFilled OrderStatus = "partially_filled"
+	OrderStatusFilled          OrderStatus = "filled"
+	OrderStatusCanceled        OrderStatus = "canceled"
+	OrderStatusRejected        OrderStatus = "rejected"
 )
 
 // ActiveOrderStatuses 撮合引擎还需要继续处理的状态——扫描定时任务/撤单校验都用这个判断
 // "这笔委托还活着吗"
 var ActiveOrderStatuses = map[OrderStatus]bool{
-	OrderStatusNew:             true,
+	OrderStatusOpen:            true,
 	OrderStatusPartiallyFilled: true,
 }
 
 type PositionStatus string
 
 const (
-	PositionStatusNormal      PositionStatus = "NORMAL"
-	PositionStatusLiquidating PositionStatus = "LIQUIDATING"
-	PositionStatusClosed      PositionStatus = "CLOSED"
+	PositionStatusNormal      PositionStatus = "normal"
+	PositionStatusLiquidating PositionStatus = "liquidating"
+	PositionStatusClosed      PositionStatus = "closed"
 )
 
 // TransactionType 资金流水类型——纯审计用途的字符串常量，不参与任何计算
 const (
-	TxDeposit          = "DEPOSIT"           // 资金账户注入(正数)/扣减(负数)
-	TxFee              = "FEE"               // 交易手续费(负数)
-	TxRealizedPnl      = "REALIZED_PNL"      // 平仓已实现盈亏(可正可负)
-	TxLiquidationClear = "LIQUIDATION_CLEAR" // 强平结算后清算维持保证金缓冲进保险基金，用户侧记为负数
-	TxFundingFee       = "FUNDING_FEE"       // 资金费率结算，多头/空头互相划转，可正可负
+	TxDeposit          = "deposit"           // 资金账户注入(正数)/扣减(负数)
+	TxFee              = "fee"               // 交易手续费(负数)
+	TxRealizedPnl      = "realized_pnl"      // 平仓已实现盈亏(可正可负)
+	TxLiquidationClear = "liquidation_clear" // 强平结算后清算维持保证金缓冲进保险基金，用户侧记为负数
+	TxFundingFee       = "funding_fee"       // 资金费率结算，多头/空头互相划转，可正可负
 )
 
 type Account struct {
 	ID           uint64          `db:"id"`
 	UID          uint64          `db:"uid"`
-	Available    decimal.Decimal `db:"available"`
-	FrozenMargin decimal.Decimal `db:"frozen_margin"`
+	IsInsured    bool            `db:"is_insured"`    // 是否投保
+	Round        uint64          `db:"round"`         // 轮数
+	Credit       decimal.Decimal `db:"credit"`        // 信用额度
+	Available    decimal.Decimal `db:"available"`     // 可用
+	FrozenMargin decimal.Decimal `db:"frozen_margin"` // 冻结的保证金
 	Version      uint32          `db:"version"`
 }
 
@@ -87,7 +91,7 @@ type Coin struct {
 	PriceProtectionRatio decimal.Decimal `db:"price_protection_ratio"`
 }
 
-// RiskLimitTier 保证金分档(风险限额)：维持保证金率/最大杠杆按仓位名义价值分档，仓位越大
+// 保证金分档(风险限额)：维持保证金率/最大杠杆按仓位名义价值分档，仓位越大
 // 风险越高、维持保证金率越高、允许的杠杆越低——取代原来"整个合约一个固定维持保证金率/
 // 最大杠杆"的简化。MaintenanceAmount是速算扣除数，让跨档位时维持保证金的计算连续，不会在
 // 档位边界出现跳变，公式=名义价值*MaintenanceMarginRate-MaintenanceAmount，见
@@ -106,18 +110,18 @@ type Order struct {
 	OrderID      uint64          `db:"order_id"`
 	UID          uint64          `db:"uid"`
 	Symbol       string          `db:"symbol"`
-	Side         Side            `db:"side"`
-	Action       OrderAction     `db:"action"`
-	Type         OrderType       `db:"type"`
+	Side         Side            `db:"side"`   // long/short
+	Action       OrderAction     `db:"action"` // open/close
+	Type         OrderType       `db:"type"`   // limit/market
 	Price        decimal.Decimal `db:"price"`
-	Amount       decimal.Decimal `db:"amount"`
-	TradedAmount decimal.Decimal `db:"traded_amount"`
+	Amount       decimal.Decimal `db:"amount"`        // 挂单数量
+	TradedAmount decimal.Decimal `db:"traded_amount"` // 已成交的数量
 	AvgDealPrice decimal.Decimal `db:"avg_deal_price"`
 	FrozenMargin decimal.Decimal `db:"frozen_margin"`
 	Leverage     uint32          `db:"leverage"`
 	ReduceOnly   bool            `db:"reduce_only"`
 	Liquidation  bool            `db:"liquidation"`
-	Status       OrderStatus     `db:"status"`
+	Status       OrderStatus     `db:"status"` // open/filled/partially_filled/canceled/rejected
 	CreateTime   int64           `db:"create_time"`
 	UpdateTime   int64           `db:"update_time"`
 }
@@ -140,8 +144,9 @@ type Position struct {
 	UpdateTime     int64           `db:"update_time"`
 }
 
-// UnrealizedPnl 未实现盈亏公式：
-// 多头 = (markPrice - avgEntryPrice) * volume；空头 = (avgEntryPrice - markPrice) * volume
+// 未实现盈亏公式：
+// 多头 = (markPrice - avgEntryPrice) * volume；
+// 空头 = (avgEntryPrice - markPrice) * volume
 func (p *Position) UnrealizedPnl(markPrice decimal.Decimal) decimal.Decimal {
 	if p.Side == SideLong {
 		return markPrice.Sub(p.AvgEntryPrice).Mul(p.Volume)
@@ -149,12 +154,12 @@ func (p *Position) UnrealizedPnl(markPrice decimal.Decimal) decimal.Decimal {
 	return p.AvgEntryPrice.Sub(markPrice).Mul(p.Volume)
 }
 
-// LiquidationPrice 单仓强平价估算(逐仓式公式，仅供展示参考)——维持保证金要求按分档公式
-// notional*mmr-maintenanceAmount推导：
-// 多头：liqPrice = (avgEntryPrice*N - positionMargin - maintenanceAmount) / (N*(1-mmr))
-// 空头：liqPrice = (avgEntryPrice*N + positionMargin + maintenanceAmount) / (N*(1+mmr))
-// 全仓真实强平以LiquidationService里"账户权益 vs 全部仓位维持保证金要求之和"为准，这个值
-// 只在没有其它持仓、也不考虑available缓冲时才精确，MVP先用这个简化公式做展示
+// 单仓强平价估算(逐仓式公式，仅供展示参考)——维持保证金要求按分档公式
+// notional * mmr-maintenanceAmount推导：
+// 多头：liqPrice = (avgEntryPrice*N - positionMargin - maintenanceAmount) / (N * (1 - mmr))
+// 空头：liqPrice = (avgEntryPrice*N + positionMargin + maintenanceAmount) / (N * (1 + mmr))
+// 全仓真实强平以LiquidationService里"账户权益 vs 全部仓位维持保证金要求之和"为准，
+// 这个值只在没有其它持仓、也不考虑available缓冲时才精确，MVP先用这个简化公式做展示
 func (p *Position) LiquidationPrice(mmr, maintenanceAmount decimal.Decimal) decimal.Decimal {
 	if p.Volume.IsZero() {
 		return decimal.Zero
@@ -193,8 +198,7 @@ type InsuranceFund struct {
 	Version uint32          `db:"version"`
 }
 
-// FundingRateRecord 一个symbol一个资金费率结算周期的落库记录——审计+客户端历史费率查询用，
-// 见FundingService.SettleIfDue
+// 一个symbol一个资金费率结算周期的落库记录——审计+客户端历史费率查询用，见FundingService.SettleIfDue
 type FundingRateRecord struct {
 	ID          uint64          `db:"id"`
 	Symbol      string          `db:"symbol"`

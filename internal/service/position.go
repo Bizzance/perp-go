@@ -16,17 +16,22 @@ type PositionService struct {
 	markPrice  *MarkPriceService
 }
 
-func NewPositionService(positions *repo.PositionRepo, riskLimits *repo.RiskLimitRepo, markPrice *MarkPriceService) *PositionService {
-	return &PositionService{positions: positions, riskLimits: riskLimits, markPrice: markPrice}
+func NewPositionService(
+	positions *repo.PositionRepo,
+	riskLimits *repo.RiskLimitRepo,
+	markPrice *MarkPriceService,
+) *PositionService {
+	return &PositionService{
+		positions:  positions,
+		riskLimits: riskLimits,
+		markPrice:  markPrice,
+	}
 }
 
-// TierFor 给定symbol和名义价值，找到适用的保证金分档——按tier升序找第一个MaxNotional
-// 覆盖到这个名义价值的档位；MaxNotional=0代表这一档不限(约定放在最后一档)。这个symbol
-// 一档都没配返回(nil, nil)，调用方要按"没有风控依据、不允许交易"处理，不能当0档处理。
-// 依赖一个配置时的约定：tier序号升序 == MaxNotional升序，配置出错(比如两档的MaxNotional
-// 填反了)会导致按tier顺序找到的档位跟名义价值大小顺序对不上、静默命中错误的档位——风控
-// 失效但没有任何报错，后果比"没配置"更隐蔽，所以这里做一次单调性校验，一旦不满足就按照
-// "没配置"处理(调用方已经有现成的安全兜底)，而不是假装没看见继续算下去
+// 给定symbol和名义价值，找到适用的保证金分档——按tier升序找第一个MaxNotional覆盖到这个名义价值的档位；MaxNotional=0代表这一档不限(约定放在最后一档)。
+// 这个symbol一档都没配返回(nil, nil)，调用方要按"没有风控依据、不允许交易"处理，不能当0档处理。
+// 依赖一个配置时的约定：tier序号升序 == MaxNotional升序，配置出错(比如两档的MaxNotional填反了)会导致按tier顺序找到的档位跟名义价值大小顺序对不上、静默命中错误的档位——风控
+// 失效但没有任何报错，后果比"没配置"更隐蔽，所以这里做一次单调性校验，一旦不满足就按照"没配置"处理(调用方已经有现成的安全兜底)，而不是假装没看见继续算下去
 func (s *PositionService) TierFor(ctx context.Context, symbol string, notional decimal.Decimal) (*model.RiskLimitTier, error) {
 	tiers, err := s.riskLimits.FindBySymbol(ctx, symbol)
 	if err != nil || len(tiers) == 0 {
@@ -63,7 +68,7 @@ func (s *PositionService) Find(ctx context.Context, uid uint64, symbol string, s
 	return s.positions.Find(ctx, uid, symbol, side)
 }
 
-// TotalUnrealizedPnl 这个uid名下全部持仓当前未实现盈亏之和——freezeMargin的浮盈买力判断、
+// 这个uid名下全部持仓当前未实现盈亏之和——freezeMargin的浮盈买力判断、
 // 账户权益展示、强平风控扫描三处共用同一份计算。任何一个持仓缺标记价格就把它的浮盈当0(不计入)，
 // 这是保守方向：算少了买力/权益顶多让强平判断更容易触发、开仓更容易被拒绝，不会让账户透支或
 // 让强平被延误
@@ -86,7 +91,7 @@ func (s *PositionService) TotalUnrealizedPnl(ctx context.Context, uid uint64) (d
 	return total, nil
 }
 
-// MaintenanceMarginTotal 这个uid名下全部持仓的维持保证金要求之和，风控强平判断用——
+// 这个uid名下全部持仓的维持保证金要求之和，风控强平判断用——
 // 维持保证金按分档公式notional*mmr-maintenanceAmount算，档位由这个仓位当前的名义价值决定。
 // 缺标记价格/分档配置的仓位只跳过它自己这一份贡献(计入0，打ERROR日志)，不能因为一个symbol
 // 缺数据就让调用方跳过这个uid的整轮风控扫描——那样会连累这个用户名下其它数据齐全、可能
@@ -94,7 +99,7 @@ func (s *PositionService) TotalUnrealizedPnl(ctx context.Context, uid uint64) (d
 //
 // 注意这里跳过=计0，跟TotalUnrealizedPnl把缺数据的仓位浮盈算0不是同一个安全方向：
 // TotalUnrealizedPnl算0会拉低equity，让强平判断更容易触发，是保守方向；这里给
-// maintTotal算0是相反方向——会让这个仓位自己永远不足以成为触发强平的原因，即使它在
+// maintainTotal算0是相反方向——会让这个仓位自己永远不足以成为触发强平的原因，即使它在
 // 持续亏损(那笔亏损依然会通过TotalUnrealizedPnl正常拉低equity，不会完全没有感知，
 // 只是没有为这个仓位单独贡献维持保证金要求)。这是分档配置在仓位已开仓后被删除/改坏
 // 这个操作失误场景下的已知残留风险，见docs/known-limitations.md，MVP阶段选择打日志

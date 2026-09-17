@@ -37,11 +37,11 @@ func (r *OrderRepo) FindActiveByUID(ctx context.Context, uid uint64, symbol stri
 	var orders []model.Order
 	if symbol == "" {
 		err := r.db.SelectContext(ctx, &orders,
-			`SELECT * FROM orders WHERE uid = ? AND status IN ('NEW','PARTIALLY_FILLED') ORDER BY order_id DESC`, uid)
+			`SELECT * FROM orders WHERE uid = ? AND status IN ('open','partially_filled') ORDER BY order_id DESC`, uid)
 		return orders, err
 	}
 	err := r.db.SelectContext(ctx, &orders,
-		`SELECT * FROM orders WHERE uid = ? AND symbol = ? AND status IN ('NEW','PARTIALLY_FILLED') ORDER BY order_id DESC`, uid, symbol)
+		`SELECT * FROM orders WHERE uid = ? AND symbol = ? AND status IN ('open','partially_filled') ORDER BY order_id DESC`, uid, symbol)
 	return orders, err
 }
 
@@ -51,7 +51,7 @@ func (r *OrderRepo) FindHistoryByUID(ctx context.Context, uid uint64, limit int)
 	return orders, err
 }
 
-// ApplyFill 一笔成交对这个委托的影响：累加tradedAmount、重算加权平均成交价、按剩余量更新状态
+// 一笔成交对这个委托的影响：累加tradedAmount、重算加权平均成交价、按剩余量更新状态
 func (r *OrderRepo) ApplyFill(ctx context.Context, orderID uint64, dealVolume, dealPrice decimal.Decimal, newStatus model.OrderStatus, updateTime int64) error {
 	o, err := r.FindByOrderID(ctx, orderID)
 	if err != nil || o == nil {
@@ -69,7 +69,7 @@ func (r *OrderRepo) ApplyFill(ctx context.Context, orderID uint64, dealVolume, d
 
 func (r *OrderRepo) MarkCanceled(ctx context.Context, orderID uint64, updateTime int64) (bool, error) {
 	res, err := r.db.ExecContext(ctx,
-		`UPDATE orders SET status = 'CANCELED', update_time = ? WHERE order_id = ? AND status IN ('NEW','PARTIALLY_FILLED')`,
+		`UPDATE orders SET status = 'canceled', update_time = ? WHERE order_id = ? AND status IN ('open','partially_filled')`,
 		updateTime, orderID)
 	return affected(res, err)
 }

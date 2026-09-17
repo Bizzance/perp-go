@@ -30,7 +30,7 @@ func (p *Producer) Publish(ctx context.Context, topic, key string, value any) er
 
 func (p *Producer) Close() error { return p.writer.Close() }
 
-// Consumer 简单的单topic消费封装：MVP阶段一个engine进程订阅全部symbol，不做分片消费，
+// 简单的单topic消费封装：MVP阶段一个engine进程订阅全部symbol，不做分片消费，
 // 单实例部署——按symbol分片是后续"横向扩展"阶段要做的事，不是这次范围
 type Consumer struct {
 	reader *kafka.Reader
@@ -44,7 +44,7 @@ func NewConsumer(brokers []string, topic, groupID string) *Consumer {
 	})}
 }
 
-// Consume 阻塞读取，handler返回error只记日志不重投——MVP阶段简化处理，不做死信队列/重试
+// 阻塞读取，handler返回error只记日志不重投——MVP阶段简化处理，不做死信队列/重试
 func (c *Consumer) Consume(ctx context.Context, handler func(key, value []byte) error) {
 	for {
 		msg, err := c.reader.ReadMessage(ctx)
@@ -61,4 +61,6 @@ func (c *Consumer) Consume(ctx context.Context, handler func(key, value []byte) 
 	}
 }
 
-func (c *Consumer) Close() error { return c.reader.Close() }
+func (c *Consumer) Close() error {
+	return c.reader.Close()
+}

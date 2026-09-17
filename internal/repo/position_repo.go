@@ -30,23 +30,30 @@ func (r *PositionRepo) FindByUID(ctx context.Context, uid uint64) ([]model.Posit
 	return positions, err
 }
 
-// FindAllOpenUIDs 风控扫描用：全部还有仓位的账户uid去重列表
+// 风控扫描用：全部还有仓位的账户uid去重列表
 func (r *PositionRepo) FindAllOpenUIDs(ctx context.Context) ([]uint64, error) {
 	var uids []uint64
 	err := r.db.SelectContext(ctx, &uids, `SELECT DISTINCT uid FROM positions WHERE volume > 0`)
 	return uids, err
 }
 
-// FindOpenBySymbol 资金费率结算用：这个symbol下全部还有仓位的记录，不分uid
+// 资金费率结算用：这个symbol下全部还有仓位的记录，不分uid
 func (r *PositionRepo) FindOpenBySymbol(ctx context.Context, symbol string) ([]model.Position, error) {
 	var positions []model.Position
 	err := r.db.SelectContext(ctx, &positions, `SELECT * FROM positions WHERE symbol = ? AND volume > 0`, symbol)
 	return positions, err
 }
 
-// ApplyOpenFill 开仓/加仓：加权平均开仓价、累加保证金，不存在就先插入一行空仓位再累加
-func (r *PositionRepo) ApplyOpenFill(ctx context.Context, uid uint64, symbol string, side model.Side,
-	dealVolume, dealPrice, addedMargin decimal.Decimal, leverage uint32, updateTime int64) error {
+// 开仓/加仓：加权平均开仓价、累加保证金，不存在就先插入一行空仓位再累加
+func (r *PositionRepo) ApplyOpenFill(
+	ctx context.Context,
+	uid uint64,
+	symbol string,
+	side model.Side,
+	dealVolume, dealPrice, addedMargin decimal.Decimal,
+	leverage uint32,
+	updateTime int64,
+) error {
 	existing, err := r.Find(ctx, uid, symbol, side)
 	if err != nil {
 		return err
@@ -54,23 +61,29 @@ func (r *PositionRepo) ApplyOpenFill(ctx context.Context, uid uint64, symbol str
 	if existing == nil {
 		_, err = r.db.ExecContext(ctx,
 			`INSERT INTO positions (uid, symbol, side, volume, avg_entry_price, position_margin, leverage, status, update_time)
-			 VALUES (?, ?, ?, ?, ?, ?, ?, 'NORMAL', ?)`,
+			 VALUES (?, ?, ?, ?, ?, ?, ?, 'normal', ?)`,
 			uid, symbol, side, dealVolume, dealPrice, addedMargin, leverage, updateTime)
 		return err
 	}
 	newVolume := existing.Volume.Add(dealVolume)
 	newAvgEntry := existing.AvgEntryPrice.Mul(existing.Volume).Add(dealPrice.Mul(dealVolume)).Div(newVolume)
 	_, err = r.db.ExecContext(ctx,
-		`UPDATE positions SET volume = ?, avg_entry_price = ?, position_margin = position_margin + ?, leverage = ?, status = 'NORMAL', update_time = ?
+		`UPDATE positions SET volume = ?, avg_entry_price = ?, position_margin = position_margin + ?, leverage = ?, status = 'normal', update_time = ?
 		 WHERE id = ?`,
 		newVolume, newAvgEntry, addedMargin, leverage, updateTime, existing.ID)
 	return err
 }
 
-// ApplyCloseFill 平仓/减仓：按比例释放保证金、结算已实现盈亏——返回(realizedPnl, releasedMargin, closeVolume)，
+// 平仓/减仓：按比例释放保证金、结算已实现盈亏——返回(realizedPnl, releasedMargin, closeVolume)，
 // closeVolume是按现有持仓量截断后的真实平仓量(防御性处理，reduce-only在上游本该保证不会超)
-func (r *PositionRepo) ApplyCloseFill(ctx context.Context, uid uint64, symbol string, side model.Side,
-	dealVolume, dealPrice decimal.Decimal, updateTime int64) (realizedPnl, releasedMargin, closeVolume decimal.Decimal, err error) {
+func (r *PositionRepo) ApplyCloseFill(
+	ctx context.Context,
+	uid uint64,
+	symbol string,
+	side model.Side,
+	dealVolume, dealPrice decimal.Decimal,
+	updateTime int64,
+) (realizedPnl, releasedMargin, closeVolume decimal.Decimal, err error) {
 	p, err := r.Find(ctx, uid, symbol, side)
 	if err != nil || p == nil || p.Volume.Sign() <= 0 {
 		return decimal.Zero, decimal.Zero, decimal.Zero, err
@@ -100,14 +113,14 @@ func (r *PositionRepo) ApplyCloseFill(ctx context.Context, uid uint64, symbol st
 	return realizedPnl, releasedMargin, closeVolume, err
 }
 
-// MarkLiquidating 强平挂盘口排队成交：把仓位原子标记LIQUIDATING，成功才可以往下挂强平单，
+// 强平挂盘口排队成交：把仓位原子标记LIQUIDATING，成功才可以往下挂强平单，
 // 失败说明上一轮已经挂出去了、还没成交完，本轮扫描跳过这个仓位
 func (r *PositionRepo) MarkLiquidating(ctx context.Context, id uint64) (bool, error) {
-	res, err := r.db.ExecContext(ctx, `UPDATE positions SET status = 'LIQUIDATING' WHERE id = ? AND status = 'NORMAL'`, id)
+	res, err := r.db.ExecContext(ctx, `UPDATE positions SET status = 'liquidating' WHERE id = ? AND status = 'normal'`, id)
 	return affected(res, err)
 }
 
 func (r *PositionRepo) ClearLiquidating(ctx context.Context, id uint64) error {
-	_, err := r.db.ExecContext(ctx, `UPDATE positions SET status = 'NORMAL' WHERE id = ? AND status = 'LIQUIDATING'`, id)
+	_, err := r.db.ExecContext(ctx, `UPDATE positions SET status = 'normal' WHERE id = ? AND status = 'liquidating'`, id)
 	return err
 }

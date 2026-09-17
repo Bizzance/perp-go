@@ -40,8 +40,8 @@ type RestingOrder struct {
 
 // Fill 一次撮合成交——taker是主动进来吃单的一方(incoming)，maker是原来挂在簿子上被动等到的一方
 type Fill struct {
-	Price      decimal.Decimal
-	Volume     decimal.Decimal
+	Price      decimal.Decimal // 价格
+	Volume     decimal.Decimal //
 	MakerOrder *RestingOrder
 	TakerOrder *RestingOrder
 }
@@ -56,20 +56,26 @@ type Book struct {
 
 func NewBook() *Book { return &Book{} }
 
-// Match 尝试撮合一笔新进来的委托，返回成交列表+撮合完之后还剩多少量。LIMIT单剩余量>0时
-// 由调用方决定要不要挂回簿子(调CancelableRest)；MARKET单剩余量直接由调用方释放，不挂簿。
+// 尝试撮合一笔新进来的委托，返回成交列表+撮合完之后还剩多少量。
+// LIMIT单剩余量>0时，由调用方决定要不要挂回簿子(调CancelableRest)；
+// MARKET单剩余量直接由调用方释放，不挂簿。
 func (b *Book) Match(order *RestingOrder) []Fill {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
 	var fills []Fill
-	isMarket := order.Price.IsZero()
+	isMarket := order.Price.IsZero() // 价格为0就是市价单
 	if order.Direction == Buy {
+		// 买单
 		for order.Remaining.Sign() > 0 && len(b.asks) > 0 {
-			best := b.asks[0]
+			best := b.asks[0] // 卖一
 			if !isMarket && best.Price.GreaterThan(order.Price) {
+				// 限价单且订单价小于卖一价
 				break
 			}
+			// 可撮合：
+			// 1.市价单
+			// 2.限价单，订单价格大于卖一价
 			vol := decimal.Min(order.Remaining, best.Remaining)
 			fills = append(fills, Fill{Price: best.Price, Volume: vol, MakerOrder: best, TakerOrder: order})
 			order.Remaining = order.Remaining.Sub(vol)
@@ -79,11 +85,16 @@ func (b *Book) Match(order *RestingOrder) []Fill {
 			}
 		}
 	} else {
+		// 卖单
 		for order.Remaining.Sign() > 0 && len(b.bids) > 0 {
-			best := b.bids[0]
+			best := b.bids[0] // 买一
 			if !isMarket && best.Price.LessThan(order.Price) {
+				// 限价单且买一价小于订单价格
 				break
 			}
+			// 可撮合：
+			// 1.市价单
+			// 2.限价单，订单价小于买一价
 			vol := decimal.Min(order.Remaining, best.Remaining)
 			fills = append(fills, Fill{Price: best.Price, Volume: vol, MakerOrder: best, TakerOrder: order})
 			order.Remaining = order.Remaining.Sub(vol)
@@ -96,7 +107,7 @@ func (b *Book) Match(order *RestingOrder) []Fill {
 	return fills
 }
 
-// Rest 把未完全成交的LIMIT单剩余部分挂进簿子，按价格-时间优先插入到正确位置
+// 把未完全成交的LIMIT单剩余部分挂进簿子，按价格-时间优先插入到正确位置
 func (b *Book) Rest(order *RestingOrder) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
