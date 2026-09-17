@@ -1,8 +1,3 @@
-// 强平/风控：账户权益(available+全部持仓未实现盈亏) 跌破全部仓位维持保证金要求之和就触发
-// 强平——先挂保护价限价单排队成交，超时(LiquidationOrderTimeoutMs)没成交完再兜底按标记价
-// 直接结算；结算完账户如果还剩正数余额(维持保证金缓冲)不退给用户，扫进保险基金清零，对齐
-// Binance"破产价结算、盈余进保险基金"的效果；结算完是负数(穿仓)，保险基金垫付。
-// 照抄这次会话对Java版LiquidationService做的全部改动，见plan文件。
 package service
 
 import (
@@ -38,7 +33,7 @@ func NewLiquidationService(engine *EngineService, orders *repo.OrderRepo, positi
 	}
 }
 
-// RiskScanOnce 全部有仓位的账户扫一遍——照抄Java版scanAndLiquidateCrossAccounts
+// RiskScanOnce 全部有仓位的账户扫一遍
 func (s *LiquidationService) RiskScanOnce(ctx context.Context) {
 	uids, err := s.positions.FindAllOpenUIDs(ctx)
 	if err != nil {
@@ -53,8 +48,8 @@ func (s *LiquidationService) RiskScanOnce(ctx context.Context) {
 }
 
 func (s *LiquidationService) checkAndLiquidate(ctx context.Context, uid uint64) error {
-	maintTotal, positions, ok, err := s.positionSvc.MaintenanceMarginTotal(ctx, uid)
-	if err != nil || !ok || len(positions) == 0 {
+	maintTotal, positions, err := s.positionSvc.MaintenanceMarginTotal(ctx, uid)
+	if err != nil || len(positions) == 0 {
 		return err
 	}
 	available, err := s.accounts.FindFreshAvailable(ctx, uid)

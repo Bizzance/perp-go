@@ -16,6 +16,7 @@ func NewRiskLimitRepo(db *sqlx.DB) *RiskLimitRepo { return &RiskLimitRepo{db: db
 // 找第一个覆盖到目标名义价值的档位，靠的就是这个顺序
 func (r *RiskLimitRepo) FindBySymbol(ctx context.Context, symbol string) ([]model.RiskLimitTier, error) {
 	var tiers []model.RiskLimitTier
-	err := r.db.SelectContext(ctx, &tiers, `SELECT * FROM risk_limit_tiers WHERE symbol = ? ORDER BY tier ASC`, symbol)
+	err := r.db.SelectContext(ctx, &tiers, `SELECT id, symbol, tier, max_notional, maintenance_margin_rate, maintenance_amount, max_leverage
+		FROM risk_limit_tiers WHERE symbol = ? ORDER BY tier ASC`, symbol)
 	return tiers, err
 }

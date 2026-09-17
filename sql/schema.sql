@@ -32,9 +32,52 @@ CREATE TABLE IF NOT EXISTS coins (
   max_volume                DECIMAL(18,8) NOT NULL DEFAULT 0 COMMENT '0=不限制',
   funding_interval_hours    INT UNSIGNED NOT NULL DEFAULT 8 COMMENT '资金费率结算周期(小时)，对齐到从0点起的整点边界',
   funding_rate_cap          DECIMAL(10,6) NOT NULL DEFAULT 0.007500 COMMENT '资金费率上下限，0=不限制',
+  price_protection_ratio    DECIMAL(8,6) NOT NULL DEFAULT 0.050000 COMMENT '限价单允许偏离标记/指数价格的最大比例，0=不校验',
   created_at                DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (symbol)
 ) ENGINE=InnoDB;
+
+-- 这个项目没有独立的迁移工具，schema.sql就是唯一的建表脚本——上面CREATE TABLE IF NOT EXISTS
+-- 对已经存在的coins表是no-op，不会补上后续这几次迭代新增/删除的列，直接重跑这个文件在一个
+-- 已经建过库的环境上会导致代码里SELECT的列在数据库里不存在。MySQL(不是MariaDB)的ALTER TABLE
+-- 不支持ADD/DROP COLUMN IF NOT EXISTS/IF EXISTS这种语法(实测8.4.11直接报语法错误)，用
+-- information_schema查列是否存在、拼接成动态SQL再PREPARE/EXECUTE来模拟同样的效果，把coins表
+-- 补齐到跟上面CREATE TABLE定义一致，让这个文件对"全新库"和"已经建过表、只是列结构落后"两种
+-- 情况都能安全重复执行
+SET @sql := (SELECT IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'coins' AND COLUMN_NAME = 'funding_interval_hours') = 0,
+  'ALTER TABLE coins ADD COLUMN funding_interval_hours INT UNSIGNED NOT NULL DEFAULT 8 COMMENT ''资金费率结算周期(小时)，对齐到从0点起的整点边界''',
+  'SELECT 1'
+));
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @sql := (SELECT IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'coins' AND COLUMN_NAME = 'funding_rate_cap') = 0,
+  'ALTER TABLE coins ADD COLUMN funding_rate_cap DECIMAL(10,6) NOT NULL DEFAULT 0.007500 COMMENT ''资金费率上下限，0=不限制''',
+  'SELECT 1'
+));
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @sql := (SELECT IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'coins' AND COLUMN_NAME = 'price_protection_ratio') = 0,
+  'ALTER TABLE coins ADD COLUMN price_protection_ratio DECIMAL(8,6) NOT NULL DEFAULT 0.050000 COMMENT ''限价单允许偏离标记/指数价格的最大比例，0=不校验''',
+  'SELECT 1'
+));
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @sql := (SELECT IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'coins' AND COLUMN_NAME = 'max_leverage') > 0,
+  'ALTER TABLE coins DROP COLUMN max_leverage',
+  'SELECT 1'
+));
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @sql := (SELECT IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'coins' AND COLUMN_NAME = 'maintenance_margin_rate') > 0,
+  'ALTER TABLE coins DROP COLUMN maintenance_margin_rate',
+  'SELECT 1'
+));
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 -- 保证金分档(风险限额)：一个symbol配多档，按tier(1开始)从小到大对应名义价值从低到高。
 -- maintenance_amount是速算扣除数，让跨档位时维持保证金连续，公式=名义价值*maintenance_margin_rate
@@ -90,9 +133,19 @@ CREATE TABLE IF NOT EXISTS positions (
   version           INT UNSIGNED NOT NULL DEFAULT 0,
   update_time       BIGINT UNSIGNED NOT NULL,
   PRIMARY KEY (id),
-  UNIQUE KEY uk_positions_uid_symbol_side (uid, symbol, side),
-  KEY idx_positions_symbol (symbol) COMMENT '资金费率结算按symbol批量查仓位用，uid_symbol_side联合键因为uid在最前面覆盖不到这个查询'
+  UNIQUE KEY uk_positions_uid_symbol_side (uid, symbol, side)
 ) ENGINE=InnoDB;
+
+-- 资金费率结算按symbol批量查仓位用，uk_positions_uid_symbol_side因为uid在最前面覆盖不到
+-- 这个查询。MySQL的CREATE INDEX不支持IF NOT EXISTS(实测报语法错误，跟上面coins表ALTER
+-- 同样的原因)，用information_schema.STATISTICS查索引是否存在来模拟，对已经建过表的库
+-- 能补上这个索引，不能指望CREATE TABLE IF NOT EXISTS生效
+SET @sql := (SELECT IF(
+  (SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'positions' AND INDEX_NAME = 'idx_positions_symbol') = 0,
+  'CREATE INDEX idx_positions_symbol ON positions (symbol)',
+  'SELECT 1'
+));
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 -- 成交记录
 CREATE TABLE IF NOT EXISTS trades (

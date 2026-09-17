@@ -1,6 +1,3 @@
-// Package model 定义领域结构体，对应 sql/schema.sql 里的表——字段用 decimal.Decimal 而不是
-// float64：这是金融计算的硬要求(浮点数无法精确表示十进制小数，累加会产生误差)，Java版全程用
-// BigDecimal就是同一个理由，这里用 shopspring/decimal 对应。
 package model
 
 import "github.com/shopspring/decimal"
@@ -42,8 +39,8 @@ const (
 	OrderStatusCanceled        OrderStatus = "CANCELED"
 )
 
-// ActiveStatuses：撮合引擎还需要继续处理的状态——跟Java版ContractOrderStatus.ACTIVE_STATUSES
-// 同一个用途，扫描定时任务/撤单校验都用这个判断"这笔委托还活着吗"
+// ActiveOrderStatuses 撮合引擎还需要继续处理的状态——扫描定时任务/撤单校验都用这个判断
+// "这笔委托还活着吗"
 var ActiveOrderStatuses = map[OrderStatus]bool{
 	OrderStatusNew:             true,
 	OrderStatusPartiallyFilled: true,
@@ -87,6 +84,7 @@ type Coin struct {
 	MaxVolume            decimal.Decimal `db:"max_volume"`
 	FundingIntervalHours int32           `db:"funding_interval_hours"`
 	FundingRateCap       decimal.Decimal `db:"funding_rate_cap"`
+	PriceProtectionRatio decimal.Decimal `db:"price_protection_ratio"`
 }
 
 // RiskLimitTier 保证金分档(风险限额)：维持保证金率/最大杠杆按仓位名义价值分档，仓位越大
@@ -142,7 +140,7 @@ type Position struct {
 	UpdateTime     int64           `db:"update_time"`
 }
 
-// UnrealizedPnl 未实现盈亏公式，照抄Java版ContractPositionService类头注释的推导：
+// UnrealizedPnl 未实现盈亏公式：
 // 多头 = (markPrice - avgEntryPrice) * volume；空头 = (avgEntryPrice - markPrice) * volume
 func (p *Position) UnrealizedPnl(markPrice decimal.Decimal) decimal.Decimal {
 	if p.Side == SideLong {

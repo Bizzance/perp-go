@@ -1,6 +1,7 @@
 // Package api 是contract-api进程的Gin路由/handler层。MVP阶段鉴权用明文uid参数占位
 // (不做HMAC/token校验)，接口设计上uid都是独立传参，方便后续直接换成鉴权中间件注入，
-// 不用改业务代码——见plan文件"明确不做"一节。
+// 不用改业务代码——见plan文件"明确不做"一节。GET查询接口走query string，POST写接口统一
+// 用JSON body(Content-Type: application/json)+ShouldBindJSON，不用表单编码。
 package api
 
 import (
@@ -30,12 +31,25 @@ type Server struct {
 	producer  *mq.Producer
 }
 
-func NewServer(accounts *service.AccountService, positions *service.PositionService, coins *repo.CoinRepo,
-	orders *repo.OrderRepo, trades *repo.TradeRepo, markPrice *service.MarkPriceService, funding *service.FundingService,
-	producer *mq.Producer) *Server {
+func NewServer(
+	accounts *service.AccountService,
+	positions *service.PositionService,
+	coins *repo.CoinRepo,
+	orders *repo.OrderRepo,
+	trades *repo.TradeRepo,
+	markPrice *service.MarkPriceService,
+	funding *service.FundingService,
+	producer *mq.Producer,
+) *Server {
 	return &Server{
-		accounts: accounts, positions: positions, coins: coins, orders: orders, trades: trades,
-		markPrice: markPrice, funding: funding, producer: producer,
+		accounts:  accounts,
+		positions: positions,
+		coins:     coins,
+		orders:    orders,
+		trades:    trades,
+		markPrice: markPrice,
+		funding:   funding,
+		producer:  producer,
 	}
 }
 
@@ -60,16 +74,13 @@ func fail(c *gin.Context, code int, msg string) {
 }
 
 func ok(c *gin.Context, data any) {
-	c.JSON(http.StatusOK, gin.H{"code": 0, "message": "SUCCESS", "data": data})
+	c.JSON(http.StatusOK, gin.H{"code": 200, "message": "success", "data": data})
 }
 
+// parseUID 只给GET接口用——这些接口的参数走query string，没有body。写接口(POST)统一用
+// JSON body + ShouldBindJSON，uid跟着各自的request struct走，不再需要这个helper
 func parseUID(c *gin.Context) (uint64, bool) {
 	uid, err := decimal.NewFromString(c.Query("uid"))
-	if err != nil {
-		if s := c.PostForm("uid"); s != "" {
-			uid, err = decimal.NewFromString(s)
-		}
-	}
 	if err != nil || uid.Sign() <= 0 {
 		fail(c, 400, "uid参数不合法")
 		return 0, false
@@ -77,17 +88,27 @@ func parseUID(c *gin.Context) (uint64, bool) {
 	return uint64(uid.IntPart()), true
 }
 
+// bindJSON 全部POST接口统一的JSON body解析入口，失败了直接写400响应——调用方判断返回值
+// 决定要不要continue往下走，不用每个handler自己重复"解析失败就返回400"这几行
+func bindJSON(c *gin.Context, req any) bool {
+	if err := c.ShouldBindJSON(req); err != nil {
+		fail(c, 400, "请求参数不合法")
+		return false
+	}
+	return true
+}
+
+type adjustBalanceRequest struct {
+	UID    uint64          `json:"uid" binding:"required"`
+	Amount decimal.Decimal `json:"amount"`
+}
+
 func (s *Server) adjustBalance(c *gin.Context) {
-	uid, ok1 := parseUID(c)
-	if !ok1 {
+	var req adjustBalanceRequest
+	if !bindJSON(c, &req) {
 		return
 	}
-	amount, err := decimal.NewFromString(c.PostForm("amount"))
-	if err != nil {
-		fail(c, 400, "amount参数不合法")
-		return
-	}
-	if err := s.accounts.AdjustBalance(c.Request.Context(), uid, amount); err != nil {
+	if err := s.accounts.AdjustBalance(c.Request.Context(), req.UID, req.Amount); err != nil {
 		fail(c, 500, err.Error())
 		return
 	}
@@ -107,16 +128,54 @@ func (s *Server) accountInfo(c *gin.Context) {
 	ok(c, view)
 }
 
+type addOrderRequest struct {
+	UID    uint64            `json:"uid" binding:"required"`
+	Symbol string            `json:"symbol" binding:"required"`
+	Side   model.Side        `json:"side" binding:"required"`
+	Action model.OrderAction `json:"action" binding:"required"`
+	Type   model.OrderType   `json:"type"`
+	// Leverage/MarginAmount/Amount用指针而不是值类型：JSON里"字段没传"和"字段传了显式的0"
+	// 必须能区分开——没传时才套默认值/走另一个字段，显式传0要老老实实地报错，不能悄悄当成
+	// "没传"处理掉，那样一个总是把零值字段也序列化出来的客户端库会把真实的输入错误悄悄丢掉
+	Leverage     *decimal.Decimal `json:"leverage"`
+	Price        decimal.Decimal  `json:"price"`
+	MarginAmount *decimal.Decimal `json:"marginAmount"`
+	Amount       *decimal.Decimal `json:"amount"`
+	ReduceOnly   bool             `json:"reduceOnly"`
+}
+
 func (s *Server) addOrder(c *gin.Context) {
-	uid, ok1 := parseUID(c)
-	if !ok1 {
+	var req addOrderRequest
+	if !bindJSON(c, &req) {
 		return
 	}
-	symbol := c.PostForm("symbol")
-	side := model.Side(c.PostForm("side"))
-	action := model.OrderAction(c.PostForm("action"))
-	orderType := model.OrderType(c.DefaultPostForm("type", "LIMIT"))
-	leverage, err := decimal.NewFromString(c.DefaultPostForm("leverage", "1"))
+	uid := req.UID
+	symbol := req.Symbol
+	side := req.Side
+	action := req.Action
+	// side/action任何不认识的值都必须拒绝，不能放过去——matching.DirectionOf对side/action
+	// 只特判了(LONG,OPEN)和(SHORT,CLOSE)算买方，其它一律当卖方处理，一个拼错的side/action
+	// 字符串会被悄悄撮合成方向相反的交易，而不是报错
+	if side != model.SideLong && side != model.SideShort {
+		fail(c, 400, "side参数不合法")
+		return
+	}
+	if action != model.ActionOpen && action != model.ActionClose {
+		fail(c, 400, "action参数不合法")
+		return
+	}
+	orderType := req.Type
+	if orderType == "" {
+		orderType = model.OrderTypeLimit
+	}
+	if orderType != model.OrderTypeLimit && orderType != model.OrderTypeMarket {
+		fail(c, 400, "type参数不合法")
+		return
+	}
+	leverage := decimal.NewFromInt(1)
+	if req.Leverage != nil {
+		leverage = *req.Leverage
+	}
 	// maxSaneLeverage是不区分开平仓、不查分档配置的兜底上限——只用来挡掉明显离谱/会导致
 	// 下面uint32(leverage.IntPart())溢出截断成垃圾值的输入。真正按分档算出来的tier.MaxLeverage
 	// 只在下面ActionOpen分支里校验，是刻意的：leverage这个字段只有开仓会用来算需要冻结多少
@@ -125,7 +184,12 @@ func (s *Server) addOrder(c *gin.Context) {
 	// 反而会把用户已有仓位卡死平不掉——两害相权，让平仓单的leverage只挡这道跟合约配置无关的
 	// 离谱值兜底，是本次分档改动反复权衡后的结论，不是遗漏
 	const maxSaneLeverage = 1000
-	if err != nil || leverage.Sign() <= 0 || leverage.GreaterThan(decimal.NewFromInt(maxSaneLeverage)) {
+	if leverage.Sign() <= 0 || leverage.GreaterThan(decimal.NewFromInt(maxSaneLeverage)) || !leverage.IsInteger() {
+		// 必须是整数：leverage落库时是uint32(order.Leverage)，settlement.go计算仓位保证金
+		// 时也是按这个落库的整数杠杆重算(不是按下单时这个decimal算requiredMargin用的原始
+		// 精度值)。如果这里放行小数杠杆(比如7.5)，冻结保证金按7.5算是对的，但落库/后续
+		// 结算全部按truncate过的7算，两边对不上，会污染这个仓位的position_margin/ROE/
+		// 预估强平价——干脆不允许小数杠杆，跟真实交易所只提供整数倍杠杆选项一致
 		fail(c, 400, "leverage参数不合法")
 		return
 	}
@@ -135,9 +199,9 @@ func (s *Server) addOrder(c *gin.Context) {
 		fail(c, 400, "合约不存在或已下架")
 		return
 	}
-	// 只有MARKET单定价、开仓分档判断这两处要用标记价格，LIMIT+CLOSE(平仓最常见的形态)完全
-	// 用不上，按需取一次就好；但凡要用就只取这一次、后面复用同一个值，避免读两次标记价格中间
-	// 恰好更新导致两处判断用了不一致的值
+	// 只有MARKET单定价、开仓分档判断(含价格保护带，只对开仓生效)这两处要用标记价格，
+	// LIMIT+CLOSE(平仓最常见的形态)完全用不上，按需取一次就好；但凡要用就只取这一次、
+	// 全函数复用同一个值，避免读两次中间恰好更新导致不同判断用了不一致的值
 	var mark decimal.Decimal
 	var hasMark bool
 	if orderType == model.OrderTypeMarket || action == model.ActionOpen {
@@ -146,14 +210,33 @@ func (s *Server) addOrder(c *gin.Context) {
 
 	var price decimal.Decimal
 	if orderType == model.OrderTypeLimit {
-		price, err = decimal.NewFromString(c.PostForm("price"))
-		if err != nil || price.Sign() <= 0 {
+		price = req.Price
+		if price.Sign() <= 0 {
 			fail(c, 400, "限价单price参数不合法")
 			return
 		}
 		if coin.PriceTick.Sign() > 0 && !price.Mod(coin.PriceTick).IsZero() {
 			fail(c, 400, "price不符合最小变动单位")
 			return
+		}
+		// 价格保护带：只对开仓单生效，防止两类问题——①用户瞎填价格导致的胖手指交易 ②故意报
+		// 一个远离市价的"吃单价"去钻空子(挂单实际会按盘口对手的真实价格成交，不是按这个填的价，
+		// contract-api这边在撮合之前根本不知道真实成交价是多少，靠这道带宽把两者的差距限制在
+		// 一个可控范围内)。平仓单不冻结保证金(见下面action==ActionOpen那个分支)，钻这个空子
+		// 对平仓单没有意义，反而如果对平仓单也校验，行情剧烈波动、标记价格滞后时会把用户想
+		// 平仓离场的委托也挡在外面——跟开仓杠杆校验刻意放过平仓单是同一个道理。参考价优先用
+		// 标记价格，标记价格不存在(这个symbol从没成交过)就退回用指数价格；两个都没有(全新
+		// symbol、也没人喂过指数价)就没有参考基准，放行不校验，这是唯一防不住的缺口
+		referencePrice, hasReference := mark, hasMark
+		if !hasReference {
+			referencePrice, hasReference = s.markPrice.GetIndexPrice(c.Request.Context(), symbol)
+		}
+		if action == model.ActionOpen && hasReference && referencePrice.Sign() > 0 && coin.PriceProtectionRatio.Sign() > 0 {
+			deviation := price.Sub(referencePrice).Abs().Div(referencePrice)
+			if deviation.GreaterThan(coin.PriceProtectionRatio) {
+				fail(c, 400, "委托价格偏离参考价过多")
+				return
+			}
 		}
 	} else {
 		if !hasMark {
@@ -164,21 +247,17 @@ func (s *Server) addOrder(c *gin.Context) {
 	}
 
 	var amount decimal.Decimal
-	if marginStr := c.PostForm("marginAmount"); marginStr != "" {
-		marginAmount, err := decimal.NewFromString(marginStr)
-		if err != nil || marginAmount.Sign() <= 0 {
+	switch {
+	case req.MarginAmount != nil:
+		if req.MarginAmount.Sign() <= 0 {
 			fail(c, 400, "marginAmount参数不合法")
 			return
 		}
-		notional := marginAmount.Mul(leverage)
+		notional := req.MarginAmount.Mul(leverage)
 		amount = notional.Div(price).Truncate(coin.BaseCoinScale)
-	} else if amountStr := c.PostForm("amount"); amountStr != "" {
-		amount, err = decimal.NewFromString(amountStr)
-		if err != nil {
-			fail(c, 400, "amount参数不合法")
-			return
-		}
-	} else {
+	case req.Amount != nil:
+		amount = *req.Amount
+	default:
 		fail(c, 400, "必须传marginAmount或amount之一")
 		return
 	}
@@ -241,14 +320,18 @@ func (s *Server) addOrder(c *gin.Context) {
 				existingNotional = existingNotional.Add(o.RemainingAmount().Mul(o.Price))
 			}
 		}
-		// 这笔新委托自己的名义价值同样不能只信submitted price：SHORT+OPEN在撮合引擎里是卖方向，
-		// 挂一个远低于市价的价格属于"吃单价"，会立刻按盘口对手的真实价格成交，不是按这个填的低价——
-		// 用max(price, markPrice)取更保守的那个当分档判断的基准。这个防护依赖有标记价格可用，
-		// 一个从没成交过的全新symbol(hasMark=false)防不住这一招，是contract-api这边看不到
-		// contract-engine盘口真实成交价这个更大架构问题的一角，跟下单冻结保证金用submitted price
-		// 而不是真实成交价是同一个根因，MVP阶段先记录、不在这里单独打补丁
+		// 这笔新委托自己的名义价值同样不能只信submitted price，但只对SHORT+OPEN生效：
+		// SHORT+OPEN在撮合引擎里是卖方向，挂一个远低于市价的价格属于"吃单价"，会立刻按盘口
+		// 对手的真实价格成交，不是按这个填的低价，所以要用max(price, markPrice)取更保守的
+		// 那个当分档判断的基准。LONG+OPEN反过来：远低于市价的价格是完全合法的被动挂单(买
+		// 跌)，只会按这个低价成交，如果同样套max(price,markPrice)会把这类正常订单的名义
+		// 价值算得比真实值更大，可能因此被判进不该适用的更严档位、平白无故拒单——这个防护
+		// 依赖有标记价格可用，一个从没成交过的全新symbol(hasMark=false)防不住这一招，是
+		// contract-api这边看不到contract-engine盘口真实成交价这个更大架构问题的一角，跟
+		// 下单冻结保证金用submitted price而不是真实成交价是同一个根因，MVP阶段先记录、
+		// 不在这里单独打补丁
 		orderNotionalPrice := price
-		if hasMark && mark.GreaterThan(price) {
+		if side == model.SideShort && hasMark && mark.GreaterThan(price) {
 			orderNotionalPrice = mark
 		}
 		tier, err := s.positions.TierFor(c.Request.Context(), symbol, existingNotional.Add(amount.Mul(orderNotionalPrice)))
@@ -275,7 +358,7 @@ func (s *Server) addOrder(c *gin.Context) {
 	o := &model.Order{
 		OrderID: orderID, UID: uid, Symbol: symbol, Side: side, Action: action, Type: orderType,
 		Price: price, Amount: amount, Leverage: uint32(leverage.IntPart()),
-		ReduceOnly: c.PostForm("reduceOnly") == "true", Status: model.OrderStatusNew, CreateTime: now, UpdateTime: now,
+		ReduceOnly: req.ReduceOnly, Status: model.OrderStatusNew, CreateTime: now, UpdateTime: now,
 	}
 	if action == model.ActionOpen {
 		o.FrozenMargin = requiredMargin
@@ -299,11 +382,16 @@ func (s *Server) addOrder(c *gin.Context) {
 	ok(c, orderID)
 }
 
+type cancelOrderRequest struct {
+	UID uint64 `json:"uid" binding:"required"`
+}
+
 func (s *Server) cancelOrder(c *gin.Context) {
-	uid, ok1 := parseUID(c)
-	if !ok1 {
+	var req cancelOrderRequest
+	if !bindJSON(c, &req) {
 		return
 	}
+	uid := req.UID
 	orderID, err := decimal.NewFromString(c.Param("orderId"))
 	if err != nil {
 		fail(c, 400, "orderId不合法")
@@ -432,20 +520,23 @@ func (s *Server) fundingHistory(c *gin.Context) {
 	ok(c, records)
 }
 
+type setIndexPriceRequest struct {
+	Symbol string          `json:"symbol" binding:"required"`
+	Price  decimal.Decimal `json:"price"`
+}
+
 // setIndexPrice 外部行情源(MVP阶段先靠脚本/运营手动喂，以后换成接入币安行情的适配器)推送
 // 指数价格——资金费率结算依赖这个值，见FundingService
 func (s *Server) setIndexPrice(c *gin.Context) {
-	symbol := c.PostForm("symbol")
-	if symbol == "" {
-		fail(c, 400, "symbol参数不能为空")
+	var req setIndexPriceRequest
+	if !bindJSON(c, &req) {
 		return
 	}
-	price, err := decimal.NewFromString(c.PostForm("price"))
-	if err != nil || price.Sign() <= 0 {
+	if req.Price.Sign() <= 0 {
 		fail(c, 400, "price参数不合法")
 		return
 	}
-	if err := s.markPrice.SetIndexPrice(c.Request.Context(), symbol, price); err != nil {
+	if err := s.markPrice.SetIndexPrice(c.Request.Context(), req.Symbol, req.Price); err != nil {
 		fail(c, 500, err.Error())
 		return
 	}
