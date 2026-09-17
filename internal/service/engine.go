@@ -1,6 +1,3 @@
-// EngineService 是撮合引擎进程(cmd/contract-engine)的核心编排：收单→撮合→结算→(剩余量)
-// 挂簿或释放。正常用户下单和强平单走的是同一条路径(SubmitOrder)，区别只在于强平单带着
-// Liquidation=true标记、结算完之后要额外走穿仓/盈余清算分支，见liquidation.go。
 package service
 
 import (
@@ -141,7 +138,7 @@ func sellUID(f matching.Fill) uint64 {
 //  2. 这个uid已经没有剩余仓位了(这一轮强平彻底结束)、账户还剩正数余额：这部分是维持保证金
 //     要求留下的缓冲，不退给用户——真实交易所是按破产价结算、多出来的差价当清算费进保险基金，
 //     这里不改结算价格/撮合逻辑，改成结算完直接把这部分正数余额扫进保险基金、账户清零，
-//     经济结果等价，照抄这次会话给Java版加的sweepLiquidationSurplusIfNeeded
+//     经济结果等价
 func (e *EngineService) HandleLiquidationSettleAftermath(ctx context.Context, symbol string, uid uint64) error {
 	available, err := e.accounts.FindFreshAvailable(ctx, uid)
 	if err != nil {

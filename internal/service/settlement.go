@@ -1,5 +1,3 @@
-// 结算：一笔成交(不管是正常撮合还是强平单成交)落地到账户/持仓/流水——照抄Java版
-// ContractTradeSettlementService.settleFill的分支结构(OPEN分支/CLOSE分支)。
 package service
 
 import (

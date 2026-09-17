@@ -1,5 +1,3 @@
-// Package cache 封装Redis客户端——存标记价格/指数价格/资金费率周期内的采样累加器，
-// 后续阶段(幂等去重/短期token)会复用同一个连接。
 package cache
 
 import (
@@ -31,8 +29,8 @@ func (c *Cache) SetMarkPrice(ctx context.Context, symbol, price string) error {
 	return c.rdb.Set(ctx, markPriceKey(symbol), price, 0).Err()
 }
 
-// GetMarkPrice 返回("", nil)表示这个symbol还没有任何标记价格(从没成交过)——调用方要按
-// Java版MarkPriceService同样的语义处理："没有标记价格"是一个合法状态，不是错误
+// GetMarkPrice 返回("", nil)表示这个symbol还没有任何标记价格(从没成交过)——调用方要把
+// "没有标记价格"当一个合法状态处理，不是错误
 func (c *Cache) GetMarkPrice(ctx context.Context, symbol string) (string, error) {
 	v, err := c.rdb.Get(ctx, markPriceKey(symbol)).Result()
 	if errors.Is(err, redis.Nil) {

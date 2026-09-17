@@ -44,8 +44,7 @@ func (r *PositionRepo) FindOpenBySymbol(ctx context.Context, symbol string) ([]m
 	return positions, err
 }
 
-// ApplyOpenFill 开仓/加仓：加权平均开仓价、累加保证金——照抄Java版ContractPositionService.
-// applyOpenFillInternal的推导，不存在就先插入一行空仓位再累加
+// ApplyOpenFill 开仓/加仓：加权平均开仓价、累加保证金，不存在就先插入一行空仓位再累加
 func (r *PositionRepo) ApplyOpenFill(ctx context.Context, uid uint64, symbol string, side model.Side,
 	dealVolume, dealPrice, addedMargin decimal.Decimal, leverage uint32, updateTime int64) error {
 	existing, err := r.Find(ctx, uid, symbol, side)

@@ -1,6 +1,3 @@
-// Package repo 数据访问层——账户余额的加减/冻结/解冻全部用"UPDATE...WHERE 字段>=金额"这种
-// 数据库层面的原子条件更新替代悲观锁，跟Java版ContractAccountRepository的写法一一对应，
-// 见plan文件"关键实现要点"一节。
 package repo
 
 import (
@@ -28,9 +25,7 @@ func (r *AccountRepo) FindByUID(ctx context.Context, uid uint64) (*model.Account
 }
 
 // GetOrCreate 首次访问时自动建账户——插入撞uid唯一约束时说明并发下对方已经建好了，直接
-// 重新查一次用对方那行，不是错误，跟Java版ContractAccountService.createAccountIfAbsent
-// 同样的取舍(那边额外用REQUIRES_NEW独立事务，Go这边单条INSERT本身就是原子的，不需要
-// 额外包一层事务)
+// 重新查一次用对方那行，不是错误：Go这边单条INSERT本身就是原子的，不需要额外包一层事务
 func (r *AccountRepo) GetOrCreate(ctx context.Context, uid uint64) (*model.Account, error) {
 	if a, err := r.FindByUID(ctx, uid); err != nil {
 		return nil, err
@@ -61,7 +56,7 @@ func (r *AccountRepo) FreezeFromAvailable(ctx context.Context, id uint64, amount
 // FreezeForceIntoNegative available+frozenMargin都不够、但账户权益(含持仓浮盈)够覆盖时的
 // 最后一条路径：币安式"持仓浮盈也能当买力开新仓"——没有WHERE守卫，调用方已经在service层用
 // 未实现盈亏验证过权益足够，这里只是把"允许借用浮盈"这个决定落地，available可能因此变负，
-// 全仓模式下这是合法状态(强平穿仓/保险基金垫付走的就是这套)，照抄这次会话给Java版做的同名改动
+// 全仓模式下这是合法状态(强平穿仓/保险基金垫付走的就是这套)
 func (r *AccountRepo) FreezeForceIntoNegative(ctx context.Context, id uint64, amount decimal.Decimal) error {
 	_, err := r.db.ExecContext(ctx,
 		`UPDATE accounts SET available = available - ?, frozen_margin = frozen_margin + ? WHERE id = ?`,
@@ -78,9 +73,8 @@ func (r *AccountRepo) UnfreezeMargin(ctx context.Context, id uint64, amount deci
 }
 
 // DecreaseFrozenMargin 开仓成交：冻结的保证金转移到仓位(只扣frozenMargin，全仓下不是真
-// 锁定的钱，转正的这笔钱紧接着由调用方调SettleToAvailable还回available——见
-// ContractTradeSettlementService.java同名逻辑的注释："全仓模式下positionMargin只是记账
-// 用的名义值，不需要真的搬钱"
+// 锁定的钱，转正的这笔钱紧接着由调用方调SettleToAvailable还回available——全仓模式下
+// positionMargin只是记账用的名义值，不需要真的搬钱
 func (r *AccountRepo) DecreaseFrozenMargin(ctx context.Context, id uint64, amount decimal.Decimal) (bool, error) {
 	res, err := r.db.ExecContext(ctx,
 		`UPDATE accounts SET frozen_margin = frozen_margin - ? WHERE id = ? AND frozen_margin >= ?`,
@@ -96,7 +90,7 @@ func (r *AccountRepo) SettleToAvailable(ctx context.Context, id uint64, amount d
 }
 
 // DeductFee 手续费扣款：无守卫，允许扣成负数——这笔手续费对应的成交已经真实发生，不能因为
-// 差一点钱扣不出来就不扣，跟Java版deductFeeWithCredit(在没有信用额度时)的取舍一致
+// 差一点钱扣不出来就不扣
 func (r *AccountRepo) DeductFee(ctx context.Context, id uint64, fee decimal.Decimal) error {
 	_, err := r.db.ExecContext(ctx, `UPDATE accounts SET available = available - ? WHERE id = ?`, fee, id)
 	return err

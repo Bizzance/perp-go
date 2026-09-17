@@ -1,4 +1,3 @@
-// 资金流水表——纯审计用途，不参与任何计算，跟Java版MemberTransaction同一个定位
 package repo
 
 import (

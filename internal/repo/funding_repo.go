@@ -1,4 +1,3 @@
-// 资金费率结算历史——审计+客户端历史费率查询用，见FundingService.SettleIfDue
 package repo
 
 import (

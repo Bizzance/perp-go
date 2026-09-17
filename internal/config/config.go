@@ -1,5 +1,3 @@
-// Package config 加载本地开发用的配置——MVP阶段直接用环境变量+默认值，不引入额外的配置文件
-// 格式/库，跟这个项目"本地跑起来简单"的一贯要求一致。
 package config
 
 import "os"
@@ -12,7 +10,7 @@ type Config struct {
 
 	APIAddr string // contract-api 监听地址
 
-	// 撮合/风控相关的可调参数，先用固定默认值，跟Java版local profile的量级对齐
+	// 撮合/风控相关的可调参数，先用固定默认值
 	LiquidationOrderTimeoutMs int64 // 强平单挂单排队超时兜底阈值
 	RiskScanIntervalMs        int64 // 强平扫描周期
 	MarkPriceEmaAlpha         float64

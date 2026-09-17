@@ -1,4 +1,3 @@
-// 保证金分档(风险限额)配置——见sql/schema.sql的risk_limit_tiers表头注释
 package repo
 
 import (

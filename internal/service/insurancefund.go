@@ -23,7 +23,7 @@ func (s *InsuranceFundService) FreshBalance(ctx context.Context) (decimal.Decima
 }
 
 // Adjust amount正数=强平盈余注入基金，负数=基金垫付穿仓亏损。基金余额允许为负(代表系统
-// 亏空)，MVP阶段只记日志告警，不做熔断，照抄Java版ContractInsuranceFundService.adjust
+// 亏空)，MVP阶段只记日志告警，不做熔断
 func (s *InsuranceFundService) Adjust(ctx context.Context, symbol string, uid, positionID uint64, amount decimal.Decimal, remark string) error {
 	balanceAfter, err := s.fund.Adjust(ctx, symbol, uid, positionID, amount, remark, time.Now().UnixMilli())
 	if err != nil {

@@ -1,5 +1,3 @@
-// 保险基金：全局唯一一行+流水表。amount正数=强平盈余注入/其它注入，负数=穿仓垫付——
-// 照抄Java版ContractInsuranceFundService.adjust的语义(见该类注释)。
 package repo
 
 import (
@@ -21,8 +19,8 @@ func (r *InsuranceFundRepo) FreshBalance(ctx context.Context) (decimal.Decimal, 
 	return v, err
 }
 
-// Adjust 调整基金余额+写一条流水，跟Java版同名方法一样允许余额变负(代表系统亏空)，MVP
-// 阶段只记日志告警，不做熔断——调用方(service层)负责在余额变负时打日志
+// Adjust 调整基金余额+写一条流水，允许余额变负(代表系统亏空)，MVP阶段只记日志告警，
+// 不做熔断——调用方(service层)负责在余额变负时打日志
 func (r *InsuranceFundRepo) Adjust(ctx context.Context, symbol string, uid, positionID uint64, amount decimal.Decimal, remark string, now int64) (decimal.Decimal, error) {
 	if _, err := r.db.ExecContext(ctx, `UPDATE insurance_fund SET balance = balance + ? WHERE id = ?`, amount, insuranceFundID); err != nil {
 		return decimal.Zero, err

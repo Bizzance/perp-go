@@ -1,9 +1,3 @@
-// Package matching 实现每个symbol一个订单簿的撮合引擎：价格-时间优先，LIMIT单未完全成交的
-// 剩余部分挂在簿子上等下一笔对手单，MARKET单不挂簿(吃多少算多少，剩余直接释放)。
-//
-// 撮合只关心"买/卖"方向，不关心side/action这两个业务维度——LONG+OPEN、SHORT+CLOSE都是买方
-// (要拉高价格才能成交)；SHORT+OPEN、LONG+CLOSE都是卖方，跟真实期货/永续合约订单簿的通用做法
-// 一致，照抄Java版ContractTrader的思路（不看Java代码，按这个领域里通行的语义重新实现）。
 package matching
 
 import (

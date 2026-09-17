@@ -1,6 +1,3 @@
-// Package db 提供MySQL连接——用sqlx而不是GORM，原子条件UPDATE("UPDATE...WHERE available>=?")
-// 这个并发安全模式要求精确控制SQL语句本身，跟ORM的抽象合不来，Java版当初用手写JPQL也是同一个
-// 理由(见plan文件)。
 package db
 
 import (

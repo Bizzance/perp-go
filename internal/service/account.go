@@ -45,7 +45,6 @@ func (s *AccountService) AdjustBalance(ctx context.Context, uid uint64, amount d
 
 // FreezeMargin 挂单开仓冻结保证金：available够就直接冻结；不够时看"available+全部持仓
 // 未实现盈亏"够不够——币安式"持仓浮盈也能当买力开新仓"，够就强制冻结、允许available变负。
-// 照抄这次会话给Java版ContractAccountService.freezeMargin做的同名改动，见plan文件。
 func (s *AccountService) FreezeMargin(ctx context.Context, uid uint64, amount decimal.Decimal) error {
 	acc, err := s.accounts.GetOrCreate(ctx, uid)
 	if err != nil {
@@ -123,8 +122,7 @@ func (s *AccountService) FindFreshAvailable(ctx context.Context, uid uint64) (de
 	return s.accounts.FindFreshAvailable(ctx, acc.ID)
 }
 
-// AccountView 查询接口用：账户原始字段+现算的未实现盈亏/权益，照抄这次会话给Java版
-// ContractAccountService.fillEquity做的同名改动
+// AccountView 查询接口用：账户原始字段+现算的未实现盈亏/权益
 type AccountView struct {
 	UID                uint64          `json:"uid"`
 	Available          decimal.Decimal `json:"available"`
