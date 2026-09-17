@@ -4,8 +4,8 @@
 
 ```
                  ┌──────────────────┐         ┌───────────────────┐
-  HTTP 请求  ───▶│   contract-api    │──Kafka─▶│  contract-engine   │
-                 │ (Gin, 无状态)      │         │ (内存订单簿, 单实例) │
+  HTTP 请求  ───▶ │   contract-api   │──Kafka─▶│  contract-engine  │
+                 │ (Gin, 无状态)     │         │ (内存订单簿, 单实例) │
                  └──────────────────┘         └───────────────────┘
                          │                              │
                          ├──────────────┬───────────────┤
@@ -20,20 +20,20 @@
   然后发一条事件到Kafka给engine去真正撮合。查询类接口直接读MySQL，不经过engine。
 - **contract-engine**：消费Kafka里的下单/撤单事件，维护每个symbol一个内存订单簿（价格-时间
   优先），撮合成交后做结算（划保证金、结已实现盈亏、扣手续费），并且跑三个后台定时任务：
-  - 风控扫描（`RiskScanOnce`）：判断哪些账户需要强平
-  - 资金费率采样+结算（`SampleOnce` / `SettleIfDue`）
-  - （撮合本身是事件驱动的，不是定时任务）
+    - 风控扫描（`RiskScanOnce`）：判断哪些账户需要强平
+    - 资金费率采样+结算（`SampleOnce` / `SettleIfDue`）
+    - （撮合本身是事件驱动的，不是定时任务）
 
 两个进程都是无状态的（engine的"状态"是内存订单簿，MVP阶段单实例部署，重启会丢失挂单——
 这是已知的、还没解决的问题，见 [known-limitations.md](known-limitations.md)）。
 
 ## 为什么保证金冻结在contract-api同步完成
 
-下单接口收到请求后，**先在contract-api里同步校验+冻结保证金+落库**，再发Kafka事件给engine，
+下单接口收到请求后， **先在contract-api里同步校验+冻结保证金+落库**，再发Kafka事件给engine，
 不是让engine异步处理"扣不扣得动钱"这件事。这样"余额不足"能在HTTP响应里直接告诉调用方，
 不用等一趟Kafka往返再来查状态。
 
-这个设计的代价是：contract-api在冻结保证金、做保证金分档校验的时候，**看不到
+这个设计的代价是：contract-api在冻结保证金、做保证金分档校验的时候， **看不到
 contract-engine那边订单簿的实时状态**——比如一笔报价远低于市价的"吃单"，contract-api按
 用户填的价格算冻结的保证金，但订单实际会在engine那边按盘口对手的真实价格成交，两边对不上。
 这是一个已知的架构局限，细节和缓解措施见 [known-limitations.md](known-limitations.md)。
@@ -73,15 +73,15 @@ sql/
 
 ## 数据库迁移
 
-这个项目没有独立的迁移工具，`sql/schema.sql`就是唯一的建表脚本。它被设计成**对任何状态的
+这个项目没有独立的迁移工具，`sql/schema.sql`就是唯一的建表脚本。它被设计成 **对任何状态的
 数据库重复执行都是安全的**：
 
 - 新表用`CREATE TABLE IF NOT EXISTS`，对全新库和已经建过的库都天然安全。
-- 给已有表加列/加索引，**不能**用`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`这类语法——
+- 给已有表加列/加索引， **不能**用`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`这类语法——
   这是MariaDB的扩展语法，标准MySQL不支持（实测MySQL 8.4会直接报语法错误）。schema.sql里
   用`information_schema`查列/索引是否存在、拼出动态SQL再`PREPARE`/`EXECUTE`执行的方式来
   模拟同样的效果。
 
-改schema时如果要给**已有表**加字段/加索引，照着`sql/schema.sql`里`coins`表和`positions`表
+改schema时如果要给 **已有表**加字段/加索引，照着`sql/schema.sql`里`coins`表和`positions`表
 后面那几段`SET @sql := ...`的写法抄一份，不要直接把新列写进`CREATE TABLE`语句里就完事——
 那样只对全新库有效，对已经跑起来的环境是no-op。

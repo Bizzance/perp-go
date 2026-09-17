@@ -9,7 +9,13 @@
 统一响应格式：
 
 ```json
-{"code": 200, "message": "success", "data": {...}}
+{
+  "code": 200,
+  "message": "success",
+  "data": {
+    ...
+  }
+}
 ```
 
 失败时`code`是HTTP语义的错误码（400/500等，不是HTTP状态码本身——HTTP状态码固定
@@ -22,7 +28,10 @@
 合作方/运营调整账户可用余额（不是用户提现接口，也不经过任何第三方支付/风控）。
 
 ```json
-{"uid": 10001, "amount": 1000}
+{
+  "uid": 10001,
+  "amount": 1000
+}
 ```
 
 `amount`正数=加钱，负数=扣钱（扣的时候必须有足够`available`）。
@@ -39,9 +48,9 @@
 {
   "uid": 10001,
   "symbol": "BTCUSDT",
-  "side": "LONG",
-  "action": "OPEN",
-  "type": "LIMIT",
+  "side": "long",
+  "action": "open",
+  "type": "limit",
   "price": 65000,
   "amount": 0.1,
   "leverage": 10,
@@ -49,18 +58,18 @@
 }
 ```
 
-字段说明：
+字段说明（枚举类字段全部是**小写**，大小写敏感，`"LONG"`这种大写值会被拒绝）：
 
-| 字段 | 必填 | 说明 |
-|---|---|---|
-| `side` | 是 | `LONG` / `SHORT`，其它值一律拒绝（不会被撮合引擎当成默认方向悄悄放行） |
-| `action` | 是 | `OPEN` / `CLOSE`，其它值一律拒绝 |
-| `type` | 否 | `LIMIT`（默认）/ `MARKET`，其它值一律拒绝（不会被当成MARKET处理） |
-| `price` | LIMIT单必填 | MARKET单忽略此字段，按标记价格估算 |
-| `amount` | 二选一 | 标的币数量 |
-| `marginAmount` | 二选一 | 用保证金金额+杠杆反推数量：`amount = marginAmount * leverage / price` |
-| `leverage` | 否 | 默认1；**必须是整数**，显式传0或小数都会报错，不会被当成"没传"或被截断 |
-| `reduceOnly` | 否 | 默认false |
+| 字段           | 必填        | 说明                                                                   |
+|----------------|-------------|------------------------------------------------------------------------|
+| `side`         | 是          | `long` / `short`，其它值一律拒绝（不会被撮合引擎当成默认方向悄悄放行） |
+| `action`       | 是          | `open` / `close`，其它值一律拒绝                                       |
+| `type`         | 否          | `limit`（默认）/ `market`，其它值一律拒绝（不会被当成market处理）      |
+| `price`        | LIMIT单必填 | MARKET单忽略此字段，按标记价格估算                                     |
+| `amount`       | 二选一      | 标的币数量                                                             |
+| `marginAmount` | 二选一      | 用保证金金额+杠杆反推数量：`amount = marginAmount * leverage / price`  |
+| `leverage`     | 否          | 默认1；**必须是整数**，显式传0或小数都会报错，不会被当成"没传"或被截断 |
+| `reduceOnly`   | 否          | 默认false                                                              |
 
 `amount`和`marginAmount`必须传一个，两个都传优先用`marginAmount`。`leverage`/
 `marginAmount`/`amount`这三个字段的JSON类型是可选指针——"没传这个字段"和"传了显式的0"
@@ -69,20 +78,23 @@
 完整的下单校验链见 [matching-and-settlement.md](matching-and-settlement.md)。
 
 **注意**：由于contract-api在下单时看不到contract-engine那边订单簿的真实状态，`price`
-字段对于会立刻成交的"吃单"来说，跟真实成交价可能不一致——见
-[known-limitations.md](known-limitations.md)。
+字段对于会立刻成交的"吃单"来说，跟真实成交价可能不一致——冻结保证金按保守参考价估算、
+成交后按真实成交价多退少补，账户最终不会吃亏，细节见
+[matching-and-settlement.md](matching-and-settlement.md#冻结保证金的保守估计)。
 
 ### `POST /order/cancel/:orderId`
 
 ```json
-{"uid": 10001}
+{
+  "uid": 10001
+}
 ```
 
 `orderId`是URL路径参数。
 
 ### `GET /order/current?uid=10001&symbol=BTCUSDT`
 
-当前挂单（`NEW`/`PARTIALLY_FILLED`状态），`symbol`可省略查全部。
+当前挂单（`open`/`partially_filled`状态），`symbol`可省略查全部。
 
 ### `GET /order/history?uid=10001`
 
@@ -115,5 +127,8 @@
 外部行情源推送指数价格，见 [funding-rate.md](funding-rate.md)。
 
 ```json
-{"symbol": "BTCUSDT", "price": 64800.5}
+{
+  "symbol": "BTCUSDT",
+  "price": 64800.5
+}
 ```

@@ -5,12 +5,13 @@
 账户级别共享一个资金池，不做逐仓隔离（逐仓是后续阶段的计划，见
 [known-limitations.md](known-limitations.md)）。一个uid只有一行`accounts`记录：
 
-| 字段 | 含义 |
-|---|---|
-| `available` | 可用余额，**可能为负** |
-| `frozen_margin` | 挂单冻结的保证金 |
+| 字段            | 含义                   |
+|-----------------|------------------------|
+| `available`     | 可用余额，**可能为负** |
+| `frozen_margin` | 挂单冻结的保证金       |
 
 `available`允许为负，这是全仓模式下的合法状态，不是bug——两种情况会让它变负：
+
 1. 用持仓浮盈当买力开新仓（见下面"冻结保证金的三级路径"）
 2. 强平穿仓垫付之前，账户余额被打成负数
 
@@ -20,8 +21,11 @@
 例如：
 
 ```sql
-UPDATE accounts SET available = available - ?, frozen_margin = frozen_margin + ?
-WHERE id = ? AND available >= ?
+UPDATE accounts
+SET available     = available - ?,
+    frozen_margin = frozen_margin + ?
+WHERE id = ?
+  AND available >= ?
 ```
 
 这个模式下，`UPDATE`受影响行数为0就代表"条件不满足"（比如余额不够），调用方判断
@@ -43,13 +47,13 @@ uid同时提交多笔请求）这套方式没有完全的一致性保证，属�
 
 ## 资金流转的几个关键操作
 
-| 操作 | 说明 |
-|---|---|
-| `FreezeMargin` | 挂单开仓冻结保证金，见上面三级路径 |
-| `UnfreezeMargin` | 撤单/未成交部分释放冻结的保证金 |
-| `DecreaseFrozenMargin` | 开仓成交：冻结保证金转移到仓位（全仓下`position_margin`只是记账用的名义值，这笔钱会立刻通过`SettleToAvailable`还回`available`，不是真的锁住） |
-| `SettleToAvailable` | 已实现盈亏/保证金归还/强平清算，可正可负，无守卫 |
-| `DeductFee` | 手续费扣款，无守卫，允许扣成负数——这笔手续费对应的成交已经真实发生，不能因为差一点钱扣不出来就不扣 |
+| 操作                   | 说明                                                                                                                                                                                                                            |
+|------------------------|---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
+| `FreezeMargin`         | 挂单开仓冻结保证金，见上面三级路径                                                                                                                                                                                              |
+| `UnfreezeMargin`       | 撤单/未成交部分释放冻结的保证金                                                                                                                                                                                                 |
+| `DecreaseFrozenMargin` | 开仓成交：冻结保证金转移到仓位（全仓下`position_margin`只是记账用的名义值，不是真的锁住）。还回`available`的不是原样冻结的钱，是按真实成交价"多退少补"之后的金额，详见 [matching-and-settlement.md](matching-and-settlement.md) |
+| `SettleToAvailable`    | 已实现盈亏/保证金归还/强平清算，可正可负，无守卫                                                                                                                                                                                |
+| `DeductFee`            | 手续费扣款，无守卫，允许扣成负数——这笔手续费对应的成交已经真实发生，不能因为差一点钱扣不出来就不扣                                                                                                                              |
 
 ## 账户查询视图（`AccountView`）
 
@@ -64,6 +68,6 @@ equity = available + totalUnrealizedPnl
 
 ## 信用额度：明确没做
 
-CLAUDE.md提到的"信用额度"（用户买保险后的赔付，可当保证金但不能提现）目前**没有实现**，
+CLAUDE.md提到的"信用额度"（用户买保险后的赔付，可当保证金但不能提现）目前 **没有实现**，
 `Account`结构体和数据库表里都没有相关字段。这是一个还在讨论设计方案、暂缓实现的功能，
 不是遗漏。
