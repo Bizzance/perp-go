@@ -40,6 +40,50 @@
 
 返回账户原始字段+现算的未实现盈亏/权益，见 [account-and-margin.md](account-and-margin.md)。
 
+### `POST /account/credit`
+
+合作方发放/追加信用额度（用户买保险后的赔付）。同一轮内可以多次调用、直接累加，不会
+覆盖之前发放的额度。
+
+```json
+{
+  "uid": 10001,
+  "amount": 1000
+}
+```
+
+`amount`必须大于0。
+
+### `POST /account/insured`
+
+单独设置这个账户本轮是否投保。跟`POST /account/credit`是两个独立接口，互不联动——
+投保状态不会自动触发发放额度，发放额度也不会自动置投保状态。
+
+```json
+{
+  "uid": 10001,
+  "insured": true
+}
+```
+
+### `POST /account/round/close`
+
+合作方通知本轮结束：撤销该uid全部挂单、按当前标记价强平全部仓位、`credit`清零
+（没用完的赔付额度不追讨）、`is_insured`重置、`round`+1，细节见
+[account-and-margin.md](account-and-margin.md#轮次round生命周期)。
+
+```json
+{
+  "uid": 10001
+}
+```
+
+**注意**：这个接口只是把请求发到Kafka异步路由给`contract-engine`执行（跟撤单接口
+同样的道理——撤销挂单要摸`contract-engine`内存里的订单簿，`contract-api`这边做不到），
+HTTP响应`"结束本轮请求已提交"`只表示请求已受理，不代表撤单/强平/清算已经全部执行完。
+如果某个symbol当时缺标记价格，那个仓位这一轮会强平失败、跳过并记日志告警，需要等价格
+恢复后重新调用一次本接口。
+
 ## 委托
 
 ### `POST /order/add`

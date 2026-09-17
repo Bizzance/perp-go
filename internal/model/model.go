@@ -62,16 +62,19 @@ const (
 	TxRealizedPnl      = "realized_pnl"      // 平仓已实现盈亏(可正可负)
 	TxLiquidationClear = "liquidation_clear" // 强平结算后清算维持保证金缓冲进保险基金，用户侧记为负数
 	TxFundingFee       = "funding_fee"       // 资金费率结算，多头/空头互相划转，可正可负
+	TxCreditGrant      = "credit_grant"      // 合作方发放/追加信用额度(正数)
+	TxRoundClose       = "round_close"       // 结束本轮：信用额度清零，用户侧记为负数(不是亏损，是回收没用完的赔付额度)
 )
 
 type Account struct {
 	ID           uint64          `db:"id"`
 	UID          uint64          `db:"uid"`
 	IsInsured    bool            `db:"is_insured"`    // 是否投保
-	Round        uint64          `db:"round"`         // 轮数
-	Credit       decimal.Decimal `db:"credit"`        // 信用额度
-	Available    decimal.Decimal `db:"available"`     // 可用
-	FrozenMargin decimal.Decimal `db:"frozen_margin"` // 冻结的保证金
+	Round        uint64          `db:"round"`         // 轮数，结束本轮时+1
+	Credit       decimal.Decimal `db:"credit"`        // 信用额度余额，只能当开仓保证金用，不能转出/提现
+	Available    decimal.Decimal `db:"available"`     // 可用余额
+	FrozenMargin decimal.Decimal `db:"frozen_margin"` // 挂单冻结保证金(来自available的部分)
+	FrozenCredit decimal.Decimal `db:"frozen_credit"` // 挂单冻结保证金(来自credit的部分)
 	Version      uint32          `db:"version"`
 }
 
@@ -117,7 +120,8 @@ type Order struct {
 	Amount       decimal.Decimal `db:"amount"`        // 挂单数量
 	TradedAmount decimal.Decimal `db:"traded_amount"` // 已成交的数量
 	AvgDealPrice decimal.Decimal `db:"avg_deal_price"`
-	FrozenMargin decimal.Decimal `db:"frozen_margin"`
+	FrozenMargin decimal.Decimal `db:"frozen_margin"` // 冻结保证金来自available的部分
+	FrozenCredit decimal.Decimal `db:"frozen_credit"` // 冻结保证金来自credit的部分
 	Leverage     uint32          `db:"leverage"`
 	ReduceOnly   bool            `db:"reduce_only"`
 	Liquidation  bool            `db:"liquidation"`
@@ -130,6 +134,14 @@ func (o *Order) RemainingAmount() decimal.Decimal {
 	return o.Amount.Sub(o.TradedAmount)
 }
 
+// ProportionalFrozen 按volume(可以是一笔成交量，也可以是撤单剩余量)占这笔委托总量的比例，
+// 拆分出对应比例的frozen_margin/frozen_credit——成交转正(settlement.go)、撤单释放
+// (engine.go的CancelOrder)两处都要用同一个公式，写两份容易在以后改动时只改一边、
+// 悄悄让两条路径的释放比例算法分叉
+func (o *Order) ProportionalFrozen(volume decimal.Decimal) (fromAvailable, fromCredit decimal.Decimal) {
+	return o.FrozenMargin.Mul(volume).Div(o.Amount), o.FrozenCredit.Mul(volume).Div(o.Amount)
+}
+
 type Position struct {
 	ID             uint64          `db:"id"`
 	UID            uint64          `db:"uid"`
@@ -138,6 +150,7 @@ type Position struct {
 	Volume         decimal.Decimal `db:"volume"`
 	AvgEntryPrice  decimal.Decimal `db:"avg_entry_price"`
 	PositionMargin decimal.Decimal `db:"position_margin"`
+	CreditMargin   decimal.Decimal `db:"credit_margin"` // position_margin里来自credit的部分
 	Leverage       uint32          `db:"leverage"`
 	Status         PositionStatus  `db:"status"`
 	Version        uint32          `db:"version"`

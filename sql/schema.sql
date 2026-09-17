@@ -11,9 +11,10 @@ CREATE TABLE IF NOT EXISTS accounts (
   uid            BIGINT UNSIGNED NOT NULL,
   is_insured     TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否投保：0-不投保，1-投保',
   round          BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '轮数',
-  credit         DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT '信用额度',
+  credit         DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT '信用额度余额，只能用于开仓保证金，不能转出/提现',
   available      DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT '可用余额，可能为负(全仓下用持仓浮盈当买力借出去的部分)',
-  frozen_margin  DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT '挂单冻结保证金',
+  frozen_margin  DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT '挂单冻结保证金(来自available的部分)',
+  frozen_credit  DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT '挂单冻结保证金(来自credit的部分)，必须单独记账才能精确退回',
   version        INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '乐观锁版本号，MVP阶段原子UPDATE为主，这个字段先留着备用',
   created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
@@ -39,7 +40,14 @@ PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 SET @sql := (SELECT IF(
   (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'accounts' AND COLUMN_NAME = 'credit') = 0,
-  'ALTER TABLE accounts ADD COLUMN credit DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT ''信用额度'' AFTER round',
+  'ALTER TABLE accounts ADD COLUMN credit DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT ''信用额度余额，只能用于开仓保证金，不能转出/提现'' AFTER round',
+  'SELECT 1'
+));
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @sql := (SELECT IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'accounts' AND COLUMN_NAME = 'frozen_credit') = 0,
+  'ALTER TABLE accounts ADD COLUMN frozen_credit DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT ''挂单冻结保证金(来自credit的部分)，必须单独记账才能精确退回'' AFTER frozen_margin',
   'SELECT 1'
 ));
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
@@ -133,7 +141,8 @@ CREATE TABLE IF NOT EXISTS orders (
   amount         DECIMAL(26,16) NOT NULL COMMENT '标的币数量',
   traded_amount  DECIMAL(26,16) NOT NULL DEFAULT 0,
   avg_deal_price DECIMAL(18,8) NOT NULL DEFAULT 0,
-  frozen_margin  DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT '这笔委托占用的冻结保证金',
+  frozen_margin  DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT '这笔委托占用的冻结保证金(来自available的部分)',
+  frozen_credit  DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT '这笔委托占用的冻结保证金(来自credit的部分)',
   leverage       INT UNSIGNED NOT NULL,
   reduce_only    TINYINT(1) NOT NULL DEFAULT 0,
   liquidation    TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否强平单——结算后要走保险基金穿仓/盈余清算分支',
@@ -155,6 +164,13 @@ ALTER TABLE orders MODIFY COLUMN action ENUM('open','close') NOT NULL;
 ALTER TABLE orders MODIFY COLUMN type ENUM('limit','market') NOT NULL;
 ALTER TABLE orders MODIFY COLUMN status ENUM('open','partially_filled','filled','canceled','rejected') NOT NULL DEFAULT 'open';
 
+SET @sql := (SELECT IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'orders' AND COLUMN_NAME = 'frozen_credit') = 0,
+  'ALTER TABLE orders ADD COLUMN frozen_credit DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT ''这笔委托占用的冻结保证金(来自credit的部分)'' AFTER frozen_margin',
+  'SELECT 1'
+));
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
 -- 持仓：全仓保证金，一个(uid,symbol,side)一行
 CREATE TABLE IF NOT EXISTS positions (
   id                BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
@@ -164,6 +180,7 @@ CREATE TABLE IF NOT EXISTS positions (
   volume            DECIMAL(26,16) NOT NULL DEFAULT 0,
   avg_entry_price   DECIMAL(18,8) NOT NULL DEFAULT 0,
   position_margin   DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT '记账用名义值，全仓下不是真锁定的钱',
+  credit_margin     DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT 'position_margin里来自credit的部分，平仓释放时要按这个比例精确退回credit而不是笼统退available',
   leverage          INT UNSIGNED NOT NULL DEFAULT 1,
   status            ENUM('normal','liquidating','closed') NOT NULL DEFAULT 'normal',
   version           INT UNSIGNED NOT NULL DEFAULT 0,
@@ -175,6 +192,13 @@ CREATE TABLE IF NOT EXISTS positions (
 -- 同上，把positions的side/status也改成小写取值，理由和安全性说明见orders表那几条MODIFY
 ALTER TABLE positions MODIFY COLUMN side ENUM('long','short') NOT NULL;
 ALTER TABLE positions MODIFY COLUMN status ENUM('normal','liquidating','closed') NOT NULL DEFAULT 'normal';
+
+SET @sql := (SELECT IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'positions' AND COLUMN_NAME = 'credit_margin') = 0,
+  'ALTER TABLE positions ADD COLUMN credit_margin DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT ''position_margin里来自credit的部分，平仓释放时要按这个比例精确退回credit而不是笼统退available'' AFTER position_margin',
+  'SELECT 1'
+));
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 -- 资金费率结算按symbol批量查仓位用，uk_positions_uid_symbol_side因为uid在最前面覆盖不到
 -- 这个查询。MySQL的CREATE INDEX不支持IF NOT EXISTS(实测报语法错误，跟上面coins表ALTER

@@ -87,6 +87,21 @@ func main() {
 		return engineSvc.CancelOrder(ctx, o)
 	})
 
+	// 用独立的group id，不要跟下面的submit/cancel共用"contract-engine"——同一个group id挂
+	// 多个订阅不同topic的member，Kafka的分区分配在这种异构订阅场景下不可靠(实测过：3个
+	// member共用一个group id时，broker端分配阶段完成了，但每个member实际收不到任何分区，
+	// 消费彻底卡住，连已有的submit/cancel两个topic也一起被拖挂)，每个独立的消费职责必须用
+	// 自己独立的group id
+	roundCloseConsumer := mq.NewConsumer(cfg.KafkaBrokers, events.TopicRoundClose, "contract-engine-round-close")
+	defer roundCloseConsumer.Close()
+	go roundCloseConsumer.Consume(ctx, func(_, value []byte) error {
+		var evt events.RoundCloseEvent
+		if err := json.Unmarshal(value, &evt); err != nil {
+			return err
+		}
+		return engineSvc.CloseRound(ctx, evt.UID)
+	})
+
 	go func() {
 		ticker := time.NewTicker(time.Duration(cfg.RiskScanIntervalMs) * time.Millisecond)
 		defer ticker.Stop()

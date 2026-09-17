@@ -43,41 +43,75 @@ func (s *AccountService) AdjustBalance(ctx context.Context, uid uint64, amount d
 	return s.tx.Insert(ctx, uid, "USDT", model.TxDeposit, amount, time.Now().UnixMilli())
 }
 
-// 挂单开仓冻结保证金：available够就直接冻结；
-// 不够时看"available+全部持仓未实现盈亏"够不够——币安式"持仓浮盈也能当买力开新仓"，够就强制冻结、允许available变负。
-func (s *AccountService) FreezeMargin(ctx context.Context, uid uint64, amount decimal.Decimal) error {
+// FreezeResult 冻结成功后告诉调用方这笔钱分别从available/credit各拿了多少，调用方(下单接口)
+// 要把这个拆分记到订单的frozen_margin/frozen_credit上，撤单/成交转正时才能精确退回来源
+type FreezeResult struct {
+	FromAvailable decimal.Decimal
+	FromCredit    decimal.Decimal
+}
+
+// FreezeMargin 挂单开仓冻结保证金，四级路径依次尝试：
+//  1. available够 → 全部从available冻结
+//  2. available不够，available+credit够 → 缺口从credit冻结
+//  3. 前两级都不够，available+credit+全部持仓未实现盈亏够 → 币安式"持仓浮盈也能当买力
+//     开新仓"，强制冻结、允许available变负；不动credit——浮盈不确定，不该跟已经到账的
+//     保险赔付混在一起算作已用掉
+//  4. 都不够 → 拒绝
+func (s *AccountService) FreezeMargin(ctx context.Context, uid uint64, amount decimal.Decimal) (FreezeResult, error) {
 	account, err := s.accounts.GetOrCreate(ctx, uid)
 	if err != nil {
-		return err
+		return FreezeResult{}, err
 	}
 	ok, err := s.accounts.FreezeFromAvailable(ctx, account.ID, amount)
 	if err != nil {
-		return err
+		return FreezeResult{}, err
 	}
 	if ok {
-		return nil
+		return FreezeResult{FromAvailable: amount}, nil
 	}
-	fresh, err := s.accounts.FindFreshAvailable(ctx, account.ID)
+
+	freshAvailable, err := s.accounts.FindFreshAvailable(ctx, account.ID)
 	if err != nil {
-		return err
+		return FreezeResult{}, err
 	}
+	freshCredit, err := s.accounts.FindFreshCredit(ctx, account.ID)
+	if err != nil {
+		return FreezeResult{}, err
+	}
+	// freshAvailable/freshCredit这两个读数只用来决定"值不值得走这条路径尝试"，不用来
+	// 反推实际冻结的available/credit拆分——两次读之间账户可能被并发改过，拆分必须直接
+	// 用FreezeSpillToCredit返回的、这条UPDATE语句自己算出来的真实值，见该方法的注释
+	if freshAvailable.Add(freshCredit).GreaterThanOrEqual(amount) {
+		fromAvailable, fromCredit, ok, err := s.accounts.FreezeSpillToCredit(ctx, account.ID, amount)
+		if err != nil {
+			return FreezeResult{}, err
+		}
+		if ok {
+			return FreezeResult{FromAvailable: fromAvailable, FromCredit: fromCredit}, nil
+		}
+	}
+
 	totalUnrealized, err := s.positions.TotalUnrealizedPnl(ctx, uid)
 	if err != nil {
-		return err
+		return FreezeResult{}, err
 	}
-	if fresh.Add(totalUnrealized).GreaterThanOrEqual(amount) {
-		return s.accounts.FreezeForceIntoNegative(ctx, account.ID, amount)
+	if freshAvailable.Add(freshCredit).Add(totalUnrealized).GreaterThanOrEqual(amount) {
+		if err := s.accounts.FreezeForceIntoNegative(ctx, account.ID, amount); err != nil {
+			return FreezeResult{}, err
+		}
+		return FreezeResult{FromAvailable: amount}, nil
 	}
-	return ErrInsufficientMargin
+	return FreezeResult{}, ErrInsufficientMargin
 }
 
-// 解冻保证金
-func (s *AccountService) UnfreezeMargin(ctx context.Context, uid uint64, amount decimal.Decimal) error {
+// UnfreezeMargin 撤单/未成交部分释放冻结的保证金，availableAmount/creditAmount分别是
+// 这笔委托当初从available/credit冻结的比例，必须分开还
+func (s *AccountService) UnfreezeMargin(ctx context.Context, uid uint64, availableAmount, creditAmount decimal.Decimal) error {
 	account, err := s.accounts.GetOrCreate(ctx, uid)
 	if err != nil {
 		return err
 	}
-	ok, err := s.accounts.UnfreezeMargin(ctx, account.ID, amount)
+	ok, err := s.accounts.UnfreezeMargin(ctx, account.ID, availableAmount, creditAmount)
 	if err != nil {
 		return err
 	}
@@ -87,17 +121,30 @@ func (s *AccountService) UnfreezeMargin(ctx context.Context, uid uint64, amount 
 	return nil
 }
 
-// 减少冻结保证金
-func (s *AccountService) DecreaseFrozenMargin(ctx context.Context, uid uint64, amount decimal.Decimal) error {
+// DecreaseFrozenMargin 开仓成交：冻结的保证金转移到仓位记账，availableAmount/creditAmount
+// 是这笔成交对应释放的两部分——调用方紧接着要分别把这两部分还回available/credit
+// (全仓下position_margin只是记账用的名义值，不需要真的搬钱)
+func (s *AccountService) DecreaseFrozenMargin(ctx context.Context, uid uint64, availableAmount, creditAmount decimal.Decimal) error {
 	account, err := s.accounts.GetOrCreate(ctx, uid)
 	if err != nil {
 		return err
 	}
-	_, err = s.accounts.DecreaseFrozenMargin(ctx, account.ID, amount)
-	return err
+	ok, err := s.accounts.DecreaseFrozenMargin(ctx, account.ID, availableAmount, creditAmount)
+	if err != nil {
+		return err
+	}
+	if !ok {
+		// 跟UnfreezeMargin同样的守卫失败处理：不能吞掉这个错误——调用方(settlement.go)
+		// 紧接着会把"释放的这部分"退回available/credit，如果这里的frozen_margin/
+		// frozen_credit扣减实际没生效却假装成功，会让这笔钱同时留在frozen里又被当成
+		// 已释放退回来源，变成平白多出来的钱
+		return errors.New("冻结保证金不足，无法转移到仓位")
+	}
+	return nil
 }
 
-// 结算
+// SettleToAvailable 保证金原样归还到available——只用于明确知道钱该回available的场景
+// (比如开仓成交后归还冻结时属于available的那一份)，不要用来结算亏损
 func (s *AccountService) SettleToAvailable(ctx context.Context, uid uint64, amount decimal.Decimal) error {
 	account, err := s.accounts.GetOrCreate(ctx, uid)
 	if err != nil {
@@ -106,7 +153,26 @@ func (s *AccountService) SettleToAvailable(ctx context.Context, uid uint64, amou
 	return s.accounts.SettleToAvailable(ctx, account.ID, amount)
 }
 
-// 扣手续费
+// SettleToCredit 跟SettleToAvailable对称，归还冻结时属于credit的那一份
+func (s *AccountService) SettleToCredit(ctx context.Context, uid uint64, amount decimal.Decimal) error {
+	account, err := s.accounts.GetOrCreate(ctx, uid)
+	if err != nil {
+		return err
+	}
+	return s.accounts.SettleToCredit(ctx, account.ID, amount)
+}
+
+// SettlePnl 已实现盈亏/强平清算缓冲结算，可正可负：盈利只进available；亏损先扣available、
+// 扣完了再扣credit——运营发放的信用额度尽量少被真实亏损吃掉，是控制赔付成本的取舍
+func (s *AccountService) SettlePnl(ctx context.Context, uid uint64, amount decimal.Decimal) error {
+	account, err := s.accounts.GetOrCreate(ctx, uid)
+	if err != nil {
+		return err
+	}
+	return s.accounts.SettlePnl(ctx, account.ID, amount)
+}
+
+// DeductFee 扣手续费，跟SettlePnl的亏损分支同样的"先available后credit"顺序
 func (s *AccountService) DeductFee(ctx context.Context, uid uint64, fee decimal.Decimal) error {
 	if fee.Sign() <= 0 {
 		return nil
@@ -127,11 +193,70 @@ func (s *AccountService) FindFreshAvailable(ctx context.Context, uid uint64) (de
 	return s.accounts.FindFreshAvailable(ctx, account.ID)
 }
 
+// 最新信用额度余额——强平联合判断用，理由跟FindFreshAvailable一样：不能读缓存的account实体，
+// 要绕开一级缓存读最新值
+func (s *AccountService) FindFreshCredit(ctx context.Context, uid uint64) (decimal.Decimal, error) {
+	account, err := s.accounts.GetOrCreate(ctx, uid)
+	if err != nil {
+		return decimal.Zero, err
+	}
+	return s.accounts.FindFreshCredit(ctx, account.ID)
+}
+
+// GrantCredit 合作方发放/追加信用额度(用户买保险后的赔付)，同一轮内可以多次调用、直接累加
+func (s *AccountService) GrantCredit(ctx context.Context, uid uint64, amount decimal.Decimal) error {
+	if amount.Sign() <= 0 {
+		return errors.New("发放金额必须大于0")
+	}
+	account, err := s.accounts.GetOrCreate(ctx, uid)
+	if err != nil {
+		return err
+	}
+	if err := s.accounts.GrantCredit(ctx, account.ID, amount); err != nil {
+		return err
+	}
+	return s.tx.Insert(ctx, uid, "USDT", model.TxCreditGrant, amount, time.Now().UnixMilli())
+}
+
+// SetInsured 合作方单独设置这个账户本轮是否投保，跟发放信用额度是两个独立的动作，互不联动
+func (s *AccountService) SetInsured(ctx context.Context, uid uint64, insured bool) error {
+	account, err := s.accounts.GetOrCreate(ctx, uid)
+	if err != nil {
+		return err
+	}
+	return s.accounts.SetInsured(ctx, account.ID, insured)
+}
+
+// CloseRound 结束本轮的资金收尾：credit清零(没用完的赔付额度不追讨)、is_insured重置、
+// round+1。调用前必须已经没有持仓/挂单——这里只做资金状态收尾，强平仓位/撤销挂单由
+// 更上层的编排负责(见EngineService.CloseRound)
+func (s *AccountService) CloseRound(ctx context.Context, uid uint64) error {
+	account, err := s.accounts.GetOrCreate(ctx, uid)
+	if err != nil {
+		return err
+	}
+	freshCredit, err := s.accounts.FindFreshCredit(ctx, account.ID)
+	if err != nil {
+		return err
+	}
+	if err := s.accounts.CloseRound(ctx, account.ID); err != nil {
+		return err
+	}
+	if freshCredit.Sign() > 0 {
+		return s.tx.Insert(ctx, uid, "USDT", model.TxRoundClose, freshCredit.Neg(), time.Now().UnixMilli())
+	}
+	return nil
+}
+
 // AccountView 查询接口用：账户原始字段+现算的未实现盈亏/权益
 type AccountView struct {
 	UID                uint64          `json:"uid"`
+	IsInsured          bool            `json:"isInsured"`
+	Round              uint64          `json:"round"`
+	Credit             decimal.Decimal `json:"credit"`
 	Available          decimal.Decimal `json:"available"`
 	FrozenMargin       decimal.Decimal `json:"frozenMargin"`
+	FrozenCredit       decimal.Decimal `json:"frozenCredit"`
 	TotalUnrealizedPnl decimal.Decimal `json:"totalUnrealizedPnl"`
 	Equity             decimal.Decimal `json:"equity"`
 }
@@ -147,9 +272,13 @@ func (s *AccountService) View(ctx context.Context, uid uint64) (*AccountView, er
 	}
 	return &AccountView{
 		UID:                uid,
+		IsInsured:          acc.IsInsured,
+		Round:              acc.Round,
+		Credit:             acc.Credit,
 		Available:          acc.Available,
 		FrozenMargin:       acc.FrozenMargin,
+		FrozenCredit:       acc.FrozenCredit,
 		TotalUnrealizedPnl: total,
-		Equity:             acc.Available.Add(total),
+		Equity:             acc.Available.Add(acc.Credit).Add(total),
 	}, nil
 }

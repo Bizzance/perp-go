@@ -18,9 +18,9 @@ func NewOrderRepo(db *sqlx.DB) *OrderRepo { return &OrderRepo{db: db} }
 func (r *OrderRepo) Insert(ctx context.Context, o *model.Order) error {
 	_, err := r.db.NamedExecContext(ctx, `INSERT INTO orders
 		(order_id, uid, symbol, side, action, type, price, amount, traded_amount, avg_deal_price,
-		 frozen_margin, leverage, reduce_only, liquidation, status, create_time, update_time)
+		 frozen_margin, frozen_credit, leverage, reduce_only, liquidation, status, create_time, update_time)
 		VALUES (:order_id, :uid, :symbol, :side, :action, :type, :price, :amount, :traded_amount, :avg_deal_price,
-		 :frozen_margin, :leverage, :reduce_only, :liquidation, :status, :create_time, :update_time)`, o)
+		 :frozen_margin, :frozen_credit, :leverage, :reduce_only, :liquidation, :status, :create_time, :update_time)`, o)
 	return err
 }
 

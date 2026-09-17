@@ -3,6 +3,7 @@ package events
 const (
 	TopicOrderSubmit = "perpgo.order.submit"
 	TopicOrderCancel = "perpgo.order.cancel"
+	TopicRoundClose  = "perpgo.round.close"
 )
 
 // 下单事件：contract-api校验参数+冻结保证金+落库(status=NEW)之后发出，
@@ -27,4 +28,11 @@ type OrderCancelEvent struct {
 	OrderID uint64 `json:"orderId"`
 	UID     uint64 `json:"uid"`
 	Symbol  string `json:"symbol"`
+}
+
+// 结束本轮事件：contract-api校验完(账户存在等)之后发出，engine消费到之后撤掉这个uid全部
+// 排队中的委托、按标记价强平全部仓位、清算credit/round——撤单要摘掉engine内存里的订单簿，
+// 只能走这条路由过去，不能在contract-api那边直接做
+type RoundCloseEvent struct {
+	UID uint64 `json:"uid"`
 }

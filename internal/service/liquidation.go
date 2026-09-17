@@ -69,11 +69,17 @@ func (s *LiquidationService) checkAndLiquidate(ctx context.Context, uid uint64) 
 	if err != nil {
 		return err
 	}
+	credit, err := s.accounts.FindFreshCredit(ctx, uid)
+	if err != nil {
+		return err
+	}
 	totalUnrealized, err := s.positionSvc.TotalUnrealizedPnl(ctx, uid)
 	if err != nil {
 		return err
 	}
-	equity := available.Add(totalUnrealized)
+	// 账户权益把credit算进去，信用额度才能真正起到"扛住浮亏、推迟强平"的作用——不这样算的话
+	// 信用额度就只是个能开仓的额度，对避免强平没有意义
+	equity := available.Add(credit).Add(totalUnrealized)
 	if equity.GreaterThan(maintainTotal) {
 		return nil
 	}

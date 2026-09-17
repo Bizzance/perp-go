@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"net/http"
+	"strconv"
 	"time"
 
 	"github.com/gin-gonic/gin"
@@ -53,6 +54,9 @@ func (s *Server) Router() *gin.Engine {
 	r := gin.Default()
 	r.POST("/account/balance", s.adjustBalance)
 	r.GET("/account/info", s.accountInfo)
+	r.POST("/account/credit", s.grantCredit)
+	r.POST("/account/insured", s.setInsured)
+	r.POST("/account/round/close", s.closeRound)
 	r.POST("/order/add", s.addOrder)
 	r.POST("/order/cancel/:orderId", s.cancelOrder)
 	r.GET("/order/current", s.orderCurrent)
@@ -122,6 +126,64 @@ func (s *Server) accountInfo(c *gin.Context) {
 		return
 	}
 	ok(c, view)
+}
+
+type grantCreditRequest struct {
+	UID    uint64          `json:"uid" binding:"required"`
+	Amount decimal.Decimal `json:"amount"`
+}
+
+// grantCredit 合作方发放/追加信用额度(用户买保险后的赔付)，同一轮内可以多次调用、直接累加
+func (s *Server) grantCredit(c *gin.Context) {
+	var req grantCreditRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if err := s.accounts.GrantCredit(c.Request.Context(), req.UID, req.Amount); err != nil {
+		fail(c, 400, err.Error())
+		return
+	}
+	ok(c, nil)
+}
+
+type setInsuredRequest struct {
+	UID     uint64 `json:"uid" binding:"required"`
+	Insured bool   `json:"insured"`
+}
+
+// setInsured 合作方单独设置这个账户本轮是否投保，跟发放信用额度是两个独立接口，互不联动
+func (s *Server) setInsured(c *gin.Context) {
+	var req setInsuredRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if err := s.accounts.SetInsured(c.Request.Context(), req.UID, req.Insured); err != nil {
+		fail(c, 500, err.Error())
+		return
+	}
+	ok(c, nil)
+}
+
+type closeRoundRequest struct {
+	UID uint64 `json:"uid" binding:"required"`
+}
+
+// closeRound 合作方通知本轮结束：撤销全部挂单、按标记价强平全部仓位、清算credit这几步都要
+// 摸contract-engine内存里的订单簿/撮合状态，contract-api这边做不了，只能发Kafka事件路由
+// 过去异步执行(跟撤单接口是同样的道理)——这里只做同步返回"请求已提交"
+func (s *Server) closeRound(c *gin.Context) {
+	var req closeRoundRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	evt := events.RoundCloseEvent{UID: req.UID}
+	if err := s.producer.Publish(ctx, events.TopicRoundClose, strconv.FormatUint(req.UID, 10), evt); err != nil {
+		fail(c, 500, err.Error())
+		return
+	}
+	ok(c, "结束本轮请求已提交")
 }
 
 type addOrderRequest struct {
@@ -200,6 +262,15 @@ func (s *Server) addOrder(c *gin.Context) {
 	if orderType == model.OrderTypeMarket || action == model.ActionOpen {
 		mark, hasMark = s.markPrice.Get(c.Request.Context(), symbol)
 	}
+	// referencePrice/hasReference是"标记价格不存在就退回指数价格"这个兜底逻辑的唯一实现，
+	// 价格保护带、下面SHORT+OPEN的保守计价(orderNotionalPrice)都要用同一份，不能各写各的：
+	// 之前orderNotionalPrice那处只判断hasMark、没有这个指数价兜底，导致一个"从没成交过但有
+	// 指数价"的全新symbol上，价格保护带能拦住离谱吃单价，保守计价却拦不住，两处本该一致的
+	// 防护基准不一致
+	referencePrice, hasReference := mark, hasMark
+	if !hasReference {
+		referencePrice, hasReference = s.markPrice.GetIndexPrice(c.Request.Context(), symbol)
+	}
 
 	var price decimal.Decimal
 	if orderType == model.OrderTypeLimit {
@@ -220,10 +291,6 @@ func (s *Server) addOrder(c *gin.Context) {
 		// 平仓离场的委托也挡在外面——跟开仓杠杆校验刻意放过平仓单是同一个道理。参考价优先用
 		// 标记价格，标记价格不存在(这个symbol从没成交过)就退回用指数价格；两个都没有(全新
 		// symbol、也没人喂过指数价)就没有参考基准，放行不校验，这是唯一防不住的缺口
-		referencePrice, hasReference := mark, hasMark
-		if !hasReference {
-			referencePrice, hasReference = s.markPrice.GetIndexPrice(c.Request.Context(), symbol)
-		}
 		if action == model.ActionOpen && hasReference && referencePrice.Sign() > 0 && coin.PriceProtectionRatio.Sign() > 0 {
 			deviation := price.Sub(referencePrice).Abs().Div(referencePrice)
 			if deviation.GreaterThan(coin.PriceProtectionRatio) {
@@ -273,20 +340,24 @@ func (s *Server) addOrder(c *gin.Context) {
 
 	// orderNotionalPrice是这笔委托自己名义价值/冻结保证金的估值基准，只对SHORT+OPEN生效：
 	// SHORT+OPEN在撮合引擎里是卖方向，挂一个远低于市价的价格属于"吃单价"，会立刻按盘口
-	// 对手的真实价格成交，不是按这个填的低价，所以要用max(price, markPrice)取更保守的
+	// 对手的真实价格成交，不是按这个填的低价，所以要用max(price, 参考价)取更保守的
 	// 那个，冻结保证金/分档校验都按这个来，不能只信submitted price。LONG+OPEN反过来：
 	// 远低于市价的价格是完全合法的被动挂单(买跌)，只会按这个低价成交，如果同样套
-	// max(price,markPrice)会把这类正常订单的保证金/名义价值算得比真实值更大——这个防护
-	// 依赖有标记价格可用，一个从没成交过的全新symbol(hasMark=false)防不住这一招
+	// max(price,参考价)会把这类正常订单的保证金/名义价值算得比真实值更大——这里用
+	// referencePrice(标记价格优先、没有就退回指数价格)而不是裸的mark，理由跟上面价格
+	// 保护带一致：两处本该是同一套"有没有可信参考价"的判断，用不同的判断口径会让"有指数价
+	// 但从没成交过"的全新symbol上，价格保护带能拦住的离谱吃单价，这里却拦不住。两者都没有
+	// (全新symbol、也没人喂过指数价)才是真正防不住的缺口
 	orderNotionalPrice := price
-	if side == model.SideShort && hasMark && mark.GreaterThan(price) {
-		orderNotionalPrice = mark
+	if side == model.SideShort && hasReference && referencePrice.GreaterThan(price) {
+		orderNotionalPrice = referencePrice
 	}
 	// 冻结保证金用orderNotionalPrice而不是price本身：SHORT+OPEN报一个远低于市价的吃单价，
 	// 真实会按对手的高价成交，如果冻结按这个低价算，会把这笔仓位真实该占用的保证金严重
 	// 低估。这里先按保守估计冻结，等真正成交、知道真实成交价之后，settlement.go的
 	// SettleFill会用真实成交价重算，多退少补，不会让这部分差额一直悬在available里
 	requiredMargin := amount.Mul(orderNotionalPrice).Div(leverage)
+	var freezeResult service.FreezeResult
 	if action == model.ActionOpen {
 		// 分档判断的名义价值不能只看已成交仓位：这个uid在同一symbol+side上如果还挂着别的没成交的
 		// 开仓单，每一笔单独提交时都看不到彼此，会各自按"当前还没有仓位/挂单垫底"通过校验，等
@@ -343,10 +414,12 @@ func (s *Server) addOrder(c *gin.Context) {
 			fail(c, 400, "杠杆倍数超出当前仓位名义价值对应档位允许的范围")
 			return
 		}
-		if err := s.accounts.FreezeMargin(c.Request.Context(), uid, requiredMargin); err != nil {
+		result, err := s.accounts.FreezeMargin(c.Request.Context(), uid, requiredMargin)
+		if err != nil {
 			fail(c, 500, err.Error())
 			return
 		}
+		freezeResult = result
 	}
 
 	orderID := service.NextID()
@@ -367,7 +440,8 @@ func (s *Server) addOrder(c *gin.Context) {
 		UpdateTime: now,
 	}
 	if action == model.ActionOpen {
-		o.FrozenMargin = requiredMargin
+		o.FrozenMargin = freezeResult.FromAvailable
+		o.FrozenCredit = freezeResult.FromCredit
 	}
 	if err := s.orders.Insert(c.Request.Context(), o); err != nil {
 		fail(c, 500, err.Error())
