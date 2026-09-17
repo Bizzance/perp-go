@@ -13,19 +13,21 @@ import (
 )
 
 type EngineService struct {
-	matchingEngine *matching.Engine // 撮合引擎，里面有多个orderbook，每个币种一个orderbook
-	orders         *repo.OrderRepo
-	trades         *repo.TradeRepo
-	accounts       *AccountService
-	positionSvc    *PositionService
-	settlement     *SettlementService
-	markPrice      *MarkPriceService
-	fund           *InsuranceFundService
+	matchingEngine    *matching.Engine // 撮合引擎，里面有多个orderbook，每个币种一个orderbook
+	orders            *repo.OrderRepo
+	conditionalOrders *repo.ConditionalOrderRepo
+	trades            *repo.TradeRepo
+	accounts          *AccountService
+	positionSvc       *PositionService
+	settlement        *SettlementService
+	markPrice         *MarkPriceService
+	fund              *InsuranceFundService
 }
 
 func NewEngineService(
 	matchingEngine *matching.Engine,
 	orders *repo.OrderRepo,
+	conditionalOrders *repo.ConditionalOrderRepo,
 	trades *repo.TradeRepo,
 	accounts *AccountService,
 	positionSvc *PositionService,
@@ -34,14 +36,15 @@ func NewEngineService(
 	fund *InsuranceFundService,
 ) *EngineService {
 	return &EngineService{
-		matchingEngine: matchingEngine,
-		orders:         orders,
-		trades:         trades,
-		accounts:       accounts,
-		positionSvc:    positionSvc,
-		settlement:     settlement,
-		markPrice:      markPrice,
-		fund:           fund,
+		matchingEngine:    matchingEngine,
+		orders:            orders,
+		conditionalOrders: conditionalOrders,
+		trades:            trades,
+		accounts:          accounts,
+		positionSvc:       positionSvc,
+		settlement:        settlement,
+		markPrice:         markPrice,
+		fund:              fund,
 	}
 }
 
@@ -232,6 +235,21 @@ func (e *EngineService) CloseRound(ctx context.Context, uid uint64) error {
 		}
 	}
 
+	// 条件单(止盈止损/条件开仓)触发前从来没进过撮合引擎的订单簿，CancelOrder摘不到它们，
+	// 必须单独撤销——不然结束本轮之后credit清零了，这些条件单开仓方向上冻结的frozen_credit
+	// 还留在账上没释放，等它们后来真的触发/被撤销，会把上一轮已经作废的credit又"复活"
+	// 进新一轮的余额里
+	pendingConditional, err := e.conditionalOrders.FindActiveByUID(ctx, uid, "")
+	if err != nil {
+		return err
+	}
+	for _, co := range pendingConditional {
+		if err := e.cancelConditionalOrder(ctx, co); err != nil {
+			log.Printf("[ERROR] 结束本轮撤销条件单失败, uid=%d, orderId=%d: %v", uid, co.OrderID, err)
+			allDone = false
+		}
+	}
+
 	positions, err := e.positionSvc.FindByUID(ctx, uid)
 	if err != nil {
 		return err
@@ -307,6 +325,24 @@ func (e *EngineService) CancelOrder(ctx context.Context, o *model.Order) error {
 		// available——那样等于让信用额度经过"冻结再撤单"这个渠道被洗成可提现的available
 		releaseAvailable, releaseCredit := o.ProportionalFrozen(remaining)
 		return e.accounts.UnfreezeMargin(ctx, o.UID, releaseAvailable, releaseCredit)
+	}
+	return nil
+}
+
+// cancelConditionalOrder 撤销一笔还没触发的条件单——跟router.go里contract-api那个撤销
+// 接口是同一套逻辑(原子标记取消+整笔退回冻结保证金，条件单没有"部分成交"这一说)，这里
+// 单独实现一份是因为CloseRound跑在contract-engine进程里，摸不到contract-api那边的Server，
+// 只能直接调repo/AccountService
+func (e *EngineService) cancelConditionalOrder(ctx context.Context, co model.ConditionalOrder) error {
+	ok, err := e.conditionalOrders.MarkCanceled(ctx, co.OrderID, NowMillis())
+	if err != nil {
+		return err
+	}
+	if !ok {
+		return nil // 跟触发扫描并发竞争、扫描赢了，这笔已经变成真正的委托，上面撤单循环会处理
+	}
+	if co.Action == model.ActionOpen && (co.FrozenMargin.Sign() > 0 || co.FrozenCredit.Sign() > 0) {
+		return e.accounts.UnfreezeMargin(ctx, co.UID, co.FrozenMargin, co.FrozenCredit)
 	}
 	return nil
 }

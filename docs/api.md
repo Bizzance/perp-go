@@ -144,6 +144,58 @@ HTTP响应`"结束本轮请求已提交"`只表示请求已受理，不代表撤
 
 历史委托，最近100条。
 
+## 条件单（止盈止损/条件开仓）
+
+详细设计见 [conditional-orders.md](conditional-orders.md)。
+
+### `POST /order/conditional/add`
+
+```json
+{
+  "uid": 10001,
+  "symbol": "BTCUSDT",
+  "side": "long",
+  "action": "close",
+  "triggerPrice": 60000,
+  "triggerDirection": "gte",
+  "type": "market",
+  "amount": 0.1,
+  "leverage": 10,
+  "reduceOnly": true
+}
+```
+
+字段跟`POST /order/add`基本一致，额外两个必填字段：
+
+| 字段               | 说明                                                             |
+|--------------------|------------------------------------------------------------------|
+| `triggerPrice`     | 触发价                                                            |
+| `triggerDirection` | `gte`=标记价格涨到/超过触发价才触发，`lte`=跌到/低于触发价才触发 |
+
+`type=limit`时`price`是触发后要执行的委托价格（必填）；`type=market`时不需要传`price`，
+触发后按当时的标记价成交。`action=open`时会在创建时就冻结保证金（分档/杠杆校验同下单
+接口），`action=close`不冻结。返回的id和触发后落地到`orders`表的`orderId`是同一个，
+`GET /order/history`能查到触发后的真实委托记录。
+
+### `POST /order/conditional/cancel/:orderId`
+
+```json
+{
+  "uid": 10001
+}
+```
+
+只能撤销还没触发（`pending`）的条件单；已经触发的要用`POST /order/cancel/:orderId`
+撤销（这时候它已经是一笔真正的委托了）。
+
+### `GET /order/conditional/current?uid=10001&symbol=BTCUSDT`
+
+当前还没触发的条件单，`symbol`可省略查全部。
+
+### `GET /order/conditional/history?uid=10001`
+
+条件单历史（含已触发/已撤销），最近100条。
+
 ## 持仓
 
 ### `GET /position/current?uid=10001`

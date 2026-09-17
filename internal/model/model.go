@@ -47,6 +47,21 @@ var ActiveOrderStatuses = map[OrderStatus]bool{
 	OrderStatusPartiallyFilled: true,
 }
 
+type TriggerDirection string
+
+const (
+	TriggerGTE TriggerDirection = "gte" // 标记价格涨到(或超过)触发价才触发
+	TriggerLTE TriggerDirection = "lte" // 标记价格跌到(或低于)触发价才触发
+)
+
+type ConditionalOrderStatus string
+
+const (
+	ConditionalStatusPending   ConditionalOrderStatus = "pending"   // 等待触发
+	ConditionalStatusTriggered ConditionalOrderStatus = "triggered" // 已触发，转成了真正的委托(见orders表同order_id那一行)
+	ConditionalStatusCanceled  ConditionalOrderStatus = "canceled"  // 触发前被撤销
+)
+
 type PositionStatus string
 
 const (
@@ -132,6 +147,36 @@ type Order struct {
 
 func (o *Order) RemainingAmount() decimal.Decimal {
 	return o.Amount.Sub(o.TradedAmount)
+}
+
+// ConditionalOrder 条件单(止盈止损/条件开仓)：触发前只是"记着一个条件"，不进撮合引擎的
+// 订单簿，触发后按OrderID同一个id落地成一笔真正的Order记录，见docs/conditional-orders.md
+type ConditionalOrder struct {
+	OrderID          uint64                 `db:"order_id"`
+	UID              uint64                 `db:"uid"`
+	Symbol           string                 `db:"symbol"`
+	Side             Side                   `db:"side"`
+	Action           OrderAction            `db:"action"`
+	TriggerPrice     decimal.Decimal        `db:"trigger_price"`
+	TriggerDirection TriggerDirection       `db:"trigger_direction"`
+	Type             OrderType              `db:"type"`
+	Price            decimal.Decimal        `db:"price"` // 触发后委托的价格，market类型恒为0
+	Amount           decimal.Decimal        `db:"amount"`
+	Leverage         uint32                 `db:"leverage"`
+	ReduceOnly       bool                   `db:"reduce_only"`
+	FrozenMargin     decimal.Decimal        `db:"frozen_margin"` // 创建时冻结的保证金来自available的部分，只有开仓方向才有
+	FrozenCredit     decimal.Decimal        `db:"frozen_credit"` // 创建时冻结的保证金来自credit的部分，只有开仓方向才有
+	Status           ConditionalOrderStatus `db:"status"`
+	CreateTime       int64                  `db:"create_time"`
+	UpdateTime       int64                  `db:"update_time"`
+}
+
+// Triggered 判断当前标记价格是否已经满足这个条件单的触发条件
+func (co *ConditionalOrder) Triggered(mark decimal.Decimal) bool {
+	if co.TriggerDirection == TriggerGTE {
+		return mark.GreaterThanOrEqual(co.TriggerPrice)
+	}
+	return mark.LessThanOrEqual(co.TriggerPrice)
 }
 
 // ProportionalFrozen 按volume(可以是一笔成交量，也可以是撤单剩余量)占这笔委托总量的比例，

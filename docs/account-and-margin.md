@@ -94,13 +94,18 @@ equity = available + credit + totalUnrealizedPnl
 （`round`字段不变）。结束本轮时（`EngineService.CloseRound`）：
 
 1. 撤销这个uid名下全部symbol上还在排队的委托，按正常撤单逻辑释放冻结保证金
-2. 对全部仍有持仓的symbol，按当前标记价立即强制平仓——**不走**
+2. 撤销这个uid名下全部还没触发的条件单（止盈止损/条件开仓），按条件单自己的撤销逻辑
+   释放冻结保证金——见 [conditional-orders.md](conditional-orders.md)。不撤的话，
+   `credit`已经在下一步清零，之后如果条件单又触发，会用到不属于这一轮的额度
+3. 对全部仍有持仓的symbol，按当前标记价立即强制平仓——**不走**
    [liquidation.md](liquidation.md)里那套"挂保护价排队+超时兜底"机制：这是用户/合作方
    主动结束本轮，不是风险触发的强平，没必要走保护价滑点缓冲、也没必要等撮合
-3. 调用`AccountService.CloseRound`清零`credit`、重置`is_insured`、`round`+1
+4. 调用`AccountService.CloseRound`清零`credit`、重置`is_insured`、`round`+1
 
-强平仓位时缺标记价格会跳过并记日志告警，这个仓位这一轮结束不掉，需要人工介入（等价格
-恢复后重新调用一次结束本轮接口即可）。
+上面1-3步只要有任何一笔没成功（撤单失败、强平缺标记价格等），就不会执行第4步——
+`AccountService.CloseRound`的前提是这个uid名下已经没有持仓/挂单/待触发条件单，不满足
+就不清算资金状态，需要人工介入或等条件满足后（比如标记价格恢复）重新调用一次结束本轮
+接口。
 
 这套编排要摸`contract-engine`内存里的订单簿/撮合状态，`contract-api`看不到，所以
 `POST /account/round/close`跟撤单接口一样，只是把事件发到Kafka（

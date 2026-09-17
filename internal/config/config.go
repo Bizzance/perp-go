@@ -15,6 +15,7 @@ type Config struct {
 	RiskScanIntervalMs        int64 // 强平扫描周期
 	MarkPriceEmaAlpha         float64
 	FundingSampleIntervalMs   int64 // 资金费率溢价采样周期，采样越密集TWAP越准
+	ConditionalScanIntervalMs int64 // 条件单(止盈止损)触发扫描周期
 }
 
 func envOr(key, def string) string {
@@ -35,5 +36,6 @@ func Load() Config {
 		RiskScanIntervalMs:        2_000,
 		MarkPriceEmaAlpha:         1.0, // 标记价=最新成交价，不做平滑
 		FundingSampleIntervalMs:   60_000,
+		ConditionalScanIntervalMs: 2_000,
 	}
 }

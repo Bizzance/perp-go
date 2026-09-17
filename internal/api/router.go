@@ -18,14 +18,15 @@ import (
 )
 
 type Server struct {
-	accounts  *service.AccountService
-	positions *service.PositionService
-	coins     *repo.CoinRepo
-	orders    *repo.OrderRepo
-	trades    *repo.TradeRepo
-	markPrice *service.MarkPriceService
-	funding   *service.FundingService
-	producer  *mq.Producer
+	accounts          *service.AccountService
+	positions         *service.PositionService
+	coins             *repo.CoinRepo
+	orders            *repo.OrderRepo
+	conditionalOrders *repo.ConditionalOrderRepo
+	trades            *repo.TradeRepo
+	markPrice         *service.MarkPriceService
+	funding           *service.FundingService
+	producer          *mq.Producer
 }
 
 func NewServer(
@@ -33,20 +34,22 @@ func NewServer(
 	positions *service.PositionService,
 	coins *repo.CoinRepo,
 	orders *repo.OrderRepo,
+	conditionalOrders *repo.ConditionalOrderRepo,
 	trades *repo.TradeRepo,
 	markPrice *service.MarkPriceService,
 	funding *service.FundingService,
 	producer *mq.Producer,
 ) *Server {
 	return &Server{
-		accounts:  accounts,
-		positions: positions,
-		coins:     coins,
-		orders:    orders,
-		trades:    trades,
-		markPrice: markPrice,
-		funding:   funding,
-		producer:  producer,
+		accounts:          accounts,
+		positions:         positions,
+		coins:             coins,
+		orders:            orders,
+		conditionalOrders: conditionalOrders,
+		trades:            trades,
+		markPrice:         markPrice,
+		funding:           funding,
+		producer:          producer,
 	}
 }
 
@@ -61,6 +64,10 @@ func (s *Server) Router() *gin.Engine {
 	r.POST("/order/cancel/:orderId", s.cancelOrder)
 	r.GET("/order/current", s.orderCurrent)
 	r.GET("/order/history", s.orderHistory)
+	r.POST("/order/conditional/add", s.addConditionalOrder)
+	r.POST("/order/conditional/cancel/:orderId", s.cancelConditionalOrder)
+	r.GET("/order/conditional/current", s.conditionalOrderCurrent)
+	r.GET("/order/conditional/history", s.conditionalOrderHistory)
 	r.GET("/position/current", s.positionCurrent)
 	r.GET("/trade/history", s.tradeHistory)
 	r.GET("/funding/rate", s.fundingRate)
@@ -186,6 +193,106 @@ func (s *Server) closeRound(c *gin.Context) {
 	ok(c, "结束本轮请求已提交")
 }
 
+// validateSideAction side/action任何不认识的值都必须拒绝，不能放过去——matching.DirectionOf
+// 对side/action只特判了(LONG,OPEN)和(SHORT,CLOSE)算买方，其它一律当卖方处理，一个拼错的
+// side/action字符串会被悄悄撮合成方向相反的交易，而不是报错。普通委托(addOrder)和条件单
+// (addConditionalOrder)共用同一套校验规则，避免两边各写一份、以后改一边漏改另一边
+func validateSideAction(side model.Side, action model.OrderAction) string {
+	if side != model.SideLong && side != model.SideShort {
+		return "side参数不合法"
+	}
+	if action != model.ActionOpen && action != model.ActionClose {
+		return "action参数不合法"
+	}
+	return ""
+}
+
+// resolveOrderType 空值默认limit，非法值拒绝——普通委托和条件单共用
+func resolveOrderType(reqType model.OrderType) (model.OrderType, string) {
+	orderType := reqType
+	if orderType == "" {
+		orderType = model.OrderTypeLimit
+	}
+	if orderType != model.OrderTypeLimit && orderType != model.OrderTypeMarket {
+		return "", "type参数不合法"
+	}
+	return orderType, ""
+}
+
+// resolveLeverage maxSaneLeverage是不区分开平仓、不查分档配置的兜底上限——只用来挡掉明显
+// 离谱/会导致uint32(leverage.IntPart())溢出截断成垃圾值的输入。真正按分档算出来的
+// tier.MaxLeverage只在ActionOpen分支里校验，是刻意的：leverage这个字段只有开仓会用来算
+// 需要冻结多少保证金，平仓不创建新仓位/新风险，不需要经过分档校验，而且分档校验依赖
+// risk_limit_tiers有配置，一旦要求平仓也必须过这一关，配置缺失或删除时反而会把用户已有
+// 仓位卡死平不掉——两害相权，让平仓单的leverage只挡这道跟合约配置无关的离谱值兜底。
+// 必须是整数：leverage落库时是uint32(order.Leverage)，settlement.go计算仓位保证金时
+// 也是按这个落库的整数杠杆重算(不是按下单时这个decimal算requiredMargin用的原始精度值)，
+// 放行小数杠杆会导致冻结保证金和落库/后续结算的杠杆口径对不上，污染position_margin/
+// ROE/预估强平价——普通委托和条件单共用同一套规则
+func resolveLeverage(reqLeverage *decimal.Decimal) (decimal.Decimal, string) {
+	leverage := decimal.NewFromInt(1)
+	if reqLeverage != nil {
+		leverage = *reqLeverage
+	}
+	const maxSaneLeverage = 1000
+	if leverage.Sign() <= 0 || leverage.GreaterThan(decimal.NewFromInt(maxSaneLeverage)) || !leverage.IsInteger() {
+		return decimal.Zero, "leverage参数不合法"
+	}
+	return leverage, ""
+}
+
+// existingOpenNotional 算这个uid在symbol+side方向上"已经占用/即将占用"的名义价值：已成交
+// 仓位 + 排队中的普通开仓委托 + 排队中的条件开仓委托(触发后会变成普通开仓委托，同样会真实
+// 占用仓位)。分档杠杆校验必须把这三者都算进去，不然可以用"一部分普通单、一部分条件单"
+// 拆开下，绕开单独统计任何一种委托类型的分档校验——这是对之前那次"排队单不计入分档"漏洞
+// 修复的延伸，条件单是后加的委托类型，同样的口径必须覆盖到
+func (s *Server) existingOpenNotional(ctx context.Context, uid uint64, symbol string, side model.Side, hasMark bool, mark decimal.Decimal) (decimal.Decimal, error) {
+	existingNotional := decimal.Zero
+	existing, err := s.positions.Find(ctx, uid, symbol, side)
+	if err != nil {
+		return decimal.Zero, err
+	}
+	if existing != nil {
+		// 用标记价估这个已有仓位当前值多少钱，没有标记价才退回持仓均价——不能用这笔新委托
+		// 自己填的价格估：限价单的价格是用户随便填的，可以故意报一个远低于市价的价格，
+		// 把existingNotional算得远小于真实值，从而蹭到一个本不该适用的低档高杠杆
+		valuePrice := existing.AvgEntryPrice
+		if hasMark {
+			valuePrice = mark
+		}
+		existingNotional = existing.Volume.Mul(valuePrice)
+	}
+	activeOrders, err := s.orders.FindActiveByUID(ctx, uid, symbol)
+	if err != nil {
+		return decimal.Zero, err
+	}
+	for _, o := range activeOrders {
+		if o.Side == side && o.Action == model.ActionOpen {
+			// 这里必须用挂单自己的o.Price，不能像上面现有仓位那样退回标记价：这些是已经
+			// 通过校验、真实挂在簿子上的委托，o.Price不是"用户随便填的、可能被拿来做局的
+			// 报价"，而是它成交时会用到的真实价格(排队单成交价=挂单自己的限价，不是标记价)
+			existingNotional = existingNotional.Add(o.RemainingAmount().Mul(o.Price))
+		}
+	}
+	activeConditional, err := s.conditionalOrders.FindActiveByUID(ctx, uid, symbol)
+	if err != nil {
+		return decimal.Zero, err
+	}
+	for _, co := range activeConditional {
+		if co.Side == side && co.Action == model.ActionOpen {
+			// 条件单触发后按什么价格提交：LIMIT用co.Price(委托人自己指定的执行价，不是随便
+			// 填的)，MARKET没有"未来的标记价"可用，退回用触发价trigger_price——同样是委托人
+			// 自己指定、真实会用来判断触发的价格，不是可以随意做局的值
+			estimatePrice := co.Price
+			if co.Type == model.OrderTypeMarket {
+				estimatePrice = co.TriggerPrice
+			}
+			existingNotional = existingNotional.Add(co.Amount.Mul(estimatePrice))
+		}
+	}
+	return existingNotional, nil
+}
+
 type addOrderRequest struct {
 	UID          uint64            `json:"uid" binding:"required"`
 	Symbol       string            `json:"symbol" binding:"required"`
@@ -208,44 +315,18 @@ func (s *Server) addOrder(c *gin.Context) {
 	symbol := req.Symbol
 	side := req.Side
 	action := req.Action
-	// side/action任何不认识的值都必须拒绝，不能放过去——matching.DirectionOf对side/action
-	// 只特判了(LONG,OPEN)和(SHORT,CLOSE)算买方，其它一律当卖方处理，一个拼错的side/action
-	// 字符串会被悄悄撮合成方向相反的交易，而不是报错
-	if side != model.SideLong && side != model.SideShort {
-		fail(c, 400, "side参数不合法")
+	if msg := validateSideAction(side, action); msg != "" {
+		fail(c, 400, msg)
 		return
 	}
-	if action != model.ActionOpen && action != model.ActionClose {
-		fail(c, 400, "action参数不合法")
+	orderType, msg := resolveOrderType(req.Type)
+	if msg != "" {
+		fail(c, 400, msg)
 		return
 	}
-	orderType := req.Type
-	if orderType == "" {
-		orderType = model.OrderTypeLimit
-	}
-	if orderType != model.OrderTypeLimit && orderType != model.OrderTypeMarket {
-		fail(c, 400, "type参数不合法")
-		return
-	}
-	leverage := decimal.NewFromInt(1)
-	if req.Leverage != nil {
-		leverage = *req.Leverage
-	}
-	// maxSaneLeverage是不区分开平仓、不查分档配置的兜底上限——只用来挡掉明显离谱/会导致
-	// 下面uint32(leverage.IntPart())溢出截断成垃圾值的输入。真正按分档算出来的tier.MaxLeverage
-	// 只在下面ActionOpen分支里校验，是刻意的：leverage这个字段只有开仓会用来算需要冻结多少
-	// 保证金(见settlement.go的ApplyOpenFill)，平仓不创建新仓位/新风险，不需要经过分档校验，
-	// 而且分档校验依赖risk_limit_tiers有配置，一旦要求平仓也必须过这一关，配置缺失或删除时
-	// 反而会把用户已有仓位卡死平不掉——两害相权，让平仓单的leverage只挡这道跟合约配置无关的
-	// 离谱值兜底，是本次分档改动反复权衡后的结论，不是遗漏
-	const maxSaneLeverage = 1000
-	if leverage.Sign() <= 0 || leverage.GreaterThan(decimal.NewFromInt(maxSaneLeverage)) || !leverage.IsInteger() {
-		// 必须是整数：leverage落库时是uint32(order.Leverage)，settlement.go计算仓位保证金
-		// 时也是按这个落库的整数杠杆重算(不是按下单时这个decimal算requiredMargin用的原始
-		// 精度值)。如果这里放行小数杠杆(比如7.5)，冻结保证金按7.5算是对的，但落库/后续
-		// 结算全部按truncate过的7算，两边对不上，会污染这个仓位的position_margin/ROE/
-		// 预估强平价——干脆不允许小数杠杆，跟真实交易所只提供整数倍杠杆选项一致
-		fail(c, 400, "leverage参数不合法")
+	leverage, msg := resolveLeverage(req.Leverage)
+	if msg != "" {
+		fail(c, 400, msg)
 		return
 	}
 
@@ -367,37 +448,10 @@ func (s *Server) addOrder(c *gin.Context) {
 		// uid+symbol+side提交多笔请求，每一笔读到的都是对方还没提交时的旧状态，理论上仍能绕开——
 		// 这套系统一直没有为这类极端并发加锁(FreezeMargin等其它地方同样如此)，属于已知、接受的
 		// MVP简化，这里只堵顺序提交这条更容易触发、不需要精确时机就能稳定复现的路径
-		existingNotional := decimal.Zero
-		existing, err := s.positions.Find(c.Request.Context(), uid, symbol, side)
+		existingNotional, err := s.existingOpenNotional(c.Request.Context(), uid, symbol, side, hasMark, mark)
 		if err != nil {
 			fail(c, 500, err.Error())
 			return
-		}
-		if existing != nil {
-			// 用标记价估这个已有仓位当前值多少钱，没有标记价才退回持仓均价——不能用这笔新委托
-			// 自己填的价格估：限价单的价格是用户随便填的，可以故意报一个远低于市价的价格，
-			// 把existingNotional算得远小于真实值，从而蹭到一个本不该适用的低档高杠杆
-			valuePrice := existing.AvgEntryPrice
-			if hasMark {
-				valuePrice = mark
-			}
-			existingNotional = existing.Volume.Mul(valuePrice)
-		}
-		activeOrders, err := s.orders.FindActiveByUID(c.Request.Context(), uid, symbol)
-		if err != nil {
-			fail(c, 500, err.Error())
-			return
-		}
-		for _, o := range activeOrders {
-			if o.Side == side && o.Action == model.ActionOpen {
-				// 这里必须用挂单自己的o.Price，不能像上面现有仓位那样退回标记价：这些是已经
-				// 通过校验、真实挂在簿子上的委托，o.Price不是"用户随便填的、可能被拿来做局的
-				// 报价"，而是它成交时会用到的真实价格(排队单成交价=挂单自己的限价，不是标记价)。
-				// 之前这里写成跟现有仓位一样固定退回标记价，恰好把这个函数本要防的"顺序挂多笔
-				// 远离盘口限价单"场景反向搞成了漏洞：挂单价格越是远离标记价(正是最该被算重的
-				// 情况)，标记价对它的估值就越失真、越偏小
-				existingNotional = existingNotional.Add(o.RemainingAmount().Mul(o.Price))
-			}
 		}
 		// 这笔新委托自己的名义价值用orderNotionalPrice(上面已经算好，SHORT+OPEN时是
 		// max(price,markPrice))，跟冻结保证金用的是同一个基准，两处口径必须一致
@@ -522,6 +576,277 @@ func (s *Server) orderHistory(c *gin.Context) {
 		return
 	}
 	orders, err := s.orders.FindHistoryByUID(c.Request.Context(), uid, 100)
+	if err != nil {
+		fail(c, 500, err.Error())
+		return
+	}
+	ok(c, orders)
+}
+
+type addConditionalOrderRequest struct {
+	UID              uint64                 `json:"uid" binding:"required"`
+	Symbol           string                 `json:"symbol" binding:"required"`
+	Side             model.Side             `json:"side" binding:"required"`
+	Action           model.OrderAction      `json:"action" binding:"required"`
+	TriggerPrice     decimal.Decimal        `json:"triggerPrice" binding:"required"`
+	TriggerDirection model.TriggerDirection `json:"triggerDirection" binding:"required"`
+	Type             model.OrderType        `json:"type"`
+	Leverage         *decimal.Decimal       `json:"leverage"`
+	Price            decimal.Decimal        `json:"price"`
+	MarginAmount     *decimal.Decimal       `json:"marginAmount"`
+	Amount           *decimal.Decimal       `json:"amount"`
+	ReduceOnly       bool                   `json:"reduceOnly"`
+}
+
+// addConditionalOrder 创建条件单(止盈止损/条件开仓)：只落库到conditional_orders表，不进
+// 撮合引擎的订单簿、不发Kafka事件——触发前这笔"委托"只是一个记在数据库里的条件，真正提交
+// 撮合是contract-engine那边的ConditionalOrderService定时扫描标记价格触发之后的事，见
+// docs/conditional-orders.md。校验链尽量复用addOrder的逻辑，两个关键差异：
+//  1. 不做价格保护带校验——委托执行价(LIMIT类型的price)本来就该跟触发价接近、可能远离
+//     当前标记价，这是条件单存在的意义，拿当前标记价去校验没有意义
+//  2. 分档校验/保证金冻结用的"名义价值估值基准"，MARKET类型没有"可预知的未来标记价"，
+//     退回用triggerPrice本身估——委托人自己指定、真实会用来判断触发的价格，不是随便填的
+func (s *Server) addConditionalOrder(c *gin.Context) {
+	var req addConditionalOrderRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	uid := req.UID
+	symbol := req.Symbol
+	side := req.Side
+	action := req.Action
+	if msg := validateSideAction(side, action); msg != "" {
+		fail(c, 400, msg)
+		return
+	}
+	if req.TriggerDirection != model.TriggerGTE && req.TriggerDirection != model.TriggerLTE {
+		fail(c, 400, "triggerDirection参数不合法")
+		return
+	}
+	if req.TriggerPrice.Sign() <= 0 {
+		fail(c, 400, "triggerPrice参数不合法")
+		return
+	}
+	orderType, msg := resolveOrderType(req.Type)
+	if msg != "" {
+		fail(c, 400, msg)
+		return
+	}
+	leverage, msg := resolveLeverage(req.Leverage)
+	if msg != "" {
+		fail(c, 400, msg)
+		return
+	}
+
+	coin, err := s.coins.FindBySymbol(c.Request.Context(), symbol)
+	if err != nil || coin == nil || !coin.Enable {
+		fail(c, 400, "合约不存在或已下架")
+		return
+	}
+	if coin.PriceTick.Sign() > 0 && !req.TriggerPrice.Mod(coin.PriceTick).IsZero() {
+		fail(c, 400, "triggerPrice不符合最小变动单位")
+		return
+	}
+	// referencePrice/hasReference：标记价格优先、缺失退回指数价格，跟addOrder用的是
+	// 同一套兜底逻辑——下面SHORT+OPEN的保守计价基准要用它
+	mark, hasMark := s.markPrice.Get(c.Request.Context(), symbol)
+	referencePrice, hasReference := mark, hasMark
+	if !hasReference {
+		referencePrice, hasReference = s.markPrice.GetIndexPrice(c.Request.Context(), symbol)
+	}
+
+	// price是触发后委托的执行价——LIMIT类型必填，MARKET类型触发时按当时的标记价成交，
+	// 这里不需要也不应该预先填一个价格(未来触发时刻的标记价现在还不知道)
+	var price decimal.Decimal
+	if orderType == model.OrderTypeLimit {
+		price = req.Price
+		if price.Sign() <= 0 {
+			fail(c, 400, "限价单price参数不合法")
+			return
+		}
+		if coin.PriceTick.Sign() > 0 && !price.Mod(coin.PriceTick).IsZero() {
+			fail(c, 400, "price不符合最小变动单位")
+			return
+		}
+	}
+	// estimatePrice是这笔条件单在"触发之前"唯一能拿到的、委托人自己指定的价格基准——
+	// LIMIT用触发后要执行的price，MARKET没有这个值就退回triggerPrice，marginAmount
+	// 换算数量统一用这一个基准(不能用下面bump过的orderNotionalPrice——用户要的是
+	// "这些保证金、这个杠杆对应多少数量"，不该被保守估计放大)
+	estimatePrice := price
+	if orderType == model.OrderTypeMarket {
+		estimatePrice = req.TriggerPrice
+	}
+
+	var amount decimal.Decimal
+	switch {
+	case req.MarginAmount != nil:
+		if req.MarginAmount.Sign() <= 0 {
+			fail(c, 400, "marginAmount参数不合法")
+			return
+		}
+		notional := req.MarginAmount.Mul(leverage)
+		amount = notional.Div(estimatePrice).Truncate(coin.BaseCoinScale)
+	case req.Amount != nil:
+		amount = *req.Amount
+	default:
+		fail(c, 400, "必须传marginAmount或amount之一")
+		return
+	}
+	if amount.Sign() <= 0 {
+		fail(c, 400, "数量必须大于0")
+		return
+	}
+	if coin.MinVolume.Sign() > 0 && amount.LessThan(coin.MinVolume) {
+		fail(c, 400, "数量低于该合约最小下单量")
+		return
+	}
+	if coin.MaxVolume.Sign() > 0 && amount.GreaterThan(coin.MaxVolume) {
+		fail(c, 400, "数量超出该合约最大下单量")
+		return
+	}
+	if coin.VolumeStep.Sign() > 0 && !amount.Mod(coin.VolumeStep).IsZero() {
+		fail(c, 400, "数量不符合最小步长")
+		return
+	}
+
+	// orderNotionalPrice是分档校验/冻结保证金的估值基准，只对SHORT+OPEN生效，理由跟
+	// addOrder的orderNotionalPrice完全一样(那边有详细注释)：LIMIT类型的price是委托人
+	// 自己填的执行价，可以故意填得远低于参考价——触发后这笔委托会以真正的LIMIT SELL
+	// 身份提交撮合，立刻按盘口对手的真实(更高)价格成交，不是按这个填的低价成交，分档/
+	// 冻结保证金按委托价算会严重低估真实风险。这是addOrder那次修复(commit 5cece54)在
+	// 条件单这条新路径上必须同步补上的同一处，不能因为多了"触发"这一步中间状态就漏掉
+	orderNotionalPrice := estimatePrice
+	if side == model.SideShort && hasReference && referencePrice.GreaterThan(estimatePrice) {
+		orderNotionalPrice = referencePrice
+	}
+
+	requiredMargin := amount.Mul(orderNotionalPrice).Div(leverage)
+	var freezeResult service.FreezeResult
+	if action == model.ActionOpen {
+		existingNotional, err := s.existingOpenNotional(c.Request.Context(), uid, symbol, side, hasMark, mark)
+		if err != nil {
+			fail(c, 500, err.Error())
+			return
+		}
+		tier, err := s.positions.TierFor(c.Request.Context(), symbol, existingNotional.Add(amount.Mul(orderNotionalPrice)))
+		if err != nil {
+			fail(c, 500, err.Error())
+			return
+		}
+		if tier == nil {
+			fail(c, 400, "该合约未配置保证金分档，暂不允许开仓")
+			return
+		}
+		if leverage.GreaterThan(decimal.NewFromInt(int64(tier.MaxLeverage))) {
+			fail(c, 400, "杠杆倍数超出当前仓位名义价值对应档位允许的范围")
+			return
+		}
+		result, err := s.accounts.FreezeMargin(c.Request.Context(), uid, requiredMargin)
+		if err != nil {
+			fail(c, 500, err.Error())
+			return
+		}
+		freezeResult = result
+	}
+
+	orderID := service.NextID()
+	now := service.NowMillis()
+	co := &model.ConditionalOrder{
+		OrderID:          orderID,
+		UID:              uid,
+		Symbol:           symbol,
+		Side:             side,
+		Action:           action,
+		TriggerPrice:     req.TriggerPrice,
+		TriggerDirection: req.TriggerDirection,
+		Type:             orderType,
+		Price:            price,
+		Amount:           amount,
+		Leverage:         uint32(leverage.IntPart()),
+		ReduceOnly:       req.ReduceOnly,
+		Status:           model.ConditionalStatusPending,
+		CreateTime:       now,
+		UpdateTime:       now,
+	}
+	if action == model.ActionOpen {
+		co.FrozenMargin = freezeResult.FromAvailable
+		co.FrozenCredit = freezeResult.FromCredit
+	}
+	if err := s.conditionalOrders.Insert(c.Request.Context(), co); err != nil {
+		fail(c, 500, err.Error())
+		return
+	}
+	ok(c, orderID)
+}
+
+type cancelConditionalOrderRequest struct {
+	UID uint64 `json:"uid" binding:"required"`
+}
+
+// cancelConditionalOrder 撤销一笔还没触发的条件单——全程只碰MySQL，不需要像普通委托撤单
+// 那样经Kafka路由给contract-engine：条件单触发前从来没进过撮合引擎的内存订单簿，没有
+// 什么可摘的，直接原子标记取消+退回冻结保证金即可，比普通撤单更简单
+func (s *Server) cancelConditionalOrder(c *gin.Context) {
+	var req cancelConditionalOrderRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	orderID, err := decimal.NewFromString(c.Param("orderId"))
+	if err != nil {
+		fail(c, 400, "orderId不合法")
+		return
+	}
+	co, err := s.conditionalOrders.FindByOrderID(c.Request.Context(), uint64(orderID.IntPart()))
+	if err != nil || co == nil || co.UID != req.UID {
+		fail(c, 400, "条件单不存在")
+		return
+	}
+	if co.Status != model.ConditionalStatusPending {
+		fail(c, 400, "条件单已触发或已取消")
+		return
+	}
+	ok1, err := s.conditionalOrders.MarkCanceled(c.Request.Context(), co.OrderID, service.NowMillis())
+	if err != nil {
+		fail(c, 500, err.Error())
+		return
+	}
+	if !ok1 {
+		// 撤单请求跟engine那边的触发扫描并发竞争，扫描先一步赢了——这笔条件单已经变成了
+		// 真正的委托，不能再当"条件单撤销"处理，调用方该走普通撤单接口
+		fail(c, 400, "条件单已触发，无法撤销")
+		return
+	}
+	if co.Action == model.ActionOpen && (co.FrozenMargin.Sign() > 0 || co.FrozenCredit.Sign() > 0) {
+		// 条件单从来没有部分成交这一说(触发之前压根没提交撮合)，撤销就是整笔退，不需要
+		// 像普通委托撤单那样按剩余量比例计算
+		if err := s.accounts.UnfreezeMargin(c.Request.Context(), co.UID, co.FrozenMargin, co.FrozenCredit); err != nil {
+			fail(c, 500, err.Error())
+			return
+		}
+	}
+	ok(c, "条件单已撤销")
+}
+
+func (s *Server) conditionalOrderCurrent(c *gin.Context) {
+	uid, ok1 := parseUID(c)
+	if !ok1 {
+		return
+	}
+	orders, err := s.conditionalOrders.FindActiveByUID(c.Request.Context(), uid, c.Query("symbol"))
+	if err != nil {
+		fail(c, 500, err.Error())
+		return
+	}
+	ok(c, orders)
+}
+
+func (s *Server) conditionalOrderHistory(c *gin.Context) {
+	uid, ok1 := parseUID(c)
+	if !ok1 {
+		return
+	}
+	orders, err := s.conditionalOrders.FindHistoryByUID(c.Request.Context(), uid, 100)
 	if err != nil {
 		fail(c, 500, err.Error())
 		return

@@ -1,6 +1,6 @@
 -- framework-go 第一期(MVP)表结构，独立新库(建议库名 perpgo)。
--- 账户(无信用额度)、合约配置与保证金分档、委托/持仓/成交、标记价格、指数价格与资金费率结算、
--- 保险基金。不建：信用账户、条件单、逐仓模式——这些是后续阶段。
+-- 账户(含信用额度)、合约配置与保证金分档、委托/条件单/持仓/成交、标记价格、指数价格与
+-- 资金费率结算、保险基金。不建：逐仓模式——按项目约定只支持全仓，明确不做。
 
 CREATE DATABASE IF NOT EXISTS perpgo DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE perpgo;
@@ -170,6 +170,33 @@ SET @sql := (SELECT IF(
   'SELECT 1'
 ));
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+-- 条件单(止盈止损/条件开仓)：创建时不进撮合引擎的订单簿，只是"记着一个触发条件"，
+-- 由contract-engine定时扫描标记价格，触发了才转成一笔真正的委托(落到orders表)按正常流程
+-- 提交撮合。order_id在创建条件单的时候就分配好，触发后落地到orders表也用这同一个id，
+-- 客户端不需要另外维护"条件单id"和"委托id"两套编号
+CREATE TABLE IF NOT EXISTS conditional_orders (
+  order_id          BIGINT UNSIGNED NOT NULL COMMENT '触发后落地到orders表用同一个id，创建时就分配好',
+  uid               BIGINT UNSIGNED NOT NULL,
+  symbol            VARCHAR(32) NOT NULL,
+  side              ENUM('long','short') NOT NULL,
+  action            ENUM('open','close') NOT NULL,
+  trigger_price     DECIMAL(18,8) NOT NULL,
+  trigger_direction ENUM('gte','lte') NOT NULL COMMENT 'gte=标记价格涨到(或以上)触发价才触发，lte=跌到(或以下)才触发',
+  type              ENUM('limit','market') NOT NULL COMMENT '触发后按这个类型提交委托',
+  price             DECIMAL(18,8) NOT NULL DEFAULT 0 COMMENT '触发后委托的价格，limit类型必填，market类型恒为0',
+  amount            DECIMAL(26,16) NOT NULL,
+  leverage          INT UNSIGNED NOT NULL,
+  reduce_only       TINYINT(1) NOT NULL DEFAULT 0,
+  frozen_margin     DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT '创建时冻结的保证金(来自available的部分)，只有开仓方向的条件单才会冻结',
+  frozen_credit     DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT '创建时冻结的保证金(来自credit的部分)，只有开仓方向的条件单才会冻结',
+  status            ENUM('pending','triggered','canceled') NOT NULL DEFAULT 'pending',
+  create_time       BIGINT UNSIGNED NOT NULL,
+  update_time       BIGINT UNSIGNED NOT NULL,
+  PRIMARY KEY (order_id),
+  KEY idx_conditional_orders_uid (uid),
+  KEY idx_conditional_orders_status (status)
+) ENGINE=InnoDB;
 
 -- 持仓：全仓保证金，一个(uid,symbol,side)一行
 CREATE TABLE IF NOT EXISTS positions (

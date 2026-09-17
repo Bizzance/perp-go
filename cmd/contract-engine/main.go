@@ -37,6 +37,7 @@ func main() {
 	accountRepo := repo.NewAccountRepo(conn)
 	coinRepo := repo.NewCoinRepo(conn)
 	orderRepo := repo.NewOrderRepo(conn)
+	conditionalOrderRepo := repo.NewConditionalOrderRepo(conn)
 	positionRepo := repo.NewPositionRepo(conn)
 	tradeRepo := repo.NewTradeRepo(conn)
 	txRepo := repo.NewTxRepo(conn)
@@ -52,8 +53,9 @@ func main() {
 	fundingSvc := service.NewFundingService(rdb, coinRepo, positionRepo, fundingRepo, accountSvc, txRepo, markPriceSvc)
 
 	matchingEngine := matching.NewEngine()
-	engineSvc := service.NewEngineService(matchingEngine, orderRepo, tradeRepo, accountSvc, positionSvc, settlementSvc, markPriceSvc, fundSvc)
+	engineSvc := service.NewEngineService(matchingEngine, orderRepo, conditionalOrderRepo, tradeRepo, accountSvc, positionSvc, settlementSvc, markPriceSvc, fundSvc)
 	liquidationSvc := service.NewLiquidationService(engineSvc, orderRepo, positionRepo, positionSvc, markPriceSvc, accountSvc, fundSvc, cfg.LiquidationOrderTimeoutMs)
+	conditionalOrderSvc := service.NewConditionalOrderService(conditionalOrderRepo, orderRepo, markPriceSvc, engineSvc)
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -125,6 +127,19 @@ func main() {
 			case <-ticker.C:
 				fundingSvc.SampleOnce(ctx)
 				fundingSvc.SettleIfDue(ctx, time.Now().UnixMilli())
+			}
+		}
+	}()
+
+	go func() {
+		ticker := time.NewTicker(time.Duration(cfg.ConditionalScanIntervalMs) * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				conditionalOrderSvc.ScanOnce(ctx)
 			}
 		}
 	}()
