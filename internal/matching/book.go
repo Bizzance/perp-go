@@ -64,15 +64,38 @@ type priceLevel struct {
 	count       int
 }
 
-// pushBack 挂到这一档队尾(价格-时间优先里"时间"这个维度的体现)
-func (pl *priceLevel) pushBack(order *RestingOrder) *orderNode {
+// insertOrdered 按EntryTime把新节点插入到这一档链表里正确的位置——同一档内先到先得，
+// EntryTime更小(更早进入撮合引擎)排在前面。EntryTime是调用方在拿到Book锁之前就已经算好的
+// 值(比如Kafka消费者收到消息的纳秒时间戳)，多个goroutine(下单消费者、强平定时扫描、条件单
+// 触发扫描)各自准备好委托、再抢Book的锁——谁先抢到锁(即Rest调用的先后顺序)不等于谁的
+// EntryTime更早，两者可能不一致，所以必须按EntryTime的值找插入点，不能简单地"谁先调用
+// Rest就排在最后"(那样退化成"抢锁顺序优先"，同一价位的成交优先级会随线程调度抖动，这是
+// 真实的公平性问题，不是理论上的边界情况)。多数情况下新单子的EntryTime比已经在队列里的
+// 都新，从队尾往前扫更快找到插入点，只有在极少数"锁竞争顺序跟EntryTime顺序不一致"的情况
+// 才需要扫过几个节点
+func (pl *priceLevel) insertOrdered(order *RestingOrder) *orderNode {
 	node := &orderNode{order: order, level: pl}
-	if pl.tail == nil {
-		pl.head, pl.tail = node, node
+	cur := pl.tail
+	for cur != nil && cur.order.EntryTime > order.EntryTime {
+		cur = cur.prev
+	}
+	if cur == nil {
+		node.next = pl.head
+		if pl.head != nil {
+			pl.head.prev = node
+		} else {
+			pl.tail = node
+		}
+		pl.head = node
 	} else {
-		node.prev = pl.tail
-		pl.tail.next = node
-		pl.tail = node
+		node.prev = cur
+		node.next = cur.next
+		if cur.next != nil {
+			cur.next.prev = node
+		} else {
+			pl.tail = node
+		}
+		cur.next = node
 	}
 	pl.totalVolume = pl.totalVolume.Add(order.Remaining)
 	pl.count++
@@ -255,12 +278,20 @@ func (b *Book) Match(order *RestingOrder) (fills []Fill, selfCanceled []*Resting
 }
 
 // Rest 把未完全成交的LIMIT单剩余部分挂进簿子，按价格-时间优先插入到正确位置
-func (b *Book) Rest(order *RestingOrder) {
+// Rest 把未完全成交的LIMIT单剩余部分挂进簿子，按价格-时间优先插入到正确位置。如果这个
+// orderID已经在簿子里(比如上游Kafka消费者在at-least-once语义下重复投递了同一个下单
+// 事件，SubmitOrder被重复调用)，不会插入第二份、静默覆盖map里的旧引用把旧节点变成
+// "找不到、但还挂在簿子上"的孤儿——直接跳过，返回false让调用方知道这是一次重复调用
+func (b *Book) Rest(order *RestingOrder) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
+	if _, exists := b.byID[order.OrderID]; exists {
+		return false
+	}
 	buy := order.Direction == Buy
 	level := b.getOrCreateLevel(order.Price, buy)
-	b.byID[order.OrderID] = level.pushBack(order)
+	b.byID[order.OrderID] = level.insertOrdered(order)
+	return true
 }
 
 // Cancel 从簿子里摘掉一笔委托，返回被摘掉时还剩多少量(调用方要把这部分保证金退回)，

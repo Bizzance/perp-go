@@ -250,6 +250,47 @@ type Trade struct {
 	CreateTime   int64           `db:"create_time"`
 }
 
+// KlineInterval K线周期——固定这几档，不支持任意周期。每个周期各自独立维护一份K线数据
+// (每笔成交同时更新全部周期各自对应的那一根)，不是从更小周期现场聚合，查询时直接读、
+// 不用现算，见docs/kline.md
+type KlineInterval string
+
+const (
+	Kline1m  KlineInterval = "1m"
+	Kline5m  KlineInterval = "5m"
+	Kline15m KlineInterval = "15m"
+	Kline1h  KlineInterval = "1h"
+	Kline4h  KlineInterval = "4h"
+	Kline1d  KlineInterval = "1d"
+)
+
+// KlineIntervalMillis 每个周期对应的毫秒数，用来把成交时间对齐到所在K线的开盘时间
+// (open_time = floor(tradeTime / 周期毫秒) * 周期毫秒)
+var KlineIntervalMillis = map[KlineInterval]int64{
+	Kline1m:  60_000,
+	Kline5m:  5 * 60_000,
+	Kline15m: 15 * 60_000,
+	Kline1h:  60 * 60_000,
+	Kline4h:  4 * 60 * 60_000,
+	Kline1d:  24 * 60 * 60_000,
+}
+
+// AllKlineIntervals 每笔成交要更新的全部周期，固定顺序，遍历用
+var AllKlineIntervals = []KlineInterval{Kline1m, Kline5m, Kline15m, Kline1h, Kline4h, Kline1d}
+
+type Kline struct {
+	Symbol     string          `db:"symbol"`
+	Interval   KlineInterval   `db:"interval"`
+	OpenTime   int64           `db:"open_time"`
+	Open       decimal.Decimal `db:"open"`
+	High       decimal.Decimal `db:"high"`
+	Low        decimal.Decimal `db:"low"`
+	Close      decimal.Decimal `db:"close"`
+	Volume     decimal.Decimal `db:"volume"`
+	TradeCount uint32          `db:"trade_count"`
+	UpdateTime int64           `db:"update_time"`
+}
+
 type InsuranceFund struct {
 	ID      uint64          `db:"id"`
 	Balance decimal.Decimal `db:"balance"`

@@ -30,6 +30,31 @@ best price永远在数组端点，撮合热路径（从最优价往外扫）直�
 | 撮合吃掉最优价一笔单   | O(1)   | O(1)                                       |
 | 深度快照(前N档)       | 不支持 | O(N)                                       |
 
+## 同一档内的时间优先：按`EntryTime`排序插入，不是按`Rest`调用顺序
+
+`Rest`往一个价格档位里插入新节点时，是按`RestingOrder.EntryTime`的值找插入点
+（`priceLevel.insertOrdered`），不是简单地追加到链表队尾。这个区别很关键：`Rest`是从
+`EngineService.SubmitOrder`调用的，而`SubmitOrder`本身会被**多个独立的goroutine**调用到
+同一个`Book`上——下单Kafka消费者、强平定时扫描、条件单触发定时扫描——每个goroutine都是
+在**抢到`Book`的锁之前**就已经算好了`EntryTime`（比如Kafka消费者收到消息的纳秒时间戳）。
+"谁先抢到锁、谁的`Rest`调用先执行"跟"谁的`EntryTime`更早"是两回事，不能划等号——如果
+简单地按调用顺序追加到队尾，同一价位的成交优先级会随着线程调度产生的先后顺序抖动，这是
+真实的公平性问题（理论上给了后到的委托插队的机会），不是可以忽略的边界情况。
+
+多数情况下新单子的`EntryTime`比档位里已有的都新，`insertOrdered`从队尾往前扫，通常一两次
+比较就能找到插入点；只有"抢锁顺序跟EntryTime顺序不一致"这种少见情况才需要多扫几个节点，
+这个开销跟"专业级"的复杂度目标并不冲突。
+
+## 防止同一个orderID被挂两次
+
+`Rest`在插入前会检查这个`orderID`是不是已经在`byID`里——如果已经在，直接跳过、返回
+`false`，不会静默覆盖map里的引用。这不是过度防御：Kafka是at-least-once语义，
+`internal/mq`这层消费者封装没有做去重，理论上同一个下单事件可能被重复投递，导致
+`SubmitOrder`对同一个`orderId`被调用两次。如果`Rest`对这种情况没有防护，第二次调用会
+让`byID[orderId]`指向新插入的节点，原来那个节点虽然还挂在价格档位的链表里（还占着
+`totalVolume`、还能被撮合到），但再也没有任何东西能通过`Cancel(orderId)`找到它——变成
+一个撤不掉的孤儿委托。
+
 ## 自成交保护（STP）：取消maker
 
 撮合（`Book.Match`）过程中，如果即将成交的对手（maker，簿子上挂着的那笔）跟主动吃单方
@@ -79,6 +104,14 @@ type DepthSnapshot struct {
 （`internal/api/engine_server.go`，`EngineServer`，默认监听`:7002`，
 `PERP_ENGINE_HTTP_ADDR`可配），目前只有`GET /depth?symbol=BTCUSDT&levels=20`一个接口，
 跟`contract-api`那个对外业务API是完全独立的两个Gin实例/端口。
+
+`symbol`合法性校验(挡掉`matching.Engine.BookFor`对任意字符串都会创建永久空Book这个
+内存膨胀风险)不是每次请求都查一次MySQL，而是用`EngineServer.enabledSymbols`这个内存
+缓存(`atomic.Pointer[map[string]bool]`)，`RefreshSymbols`定时刷新
+(`SymbolCacheRefreshMs`，默认30秒)。这是刻意的取舍：`/depth`是这个进程唯一暴露的高频
+查询接口，`Book.mu`换成读写锁就是为了让并发的深度查询不用互相排队，如果校验symbol这步
+又引入一次DB往返，等于把这个优化的意义抵消掉大半；新增/停用合约这类配置变更本来就是
+低频的运营操作，几十秒的生效延迟可以接受。
 
 ## 后续（这次没做，记录以便后续迭代）
 

@@ -46,6 +46,7 @@ func main() {
 	fundRepo := repo.NewInsuranceFundRepo(conn)
 	fundingRepo := repo.NewFundingRepo(conn)
 	riskLimitRepo := repo.NewRiskLimitRepo(conn)
+	klineRepo := repo.NewKlineRepo(conn)
 
 	markPriceSvc := service.NewMarkPriceService(rdb)
 	positionSvc := service.NewPositionService(positionRepo, riskLimitRepo, markPriceSvc)
@@ -53,9 +54,10 @@ func main() {
 	settlementSvc := service.NewSettlementService(accountSvc, positionRepo, coinRepo, txRepo)
 	fundSvc := service.NewInsuranceFundService(fundRepo)
 	fundingSvc := service.NewFundingService(rdb, coinRepo, positionRepo, fundingRepo, accountSvc, txRepo, markPriceSvc)
+	klineSvc := service.NewKlineService(klineRepo)
 
 	matchingEngine := matching.NewEngine()
-	engineSvc := service.NewEngineService(matchingEngine, orderRepo, conditionalOrderRepo, tradeRepo, accountSvc, positionSvc, settlementSvc, markPriceSvc, fundSvc)
+	engineSvc := service.NewEngineService(matchingEngine, orderRepo, conditionalOrderRepo, tradeRepo, accountSvc, positionSvc, settlementSvc, markPriceSvc, fundSvc, klineSvc)
 	liquidationSvc := service.NewLiquidationService(engineSvc, orderRepo, positionRepo, positionSvc, markPriceSvc, accountSvc, fundSvc, cfg.LiquidationOrderTimeoutMs)
 	conditionalOrderSvc := service.NewConditionalOrderService(conditionalOrderRepo, orderRepo, markPriceSvc, engineSvc)
 
@@ -147,6 +149,19 @@ func main() {
 	}()
 
 	engineSrv := api.NewEngineServer(matchingEngine, coinRepo)
+	engineSrv.RefreshSymbols(ctx) // 启动时先同步刷一次，不然/depth接口刚起来那段时间缓存是空的、全部请求都会被当成"合约不存在"拒绝
+	go func() {
+		ticker := time.NewTicker(time.Duration(cfg.SymbolCacheRefreshMs) * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				engineSrv.RefreshSymbols(ctx)
+			}
+		}
+	}()
 	go func() {
 		log.Printf("contract-engine http(深度查询等) listening on %s", cfg.EngineHTTPAddr)
 		if err := engineSrv.Router().Run(cfg.EngineHTTPAddr); err != nil {

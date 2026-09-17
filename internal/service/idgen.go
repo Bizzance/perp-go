@@ -48,12 +48,27 @@ func InitNodeID(nodeID uint64) {
 	idMu.Unlock()
 }
 
+// NextID 外层是个重试循环：每次尝试都只在真正计算/写状态的那一小段临界区里持有idMu，
+// 需要等待(时钟回拨追赶/序列号用尽等下一毫秒)的时候先把锁放掉再睡，不能睡在锁里面——
+// 睡在锁里面等于让这一个调用方的等待，变成整个进程全部NextID调用方(下单、成交、强平单
+// 等全链路)一起等，那就是自己把"锁"变成了"全局停摆开关"，比单纯的CPU空转更糟
 func NextID() uint64 {
-	idMu.Lock()
-	defer idMu.Unlock()
 	if !idNodeSet {
 		log.Fatalf("NextID: node id还没初始化，必须在进程启动时调用service.InitNodeID")
 	}
+	for {
+		if id, ok := tryNextID(); ok {
+			return id
+		}
+		time.Sleep(time.Millisecond)
+	}
+}
+
+// tryNextID 尝试生成一个ID，第二个返回值false表示这次没生成成功(时钟还没追上来/这一毫秒
+// 序号用尽)，调用方要在锁外面睡一下再重试——不能在这个函数内部睡，这个函数全程持锁
+func tryNextID() (uint64, bool) {
+	idMu.Lock()
+	defer idMu.Unlock()
 
 	now := time.Now().UnixMilli()
 	if now < epochMillis {
@@ -70,28 +85,29 @@ func NextID() uint64 {
 			log.Fatalf("系统时钟回拨异常(%dms)，超过阈值(%dms)，怀疑系统时钟被大幅调整，需要人工介入", backward, int64(maxClockBackwardMs))
 		}
 		// 系统时钟被小幅往回调过(比如正常范围内的NTP校时)：不能沿用旧时间戳继续生成，
-		// 可能撞上已经用过的(时间戳,序列号)组合，睡着等时钟追上来——带sleep而不是纯自旋，
-		// 不会占着下面的全局锁把一个CPU核心跑到100%
+		// 可能撞上已经用过的(时间戳,序列号)组合，放锁、告诉调用方睡一下再重试——这期间
+		// 别的goroutine调NextID完全不受影响，正常按自己读到的时钟往前走
 		log.Printf("[WARN] NextID检测到系统时钟回拨%dms，等待时钟追上", backward)
-		for now < idLast {
-			time.Sleep(time.Millisecond)
-			now = time.Now().UnixMilli()
-		}
+		return 0, false
 	}
 	if now == idLast {
-		idSeq = (idSeq + 1) & maxSequence
-		if idSeq == 0 {
-			// 这一毫秒内4096个序号用完了，等到下一毫秒——不截断/绕回，宁可短暂阻塞
-			// 也不能生成重复ID。正常情况下这个等待在1ms内就结束
-			for now <= idLast {
-				time.Sleep(time.Millisecond)
-				now = time.Now().UnixMilli()
-			}
+		// 用">="判断、不提前mutate idSeq：如果写成"idSeq=(idSeq+1)&maxSequence然后
+		// 判断是否绕回到0再return false"，绕回时idSeq已经被改成了0，下一次重试如果
+		// 时钟还没真的往前走(now还等于同一个idLast)，会从这个"寄存"的0再往上加到1——
+		// 而这一毫秒的seq=1在更早之前已经发给过别的调用方了，等于两个调用方拿到同一个
+		// (毫秒,序列号)组合，虽然改动很小但是真实的重复ID bug。改成"用满了就直接拒绝、
+		// 什么都不改"，只有等now真的进到下一毫秒(走下面else分支)才重置序列号，彻底避免
+		// 这个悬空状态
+		if idSeq >= maxSequence {
+			// 这一毫秒内4096个序号用完了，放锁等下一毫秒——不截断/绕回，宁可重试
+			// 也不能生成重复ID。正常情况下下一次重试就会成功(等了不到1ms)
+			return 0, false
 		}
+		idSeq++
 	} else {
 		idSeq = 0
 	}
 	idLast = now
 
-	return uint64(now-epochMillis)<<timeShift | idNode<<nodeShift | idSeq
+	return uint64(now-epochMillis)<<timeShift | idNode<<nodeShift | idSeq, true
 }

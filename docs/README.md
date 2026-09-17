@@ -6,6 +6,7 @@ U本位永续合约交易系统，MVP阶段。文档按主题拆分，方便单�
 - [account-and-margin.md](account-and-margin.md) —— 账户模型、全仓保证金、冻结/结算规则
 - [matching-and-settlement.md](matching-and-settlement.md) —— 撮合引擎、下单校验、成交结算
 - [order-book.md](order-book.md) —— 订单簿数据结构、自成交保护、深度查询
+- [kline.md](kline.md) —— K线聚合
 - [conditional-orders.md](conditional-orders.md) —— 条件单（止盈止损/条件开仓）
 - [risk-limit-tiers.md](risk-limit-tiers.md) —— 保证金分档（风险限额）
 - [funding-rate.md](funding-rate.md) —— 资金费率机制

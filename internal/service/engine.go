@@ -22,6 +22,7 @@ type EngineService struct {
 	settlement        *SettlementService
 	markPrice         *MarkPriceService
 	fund              *InsuranceFundService
+	kline             *KlineService
 }
 
 func NewEngineService(
@@ -34,6 +35,7 @@ func NewEngineService(
 	settlement *SettlementService,
 	markPrice *MarkPriceService,
 	fund *InsuranceFundService,
+	kline *KlineService,
 ) *EngineService {
 	return &EngineService{
 		matchingEngine:    matchingEngine,
@@ -45,6 +47,7 @@ func NewEngineService(
 		settlement:        settlement,
 		markPrice:         markPrice,
 		fund:              fund,
+		kline:             kline,
 	}
 }
 
@@ -74,43 +77,53 @@ func (e *EngineService) SubmitOrder(ctx context.Context, order *model.Order, ent
 			log.Printf("[ERROR] settle fill failed, orderId=%d: %v", order.OrderID, err)
 		}
 	}
-	// 自成交保护(STP)摘掉的maker：book.Match内部已经把它们从订单簿里摘掉了，这里只需要
-	// 按正常撤单的收尾逻辑处理DB状态+退保证金。用RestingOrder.Remaining(book.Match返回的、
-	// 摘除时刻内存里权威的剩余量)，不用再去DB反查——两者理论上一致，但直接用内存值更直接。
-	// 一笔taker可能一次撮合摘掉好几笔自己的挂单(比如大额市价单扫过自己挂的一串限价单)，
-	// 批量查一次DB(FindByOrderIDs)而不是每笔单独查一次，避免N次DB往返串行拖慢下单主流程
-	if len(selfCanceled) > 0 {
-		ids := make([]uint64, len(selfCanceled))
-		for i, c := range selfCanceled {
-			ids[i] = c.OrderID
-		}
-		orders, err := e.orders.FindByOrderIDs(ctx, ids)
-		if err != nil {
-			log.Printf("[ERROR] 自成交保护撤单批量查询委托记录失败: %v", err)
-		} else {
-			byID := make(map[uint64]model.Order, len(orders))
-			for _, o := range orders {
-				byID[o.OrderID] = o
-			}
-			for _, canceled := range selfCanceled {
-				o, found := byID[canceled.OrderID]
-				if !found {
-					log.Printf("[ERROR] 自成交保护撤单找不到委托记录, orderId=%d", canceled.OrderID)
-					continue
-				}
-				if err := e.finalizeOrderCancel(ctx, &o, canceled.Remaining); err != nil {
-					log.Printf("[ERROR] 自成交保护撤单收尾失败, orderId=%d: %v", canceled.OrderID, err)
-				}
-			}
-		}
-	}
+	e.handleSelfCanceled(ctx, selfCanceled)
 
 	// LIMIT单还有剩余量就挂回簿子；MARKET单/剩余为0就不挂——市价单吃不满剩下的量直接释放
 	// (释放动作由调用方在SubmitOrder返回后，根据委托最终状态决定要不要unfreeze剩余冻结保证金)
 	if resting.Remaining.Sign() > 0 && order.Type == model.OrderTypeLimit {
-		book.Rest(resting)
+		if !book.Rest(resting) {
+			// 这个orderId已经在簿子里了，说明这次SubmitOrder调用是重复的(比如Kafka消息
+			// 被重复投递)——不是需要中断/报错的场景，簿子状态已经是对的，记一条日志留痕即可
+			log.Printf("[WARN] orderId=%d 已经在订单簿里，跳过重复挂单", order.OrderID)
+		}
 	}
 	return nil
+}
+
+// handleSelfCanceled 处理自成交保护(STP)摘掉的maker：book.Match内部已经把它们从订单簿里
+// 摘掉了，这里只需要按正常撤单的收尾逻辑处理DB状态+退保证金。用RestingOrder.Remaining
+// (book.Match返回的、摘除时刻内存里权威的剩余量)，不用再去DB反查——两者理论上一致，但
+// 直接用内存值更直接。一笔taker可能一次撮合摘掉好几笔自己的挂单(比如大额市价单扫过自己
+// 挂的一串限价单)，批量查一次DB(FindByOrderIDs)而不是每笔单独查一次，避免N次DB往返
+// 串行拖慢下单主流程
+func (e *EngineService) handleSelfCanceled(ctx context.Context, selfCanceled []*matching.RestingOrder) {
+	if len(selfCanceled) == 0 {
+		return
+	}
+	ids := make([]uint64, len(selfCanceled))
+	for i, c := range selfCanceled {
+		ids[i] = c.OrderID
+	}
+	orders, err := e.orders.FindByOrderIDs(ctx, ids)
+	if err != nil {
+		log.Printf("[ERROR] 自成交保护撤单批量查询委托记录失败: %v", err)
+		return
+	}
+	byID := make(map[uint64]model.Order, len(orders))
+	for _, o := range orders {
+		byID[o.OrderID] = o
+	}
+	for _, canceled := range selfCanceled {
+		o, found := byID[canceled.OrderID]
+		if !found {
+			log.Printf("[ERROR] 自成交保护撤单找不到委托记录, orderId=%d", canceled.OrderID)
+			continue
+		}
+		if err := e.finalizeOrderCancel(ctx, &o, canceled.Remaining); err != nil {
+			log.Printf("[ERROR] 自成交保护撤单收尾失败, orderId=%d: %v", canceled.OrderID, err)
+		}
+	}
 }
 
 func (e *EngineService) settleOneFill(ctx context.Context, incoming *model.Order, f matching.Fill) error {
@@ -128,6 +141,7 @@ func (e *EngineService) settleOneFill(ctx context.Context, incoming *model.Order
 	}); err != nil {
 		return err
 	}
+	e.kline.RecordTrade(ctx, incoming.Symbol, f.Price, f.Volume, now)
 
 	for _, side := range []struct {
 		orderID     uint64

@@ -166,6 +166,51 @@ func TestBook_LimitPriceBoundary(t *testing.T) {
 	}
 }
 
+func TestBook_RestOutOfOrderEntryTime(t *testing.T) {
+	b := NewBook()
+	// 模拟多个goroutine抢锁顺序跟各自EntryTime顺序不一致的情况：先调用Rest的反而
+	// EntryTime更晚(比如强平扫描goroutine抢到锁比下单消费者goroutine快，但下单事件
+	// 实际更早进入引擎)。同一档内的FIFO顺序必须按EntryTime排，不能按Rest调用顺序排
+	b.Rest(newResting(1, 1, Buy, "100", "1", 300)) // 后到但先调用Rest
+	b.Rest(newResting(2, 2, Buy, "100", "1", 100)) // 最早，但后调用Rest
+	b.Rest(newResting(3, 3, Buy, "100", "1", 200)) // 居中
+
+	taker := newResting(4, 4, Sell, "0", "3", 4)
+	fills, _ := b.Match(taker)
+	if len(fills) != 3 {
+		t.Fatalf("期望3笔成交, got %d", len(fills))
+	}
+	// 按EntryTime先后应该是: id2(100) → id3(200) → id1(300)，不是Rest调用顺序(1,2,3)
+	wantOrder := []uint64{2, 3, 1}
+	for i, f := range fills {
+		if f.MakerOrder.OrderID != wantOrder[i] {
+			t.Fatalf("第%d笔成交应该是id%d(按EntryTime排序), got id%d", i+1, wantOrder[i], f.MakerOrder.OrderID)
+		}
+	}
+}
+
+func TestBook_RestRejectsDuplicateOrderID(t *testing.T) {
+	b := NewBook()
+	ok1 := b.Rest(newResting(1, 1, Buy, "100", "5", 1))
+	if !ok1 {
+		t.Fatalf("第一次挂单应该成功")
+	}
+	// 模拟Kafka消息重复投递导致SubmitOrder对同一个orderId重复调用Rest
+	ok2 := b.Rest(newResting(1, 1, Buy, "101", "5", 2))
+	if ok2 {
+		t.Fatalf("重复的orderId应该被拒绝，不能悄悄覆盖")
+	}
+	// 原来那笔应该原封不动，还能正常撤销/撮合，没有变成孤儿
+	depth := b.Depth(0)
+	if len(depth.Bids) != 1 || !depth.Bids[0].Price.Equal(d("100")) || depth.Bids[0].Count != 1 {
+		t.Fatalf("订单簿状态应该没被污染, got %+v", depth.Bids)
+	}
+	remaining, ok := b.Cancel(1)
+	if !ok || !remaining.Equal(d("5")) {
+		t.Fatalf("原来那笔应该还能正常撤销, remaining=%s ok=%v", remaining, ok)
+	}
+}
+
 func TestBook_DepthMaxLevels(t *testing.T) {
 	b := NewBook()
 	for i := 0; i < 5; i++ {

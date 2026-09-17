@@ -256,6 +256,23 @@ CREATE TABLE IF NOT EXISTS trades (
   KEY idx_trades_sell_uid (sell_uid)
 ) ENGINE=InnoDB;
 
+-- K线：每个symbol+周期+开盘时间一行，每笔成交实时更新对应的那根K线(UPSERT)，不是查询时
+-- 现算——多个周期(1m/5m/15m/1h/4h/1d)各自独立维护一份，不是从1m现场聚合大周期，见
+-- docs/kline.md
+CREATE TABLE IF NOT EXISTS klines (
+  symbol       VARCHAR(32) NOT NULL,
+  `interval`   VARCHAR(8) NOT NULL COMMENT '1m/5m/15m/1h/4h/1d',
+  open_time    BIGINT UNSIGNED NOT NULL COMMENT '这根K线的开盘时间(毫秒时间戳，按interval对齐)',
+  open         DECIMAL(18,8) NOT NULL,
+  high         DECIMAL(18,8) NOT NULL,
+  low          DECIMAL(18,8) NOT NULL,
+  close        DECIMAL(18,8) NOT NULL,
+  volume       DECIMAL(26,16) NOT NULL DEFAULT 0,
+  trade_count  INT UNSIGNED NOT NULL DEFAULT 0,
+  update_time  BIGINT UNSIGNED NOT NULL,
+  PRIMARY KEY (symbol, `interval`, open_time)
+) ENGINE=InnoDB;
+
 -- 资金变动流水(注资/手续费/已实现盈亏/强平清算)，纯审计用途，不参与任何计算
 CREATE TABLE IF NOT EXISTS member_transactions (
   id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,

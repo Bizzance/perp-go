@@ -208,6 +208,27 @@ HTTP响应`"结束本轮请求已提交"`只表示请求已受理，不代表撤
 
 历史成交，最近100条。
 
+## K线
+
+详细设计见 [kline.md](kline.md)。
+
+### `GET /kline?symbol=BTCUSDT&interval=1m&limit=200`
+
+`interval`必须是`1m`/`5m`/`15m`/`1h`/`4h`/`1d`之一，`limit`可省略默认200。返回按开盘
+时间升序（从旧到新）：
+
+```json
+{
+  "code": 200,
+  "message": "success",
+  "data": [
+    {"Symbol": "BTCUSDT", "Interval": "1m", "OpenTime": 1735689600000,
+     "Open": "64800", "High": "64850", "Low": "64790", "Close": "64820",
+     "Volume": "1.25", "TradeCount": 8, "UpdateTime": 1735689659000}
+  ]
+}
+```
+
 ## 资金费率
 
 ### `GET /funding/rate?symbol=BTCUSDT`

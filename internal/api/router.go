@@ -24,6 +24,7 @@ type Server struct {
 	orders            *repo.OrderRepo
 	conditionalOrders *repo.ConditionalOrderRepo
 	trades            *repo.TradeRepo
+	klines            *repo.KlineRepo
 	markPrice         *service.MarkPriceService
 	funding           *service.FundingService
 	producer          *mq.Producer
@@ -36,6 +37,7 @@ func NewServer(
 	orders *repo.OrderRepo,
 	conditionalOrders *repo.ConditionalOrderRepo,
 	trades *repo.TradeRepo,
+	klines *repo.KlineRepo,
 	markPrice *service.MarkPriceService,
 	funding *service.FundingService,
 	producer *mq.Producer,
@@ -47,6 +49,7 @@ func NewServer(
 		orders:            orders,
 		conditionalOrders: conditionalOrders,
 		trades:            trades,
+		klines:            klines,
 		markPrice:         markPrice,
 		funding:           funding,
 		producer:          producer,
@@ -72,6 +75,7 @@ func (s *Server) Router() *gin.Engine {
 	r.GET("/trade/history", s.tradeHistory)
 	r.GET("/funding/rate", s.fundingRate)
 	r.GET("/funding/history", s.fundingHistory)
+	r.GET("/kline", s.kline)
 	r.POST("/index-price", s.setIndexPrice)
 	return r
 }
@@ -82,6 +86,21 @@ func fail(c *gin.Context, code int, msg string) {
 
 func ok(c *gin.Context, data any) {
 	c.JSON(http.StatusOK, gin.H{"code": 200, "message": "success", "data": data})
+}
+
+// parsePositiveIntQuery 解析一个"必须是正整数、可省略"的query参数，省略时用def——
+// contract-api的kline接口(limit)、contract-engine的depth接口(levels)都要这个校验规则，
+// 两边共用同一份实现，不要各写一份、以后改校验规则漏改一边
+func parsePositiveIntQuery(c *gin.Context, name string, def int) (int, string) {
+	v := c.Query(name)
+	if v == "" {
+		return def, ""
+	}
+	n, err := strconv.Atoi(v)
+	if err != nil || n <= 0 {
+		return 0, name + "参数不合法"
+	}
+	return n, ""
 }
 
 // parseUID 只给GET接口用——这些接口的参数走query string，没有body。写接口(POST)统一用
@@ -920,6 +939,38 @@ func (s *Server) fundingRate(c *gin.Context) {
 		"estimatedRate":   s.funding.EstimateRate(c.Request.Context(), *coin),
 		"nextFundingTime": s.funding.NextFundingTime(*coin, now),
 	})
+}
+
+// validKlineIntervals 允许的K线周期，跟model.AllKlineIntervals保持一致——请求任意
+// 字符串都会被拒绝，不会被当成没有意义的周期悄悄放行
+var validKlineIntervals = map[model.KlineInterval]bool{
+	model.Kline1m: true, model.Kline5m: true, model.Kline15m: true,
+	model.Kline1h: true, model.Kline4h: true, model.Kline1d: true,
+}
+
+func (s *Server) kline(c *gin.Context) {
+	symbol := c.Query("symbol")
+	coin, err := s.coins.FindBySymbol(c.Request.Context(), symbol)
+	if err != nil || coin == nil {
+		fail(c, 400, "合约不存在")
+		return
+	}
+	interval := model.KlineInterval(c.Query("interval"))
+	if !validKlineIntervals[interval] {
+		fail(c, 400, "interval参数不合法")
+		return
+	}
+	limit, msg := parsePositiveIntQuery(c, "limit", 200)
+	if msg != "" {
+		fail(c, 400, msg)
+		return
+	}
+	rows, err := s.klines.FindRecent(c.Request.Context(), symbol, interval, limit)
+	if err != nil {
+		fail(c, 500, err.Error())
+		return
+	}
+	ok(c, rows)
 }
 
 func (s *Server) fundingHistory(c *gin.Context) {
