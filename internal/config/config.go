@@ -23,6 +23,9 @@ type Config struct {
 	FundingSampleIntervalMs   int64 // 资金费率溢价采样周期，采样越密集TWAP越准
 	ConditionalScanIntervalMs int64 // 条件单(止盈止损)触发扫描周期
 	SymbolCacheRefreshMs      int64 // /depth接口symbol合法性校验用的内存缓存刷新周期
+
+	DedupRetentionHours    int64 // Kafka消息去重记录(processed_messages)保留多久，早于这个时长的清掉
+	DedupCleanupIntervalMs int64 // 去重记录清理任务的扫描周期
 }
 
 func envOr(key, def string) string {
@@ -59,5 +62,7 @@ func Load(defaultNodeID uint64) Config {
 		FundingSampleIntervalMs:   60_000,
 		ConditionalScanIntervalMs: 2_000,
 		SymbolCacheRefreshMs:      30_000,
+		DedupRetentionHours:       168,       // 7天，跟Kafka topic的常见默认retention对齐
+		DedupCleanupIntervalMs:    3_600_000, // 1小时扫一次，清理任务本身很轻量，不需要跑得更勤
 	}
 }

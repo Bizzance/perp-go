@@ -8,6 +8,7 @@ U本位永续合约交易系统，MVP阶段。文档按主题拆分，方便单�
 - [order-book.md](order-book.md) —— 订单簿数据结构、自成交保护、深度查询
 - [kline.md](kline.md) —— K线聚合
 - [websocket.md](websocket.md) —— WebSocket实时推送
+- [message-dedup.md](message-dedup.md) —— Kafka消息级去重
 - [conditional-orders.md](conditional-orders.md) —— 条件单（止盈止损/条件开仓）
 - [risk-limit-tiers.md](risk-limit-tiers.md) —— 保证金分档（风险限额）
 - [funding-rate.md](funding-rate.md) —— 资金费率机制

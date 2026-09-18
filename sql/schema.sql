@@ -322,6 +322,19 @@ CREATE TABLE IF NOT EXISTS funding_rate_history (
   UNIQUE KEY uk_funding_rate_history_symbol_time (symbol, funding_time)
 ) ENGINE=InnoDB;
 
+-- Kafka消息级去重：给at-least-once语义下的重复投递做最后一道防线，按(topic,partition,offset)
+-- 这个Kafka消息的全局唯一坐标标记"已处理"，处理前先INSERT IGNORE占位，插入失败(0行受影响)
+-- 说明这条消息之前已经处理过，直接跳过业务逻辑。见docs/message-dedup.md。create_time上的索引
+-- 供定期清理过期记录用，不然这张表会无限增长
+CREATE TABLE IF NOT EXISTS processed_messages (
+  topic        VARCHAR(191) NOT NULL,
+  `partition`  INT NOT NULL,
+  `offset`     BIGINT NOT NULL,
+  create_time  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (topic, `partition`, `offset`),
+  KEY idx_processed_messages_create_time (create_time)
+) ENGINE=InnoDB;
+
 -- 演示用初始合约配置，方便本地对照测试
 INSERT INTO coins (symbol, base_coin_scale, price_scale, maker_fee, taker_fee, min_volume)
 VALUES

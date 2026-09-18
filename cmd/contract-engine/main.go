@@ -47,6 +47,7 @@ func main() {
 	fundingRepo := repo.NewFundingRepo(conn)
 	riskLimitRepo := repo.NewRiskLimitRepo(conn)
 	klineRepo := repo.NewKlineRepo(conn)
+	processedMsgRepo := repo.NewProcessedMessageRepo(conn)
 
 	markPriceSvc := service.NewMarkPriceService(rdb)
 	positionSvc := service.NewPositionService(positionRepo, riskLimitRepo, markPriceSvc)
@@ -67,9 +68,9 @@ func main() {
 
 	submitConsumer := mq.NewConsumer(cfg.KafkaBrokers, events.TopicOrderSubmit, "contract-engine")
 	defer submitConsumer.Close()
-	go submitConsumer.Consume(ctx, func(_, value []byte) error {
+	go submitConsumer.Consume(ctx, mq.WithDedup(ctx, processedMsgRepo, func(msg mq.Message) error {
 		var evt events.OrderSubmitEvent
-		if err := json.Unmarshal(value, &evt); err != nil {
+		if err := json.Unmarshal(msg.Value, &evt); err != nil {
 			return err
 		}
 		o, err := orderRepo.FindByOrderID(ctx, evt.OrderID)
@@ -78,13 +79,13 @@ func main() {
 			return err
 		}
 		return engineSvc.SubmitOrder(ctx, o, time.Now().UnixNano())
-	})
+	}))
 
 	cancelConsumer := mq.NewConsumer(cfg.KafkaBrokers, events.TopicOrderCancel, "contract-engine")
 	defer cancelConsumer.Close()
-	go cancelConsumer.Consume(ctx, func(_, value []byte) error {
+	go cancelConsumer.Consume(ctx, mq.WithDedup(ctx, processedMsgRepo, func(msg mq.Message) error {
 		var evt events.OrderCancelEvent
-		if err := json.Unmarshal(value, &evt); err != nil {
+		if err := json.Unmarshal(msg.Value, &evt); err != nil {
 			return err
 		}
 		o, err := orderRepo.FindByOrderID(ctx, evt.OrderID)
@@ -92,7 +93,7 @@ func main() {
 			return err
 		}
 		return engineSvc.CancelOrder(ctx, o)
-	})
+	}))
 
 	// 用独立的group id，不要跟下面的submit/cancel共用"contract-engine"——同一个group id挂
 	// 多个订阅不同topic的member，Kafka的分区分配在这种异构订阅场景下不可靠(实测过：3个
@@ -101,13 +102,31 @@ func main() {
 	// 自己独立的group id
 	roundCloseConsumer := mq.NewConsumer(cfg.KafkaBrokers, events.TopicRoundClose, "contract-engine-round-close")
 	defer roundCloseConsumer.Close()
-	go roundCloseConsumer.Consume(ctx, func(_, value []byte) error {
+	go roundCloseConsumer.Consume(ctx, mq.WithDedup(ctx, processedMsgRepo, func(msg mq.Message) error {
 		var evt events.RoundCloseEvent
-		if err := json.Unmarshal(value, &evt); err != nil {
+		if err := json.Unmarshal(msg.Value, &evt); err != nil {
 			return err
 		}
 		return engineSvc.CloseRound(ctx, evt.UID)
-	})
+	}))
+
+	go func() {
+		ticker := time.NewTicker(time.Duration(cfg.DedupCleanupIntervalMs) * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				cutoff := time.Now().Add(-time.Duration(cfg.DedupRetentionHours) * time.Hour)
+				if n, err := processedMsgRepo.DeleteOlderThan(ctx, cutoff); err != nil {
+					log.Printf("[ERROR] 清理消息去重记录失败: %v", err)
+				} else if n > 0 {
+					log.Printf("清理了%d条过期的消息去重记录(早于%s)", n, cutoff.Format(time.RFC3339))
+				}
+			}
+		}
+	}()
 
 	go func() {
 		ticker := time.NewTicker(time.Duration(cfg.RiskScanIntervalMs) * time.Millisecond)

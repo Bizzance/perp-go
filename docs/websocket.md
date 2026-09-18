@@ -54,25 +54,15 @@ GET /position/current + GET /order/current"。`positions`字段用的是
 计算逻辑，不会出现两处字段不对等的情况（早期实现WS这边直接用了裸`model.Position`，
 比REST查询"缺胳膊少腿"，已经修复）。
 
-## Kafka at-least-once重复投递的防护（`EngineService.SubmitOrder`）
+## Kafka at-least-once重复投递的防护
 
-`internal/mq`的Kafka消费者本身不做去重（MVP阶段的既定简化，见
-[known-limitations.md](known-limitations.md)），一笔下单事件理论上可能被重复投递、
-让`SubmitOrder`对同一个`order_id`跑第二遍。`SubmitOrder`入口加了两层防护：
-
-1. **委托状态检查**：`order.Status`不是`model.ActiveOrderStatuses`里的"待处理"状态
-   （已经是`filled`/`canceled`/`rejected`），直接跳过——一笔已经终结的委托不能再走
-   一遍撮合
-2. **`Book.Contains(orderId)`检查**：这个委托当前已经挂在订单簿上，直接跳过——说明
-   上一次投递已经完整处理过(撮合+挂剩余量)了，不能让它再当一次新的taker去吃对手盘，
-   那会造成不该发生的二次撮合（比如仍在排队的挂单剩余量被凭空多吃一次）
-
-这两层防护只覆盖"这次重复投递到达时，委托仍处于正常排队状态"这一种场景，**不是完整的
-Kafka幂等方案**——比如"提交事件先被处理、随后立刻被撤单处理完、提交事件的重复投递才
-姗姗来迟"这种跨事件的交叉时序依然防不住（撤单已经把状态改成`canceled`，第①层检查能
-拦住这种情况；但如果撤单和重复投递之间还有其它撮合活动改变了状态，边界情况更复杂）。
-完整解决需要给`internal/mq`加消息级别的去重（比如按Kafka的(topic,partition,offset)
-记一张"已处理"表），这次没有做，是明确、有意识留下的范围边界。
+完整的消息级去重（按Kafka的`(topic, partition, offset)`记一张"已处理"表，
+`internal/mq.WithDedup`统一包一层，下单/撤单/结束本轮三个消费者都覆盖）见
+[message-dedup.md](message-dedup.md)。`EngineService.SubmitOrder`入口另外还保留了
+两层业务层面的针对性防护（委托状态检查+`Book.Contains`检查），两套机制互补：消息级
+去重挡的是"同一条Kafka消息物理上被投递两次"，`SubmitOrder`这两层挡的是即使消息级去重
+万一没生效（比如去重表本身故障降级放行），业务逻辑自己也不会对一笔已经终结/已经在排队
+的委托重复处理。
 
 条件单（止盈止损/条件开仓）的创建/撤销发生在`contract-api`，那边目前没有接入
 `PushService`——冻结/释放保证金会影响下一次账户快照的内容，但不会主动触发一次推送，
