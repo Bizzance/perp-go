@@ -21,10 +21,12 @@ const (
 	lockMaxWait       = 500 * time.Millisecond // 超过这个等待时间说明是真的高并发冲突，直接失败比让请求一直挂着更好
 )
 
-// LockService 基于Redis SETNX实现的简单分布式锁，用于序列化"必须原子执行、又分散在
-// contract-api多个无状态实例上"的临界区——目前只用于并发下单时的保证金分档校验+冻结保证金
-// (见docs/known-limitations.md"并发下单的竞态")。不是完整意义上的Redlock(没有考虑多
-// Redis节点的场景)，跟这个项目现有的单Redis实例部署假设一致，够用，不是过度设计
+// LockService 基于Redis SETNX实现的简单分布式锁，用于序列化"必须原子执行、又分散在多个
+// 进程/实例上"的临界区，两处调用方：①contract-api并发下单时的保证金分档校验+冻结保证金
+// (见docs/risk-limit-tiers.md"并发下单的原子性"一节)；②contract-engine分片部署下结束
+// 本轮的跨分片最终结算(见docs/engine-sharding.md)，两个进程各自持有自己的LockService
+// 实例(共用同一个Redis)。不是完整意义上的Redlock(没有考虑多Redis节点的场景)，跟这个
+// 项目现有的单Redis实例部署假设一致，够用，不是过度设计
 type LockService struct {
 	cache *cache.Cache
 }

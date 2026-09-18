@@ -37,6 +37,19 @@ func main() {
 	cfg := config.Load(1) // contract-engine默认node id=1，跟contract-api(默认0)区分开
 	service.InitNodeID(cfg.NodeID)
 
+	// 分片模式下每个实例的consumer group id按NodeID拼(见下面consumerGroupID)，如果运维
+	// 开了PERP_ENGINE_SYMBOLS却忘了给每个实例分别设不同的PERP_NODE_ID，多个实例会用同一个
+	// 默认NodeID、拼出完全相同的group id，实际效果等同于回退到"同一个group id挂多个订阅
+	// 不同topic的member"——这正是known-limitations.md记录过的、已经实测复现过的Kafka
+	// 分区分配失效故障模式。这里没法校验"真的全局唯一"(单进程看不到其它实例)，但至少能
+	// 拦住"根本没设、还在用默认值"这种最容易犯的错误配置，快速失败比启动后悄悄消费不了
+	// 强得多
+	if len(cfg.EngineSymbols) > 0 && !cfg.NodeIDExplicit {
+		log.Fatalf("开启engine分片(PERP_ENGINE_SYMBOLS)时必须显式设置PERP_NODE_ID，且每个" +
+			"实例的值必须互不相同——否则多个实例会用相同的Kafka consumer group id，导致" +
+			"分区分配失效，见docs/engine-sharding.md")
+	}
+
 	conn, err := db.Connect(cfg.MySQLDSN)
 	if err != nil {
 		log.Fatalf("connect mysql: %v", err)

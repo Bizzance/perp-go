@@ -349,6 +349,19 @@ SET @sql := (SELECT IF(
 ));
 PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
+-- 上面ADD COLUMN只能给一个统一的默认值(空字符串)，不能按topic分别填不同的值——老版本
+-- (engine分片之前，见docs/engine-sharding.md)只写死过两个consumer group id：submit/
+-- cancel共用"contract-engine"，round-close单独用"contract-engine-round-close"，按topic
+-- 能精确反推出这些老记录当初真正属于哪个consumer group。不能让它们留着空字符串：迁移后
+-- 如果这个实例的consumer offset被人工回退/重放到迁移前已经处理过的旧offset，查找用的是
+-- 真实group id("contract-engine"等)而不是空字符串，会跟老记录对不上、把已经处理过的
+-- 消息误判成"从没处理过"再跑一遍。这两条UPDATE本身是幂等的(只动还是空字符串的行)，可以
+-- 安全重复执行
+UPDATE processed_messages SET consumer_group = 'contract-engine'
+  WHERE consumer_group = '' AND topic IN ('perpgo.order.submit', 'perpgo.order.cancel');
+UPDATE processed_messages SET consumer_group = 'contract-engine-round-close'
+  WHERE consumer_group = '' AND topic = 'perpgo.round.close';
+
 SET @sql := (SELECT IF(
   (SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'processed_messages' AND CONSTRAINT_NAME = 'PRIMARY' AND COLUMN_NAME = 'consumer_group') = 0,
   'ALTER TABLE processed_messages DROP PRIMARY KEY, ADD PRIMARY KEY (consumer_group, topic, `partition`, `offset`)',

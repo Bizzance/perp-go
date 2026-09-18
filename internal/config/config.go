@@ -16,6 +16,8 @@ type Config struct {
 	APIAddr        string // contract-api 监听地址
 	EngineHTTPAddr string // contract-engine自己的轻量HTTP服务监听地址(目前只有订单簿深度查询)
 	NodeID         uint64 // service.NextID用的雪花算法node id，不同进程/实例必须不同
+	NodeIDExplicit bool   // PERP_NODE_ID是不是显式设置的(不是走的defaultNodeID)——engine分片
+	// 模式下main.go要用这个做启动时校验，见parseEngineSymbols旁边的说明
 
 	// 撮合/风控相关的可调参数，先用固定默认值
 	LiquidationOrderTimeoutMs int64 // 强平单挂单排队超时兜底阈值
@@ -47,12 +49,14 @@ func envOr(key, def string) string {
 // 默认值——多个实例传同一个defaultNodeID会导致NextID理论上生成重复ID
 func Load(defaultNodeID uint64) Config {
 	nodeID := defaultNodeID
+	nodeIDExplicit := false
 	if v := os.Getenv("PERP_NODE_ID"); v != "" {
 		parsed, err := strconv.ParseUint(v, 10, 64)
 		if err != nil {
 			log.Fatalf("PERP_NODE_ID不合法: %v", err)
 		}
 		nodeID = parsed
+		nodeIDExplicit = true
 	}
 	return Config{
 		MySQLDSN:                  envOr("PERP_MYSQL_DSN", "perpgo:local123@tcp(127.0.0.1:3306)/perpgo?parseTime=true&loc=Local"),
@@ -62,6 +66,7 @@ func Load(defaultNodeID uint64) Config {
 		APIAddr:                   envOr("PERP_API_ADDR", ":7001"),
 		EngineHTTPAddr:            envOr("PERP_ENGINE_HTTP_ADDR", ":7002"),
 		NodeID:                    nodeID,
+		NodeIDExplicit:            nodeIDExplicit,
 		LiquidationOrderTimeoutMs: 10_000,
 		RiskScanIntervalMs:        2_000,
 		MarkPriceEmaAlpha:         1.0, // 标记价=最新成交价，不做平滑

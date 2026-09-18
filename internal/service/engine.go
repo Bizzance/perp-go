@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"time"
@@ -553,7 +554,7 @@ func (e *EngineService) tryFinalizeCloseRound(ctx context.Context, uid, round ui
 		return nil
 	}
 	lockKey := fmt.Sprintf("perpgo:lock:closeround:%d:%d", uid, round)
-	return e.lock.WithLock(ctx, lockKey, func() error {
+	err = e.lock.WithLock(ctx, lockKey, func() error {
 		recheck, err := e.roundCloseProgress.AllDone(ctx, uid, round)
 		if err != nil {
 			return err
@@ -561,16 +562,23 @@ func (e *EngineService) tryFinalizeCloseRound(ctx context.Context, uid, round ui
 		if !recheck {
 			return nil // 理论上不该发生(done只会0→1，不会倒退)，防御性处理
 		}
-		ok, err := e.accounts.CloseRound(ctx, uid, round)
-		if err != nil {
-			return err
+		ok, closeErr := e.accounts.CloseRound(ctx, uid, round)
+		// round只要真的被这次调用推进了(ok=true)，progress记录就必须清理，不能因为
+		// 紧跟着的closeErr(比如信用额度清零的审计流水insert失败，round本身已经改完了)
+		// 就跳过删除——不然这个(uid,round)的progress行会永远留着孤儿数据(这张表没有
+		// processed_messages那样的定期清理任务)，而且round.close这个已经真正成功的
+		// 动作还会被上层日志误判成失败
+		if ok {
+			if err := e.roundCloseProgress.Delete(ctx, uid, round); err != nil {
+				log.Printf("[WARN] 清理结束本轮进度记录失败, uid=%d, round=%d: %v", uid, round, err)
+			}
 		}
-		if err := e.roundCloseProgress.Delete(ctx, uid, round); err != nil {
-			log.Printf("[WARN] 清理结束本轮进度记录失败, uid=%d, round=%d: %v", uid, round, err)
+		if closeErr != nil {
+			return closeErr
 		}
 		if !ok {
 			// round已经被别的实例/别的调用推进过了(比如这是同一个round.close事件的
-			// Kafka重复投递，上一次已经成功结算过)，不是错误，进度记录已经清理，收尾
+			// Kafka重复投递，上一次已经成功结算过)，不是错误，收尾
 			return nil
 		}
 		// 撤单/强平过程中已经推送过中间状态的账户快照，这里再推一次最终状态(credit清零、
@@ -579,6 +587,15 @@ func (e *EngineService) tryFinalizeCloseRound(ctx context.Context, uid, round ui
 		log.Printf("结束本轮完成, uid=%d, round=%d", uid, round)
 		return nil
 	})
+	if errors.Is(err, ErrLockBusy) {
+		// 拿不到锁大概率是另一个分片实例正好也观察到"全部完成"、抢先在做同一件事——
+		// 这次尝试本身没有任何实际损失(没有任何副作用发生过)，不是需要客户端重新调用
+		// 结束本轮接口才能恢复的真失败，只记WARN，不当error往上传，避免每次这种正常的
+		// 竞争都在日志里刷一条容易让人误判的[ERROR]
+		log.Printf("[WARN] 结束本轮最终结算抢锁失败(大概率是另一个实例正在处理), uid=%d, round=%d", uid, round)
+		return nil
+	}
+	return err
 }
 
 // forceCloseOnePosition 生成一笔"已成交"的市价平仓单落库(留痕、复用SettleFill结算逻辑)，
