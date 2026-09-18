@@ -70,7 +70,7 @@
 触发时（`trigger`方法）：
 
 1. 原子标记`status: pending → triggered`（`MarkTriggered`的`WHERE status='pending'`
-   守卫），失败说明撤单请求并发赢了，跳过——**不会**出现"已撤销的条件单又被触发"
+   守卫），失败说明撤单请求并发赢了，跳过—— **不会**出现"已撤销的条件单又被触发"
 2. 把条件单的字段落地成一笔`orders`表记录，`order_id`复用条件单自己的，MARKET类型的
    `price`用触发时刻的标记价（LIMIT类型用条件单自己指定的`price`）
 3. 调用`EngineService.SubmitOrder`，走跟普通委托完全一样的撮合流程

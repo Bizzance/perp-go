@@ -102,7 +102,7 @@ HTTP响应`"结束本轮请求已提交"`只表示请求已受理，不代表撤
 }
 ```
 
-字段说明（枚举类字段全部是**小写**，大小写敏感，`"LONG"`这种大写值会被拒绝）：
+字段说明（枚举类字段全部是 **小写**，大小写敏感，`"LONG"`这种大写值会被拒绝）：
 
 | 字段           | 必填        | 说明                                                                   |
 |----------------|-------------|------------------------------------------------------------------------|
@@ -169,7 +169,7 @@ HTTP响应`"结束本轮请求已提交"`只表示请求已受理，不代表撤
 
 | 字段               | 说明                                                             |
 |--------------------|------------------------------------------------------------------|
-| `triggerPrice`     | 触发价                                                            |
+| `triggerPrice`     | 触发价                                                           |
 | `triggerDirection` | `gte`=标记价格涨到/超过触发价才触发，`lte`=跌到/低于触发价才触发 |
 
 `type=limit`时`price`是触发后要执行的委托价格（必填）；`type=market`时不需要传`price`，
@@ -239,9 +239,18 @@ HTTP响应`"结束本轮请求已提交"`只表示请求已受理，不代表撤
   "code": 200,
   "message": "success",
   "data": [
-    {"Symbol": "BTCUSDT", "Interval": "1m", "OpenTime": 1735689600000,
-     "Open": "64800", "High": "64850", "Low": "64790", "Close": "64820",
-     "Volume": "1.25", "TradeCount": 8, "UpdateTime": 1735689659000}
+    {
+      "Symbol": "BTCUSDT",
+      "Interval": "1m",
+      "OpenTime": 1735689600000,
+      "Open": "64800",
+      "High": "64850",
+      "Low": "64790",
+      "Close": "64820",
+      "Volume": "1.25",
+      "TradeCount": 8,
+      "UpdateTime": 1735689659000
+    }
   ]
 }
 ```
@@ -282,8 +291,20 @@ HTTP响应`"结束本轮请求已提交"`只表示请求已受理，不代表撤
   "code": 200,
   "message": "success",
   "data": {
-    "Bids": [{"Price": "64800", "Volume": "1.5", "Count": 3}],
-    "Asks": [{"Price": "64810", "Volume": "0.8", "Count": 1}]
+    "Bids": [
+      {
+        "Price": "64800",
+        "Volume": "1.5",
+        "Count": 3
+      }
+    ],
+    "Asks": [
+      {
+        "Price": "64810",
+        "Volume": "0.8",
+        "Count": 1
+      }
+    ]
   }
 }
 ```
@@ -297,7 +318,15 @@ HTTP响应`"结束本轮请求已提交"`只表示请求已受理，不代表撤
 升级成WebSocket连接后发JSON控制消息订阅/取消订阅：
 
 ```json
-{"op": "subscribe", "channels": ["depth:BTCUSDT", "trade:BTCUSDT", "kline:BTCUSDT:1m", "user:10001"]}
+{
+  "op": "subscribe",
+  "channels": [
+    "depth:BTCUSDT",
+    "trade:BTCUSDT",
+    "kline:BTCUSDT:1m",
+    "user:10001"
+  ]
+}
 ```
 
 推送消息统一格式：`{"channel": "depth:BTCUSDT", "data": {...}}`。

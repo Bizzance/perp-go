@@ -15,13 +15,13 @@ MySQL的`orders`表里，这笔委托的`status`依然正确地是`open`/`partia
 `orders`表本身就包含了重建订单簿需要的全部信息——`status ∈ {open, partially_filled}`
 说明这笔委托重启前还在排队，`RemainingAmount()`（`Amount - TradedAmount`）就是它当前
 挂着的剩余量。`contract-engine`启动时（`cmd/contract-engine/main.go`，在Kafka消费者
-开始处理新消息**之前**同步跑完）：
+开始处理新消息 **之前**同步跑完）：
 
 1. `OrderRepo.FindActiveLimitOrders`查全部`status ∈ {open, partially_filled}`且
    `type = 'limit'`的委托，按`create_time ASC, order_id ASC`排序——`order_id`是雪花
    算法生成、时间单调递增，在`create_time`（毫秒精度）不够细分同一毫秒内多笔委托的
    相对先后时兜底提供更细的顺序
-2. 依次直接调用`Book.Rest(...)`把每一笔按顺序插回对应symbol的订单簿，**不经过
+2. 依次直接调用`Book.Rest(...)`把每一笔按顺序插回对应symbol的订单簿， **不经过
    `Book.Match`**
 
 只查`type = 'limit'`：MARKET单不管成交与否都从不挂在订单簿上（撮合后没吃掉的剩余部分
@@ -31,8 +31,8 @@ MySQL的`orders`表里，这笔委托的`status`依然正确地是`open`/`partia
 
 ### 为什么不能走`SubmitOrder`那条"先`Match`再`Rest`"的路径
 
-`SubmitOrder`处理新进来的委托时，逻辑是"先尝试撮合、剩余部分再挂簿"——这对**新委托**
-是对的，但恢复时要重建的是**已经存在、彼此之间没有成交关系的历史挂单**：重启前这些
+`SubmitOrder`处理新进来的委托时，逻辑是"先尝试撮合、剩余部分再挂簿"——这对 **新委托**
+是对的，但恢复时要重建的是 **已经存在、彼此之间没有成交关系的历史挂单**：重启前这些
 委托各自静静挂在订单簿的不同价位上，互相之间早就确认过"暂时碰不上"（不然在重启之前
 就已经被撮合掉了）。如果恢复时重新跑一遍`Match`，会把两笔本来就没有成交关系的历史挂单
 错误地撮合出一笔真实世界从未发生过的成交——这是恢复逻辑必须绕开`Match`、直接`Rest`

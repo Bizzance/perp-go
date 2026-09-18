@@ -13,7 +13,7 @@
 - 同一个uid的买卖单不会互相撮合（自成交保护），撮合过程中撞上自己的挂单会把那笔挂单摘掉
   当撤单处理，taker继续往下吃非自己的流动性
 
-数据结构（价格档位数组二分定位+组内FIFO链表+orderID索引map，O(1)撤单）、自成交保护的
+数据结构（价格档位数组二分定位+组内FIFO链表+orderID索引map，O (1)撤单）、自成交保护的
 具体行为、深度查询接口，详见 [order-book.md](order-book.md)。
 
 ## 下单校验链（`POST /order/add`）
@@ -62,7 +62,7 @@
 
 这个保守估计只是"先冻多一点"，真实该占用多少保证金要等成交后才知道，见下面的多退少补。
 
-`orderNotionalPrice`和上面价格保护带用的是**同一个**`referencePrice`（标记价格优先，
+`orderNotionalPrice`和上面价格保护带用的是 **同一个**`referencePrice`（标记价格优先，
 缺失退回指数价格），不是分别各自判断——两处防的是同一类问题，用不一致的参考价判断口径
 会留出"有指数价但从没成交过"这个中间状态的防护缺口。
 
@@ -97,7 +97,7 @@
 1. 按加权平均开仓价算已实现盈亏，按比例释放`position_margin`/`credit_margin`
    （`ApplyCloseFill`返回`releasedMargin`/`releasedCreditMargin`）
 2. **释放的仓位保证金必须还给账户**：`releasedMargin - releasedCreditMargin`还给
-   `available`，`releasedCreditMargin`还给`credit`——这部分钱在开仓时(上面第4步)已经
+   `available`，`releasedCreditMargin`还给`credit`——这部分钱在开仓时 (上面第4步)已经
    永久从`available`/`credit`里扣掉、记进了`position_margin`/`credit_margin`，平仓时
    不还回来的话，这笔钱会凭空消失（即使是一笔盈亏为0的平仓，账户也会永久损失一笔仓位
    保证金）。这一步不能走`SettlePnl`的"先available后credit"亏损兜底顺序——那套顺序是

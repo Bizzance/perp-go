@@ -16,22 +16,22 @@
 ## 事件发布点：少数几个顶层编排函数，不是每个底层资金操作
 
 不是在`AccountRepo`/`PositionRepo`几十个底层方法里各自插入发布调用（那样blast radius
-太大、容易漏、以后每加一个新的资金操作都要记得补），而是在**顶层编排函数执行完之后**
+太大、容易漏、以后每加一个新的资金操作都要记得补），而是在 **顶层编排函数执行完之后**
 发布——这些函数本身就是"一次业务动作的完整收尾点"：
 
-| 顶层函数 | 文件 | 发布内容 |
-|---|---|---|
-| `EngineService.SubmitOrder`（收尾时统一推，见下） | engine.go | 该symbol的深度快照(订单簿确实发生变化才推) + 涉及到的每个uid各一份账户快照 |
-| `EngineService.CancelOrder`（真的从订单簿摘掉了东西才推深度） | engine.go | 深度快照 |
-| `EngineService.finalizeOrderCancel`（`CancelOrder`和自成交保护共用的收尾函数） | engine.go | 该uid的账户快照 |
-| `EngineService.CloseRound`（撤单/强平全部完成、credit清零round+1之后） | engine.go | 该uid的账户快照 |
-| `LiquidationService.queueLiquidation`（`MarkLiquidating`成功/`ClearLiquidating`回退都推） | liquidation.go | 该uid的账户快照 |
-| `LiquidationService.settleTimeoutFallback` | liquidation.go | 深度快照（摘掉剩余部分时）+ 该uid的账户快照(经`EngineService.SubmitOrder`间接推送) |
+| 顶层函数                                                                                  | 文件           | 发布内容                                                                           |
+|-------------------------------------------------------------------------------------------|----------------|------------------------------------------------------------------------------------|
+| `EngineService.SubmitOrder`（收尾时统一推，见下）                                         | engine.go      | 该symbol的深度快照(订单簿确实发生变化才推) + 涉及到的每个uid各一份账户快照         |
+| `EngineService.CancelOrder`（真的从订单簿摘掉了东西才推深度）                             | engine.go      | 深度快照                                                                           |
+| `EngineService.finalizeOrderCancel`（`CancelOrder`和自成交保护共用的收尾函数）            | engine.go      | 该uid的账户快照                                                                    |
+| `EngineService.CloseRound`（撤单/强平全部完成、credit清零round+1之后）                    | engine.go      | 该uid的账户快照                                                                    |
+| `LiquidationService.queueLiquidation`（`MarkLiquidating`成功/`ClearLiquidating`回退都推） | liquidation.go | 该uid的账户快照                                                                    |
+| `LiquidationService.settleTimeoutFallback`                                                | liquidation.go | 深度快照（摘掉剩余部分时）+ 该uid的账户快照(经`EngineService.SubmitOrder`间接推送) |
 
 `SubmitOrder`的账户快照推送在函数末尾统一做，不是每笔成交各推一次：一笔大额市价单可能
 一口气吃掉好几档、产生好几笔fill，中间几次快照都会被最后一次覆盖，白白多查DB多发Redis，
 所以用一个`touchedUIDs`集合收集这次提交涉及到的全部uid（包括maker、taker、提交者
-自己），成交结算完毕后每个uid只推一次。**提交者自己的uid也必须包含在内**，即使这笔
+自己），成交结算完毕后每个uid只推一次。 **提交者自己的uid也必须包含在内**，即使这笔
 委托一笔成交都没吃到、只是静静挂在簿子上——它的出现本身就是提交者`activeOrders`列表的
 变化，不能只在有成交时才推（早期实现有这个遗漏，一笔纯挂单不成交的委托，提交者的WS
 私有频道永远收不到通知，直到某个不相关的事件恰好触发一次快照才会看到，已经用实测验证
@@ -44,7 +44,7 @@
 `ClearLiquidating`的两个调用点后面都补了一次`PublishUserSnapshot`。
 
 账户快照（`PushService.PublishUserSnapshot(ctx, uid)`）是"重新查一遍这个uid当前的
-account/positions/active orders、整体推送"，**不是增量diff**——推送快照职责单一、
+account/positions/active orders、整体推送"， **不是增量diff**——推送快照职责单一、
 不容易算错，复用现成的`AccountService.View`/`PositionService.Views`/
 `OrderRepo.FindActiveByUID`，效果上等于"服务端主动帮你调用了一次GET /account/info +
 GET /position/current + GET /order/current"。`positions`字段用的是
@@ -73,7 +73,7 @@ GET /position/current + GET /order/current"。`positions`字段用的是
 `contract-engine`发布到Redis的channel名字统一带`perpgo:ws:`前缀（比如
 `perpgo:ws:depth:BTCUSDT`）——这个前缀是为了在共享的同一个Redis实例上跟其它系统的
 pub/sub channel做命名隔离（这个项目历史上跟一个Java版本共用过Redis，见`contract:*`
-那些遗留key）。客户端订阅时**不带这个前缀**（比如`depth:BTCUSDT`），`internal/ws.Hub`
+那些遗留key）。客户端订阅时 **不带这个前缀**（比如`depth:BTCUSDT`），`internal/ws.Hub`
 在真正调Redis SUBSCRIBE时才拼上前缀——这一层转换必须做对，两个名字弄混会导致Hub订阅了
 错误的Redis channel、看起来"连上了但永远收不到推送"，且没有任何报错（这正是开发过程中
 第一次实测就踩到的bug：Hub直接把客户端给的名字当Redis channel名用，没有加前缀，导致
@@ -81,8 +81,8 @@ contract-engine发布到`perpgo:ws:depth:BTCUSDT`、Hub却在监听`depth:BTCUSD
 已经修复并用两个并发WS客户端+`PUBSUB NUMSUB`验证过）。
 
 前缀+命名规则收在独立的`internal/pubsub`包里（`Prefix`常量+`DepthChannel`/`TradeChannel`/
-`KlineChannel`/`MarkPriceChannel`/`UserChannel`几个命名函数），发布端(`push.go`)和
-订阅端(`hub.go`)都调用这一份实现——不是两边各自维护一份前缀常量/拼接逻辑。这不是过度
+`KlineChannel`/`MarkPriceChannel`/`UserChannel`几个命名函数），发布端 (`push.go`)和
+订阅端 (`hub.go`)都调用这一份实现——不是两边各自维护一份前缀常量/拼接逻辑。这不是过度
 设计：上面那个bug的根因正是"两边各自维护一份、其中一边漏了前缀"，把命名规则收进唯一的
 一份实现之后，这类不一致在结构上不再可能发生（除非两边都改错成同一个错误的样子，概率
 上跟"两处独立实现刚好各自都错"完全不是一回事）。
@@ -104,14 +104,32 @@ GET /ws  (contract-api，默认端口:7001)
 连上之后发JSON控制消息订阅/取消订阅：
 
 ```json
-{"op": "subscribe", "channels": ["depth:BTCUSDT", "trade:BTCUSDT", "kline:BTCUSDT:1m", "user:10001"]}
-{"op": "unsubscribe", "channels": ["depth:BTCUSDT"]}
+{
+  "op": "subscribe",
+  "channels": [
+    "depth:BTCUSDT",
+    "trade:BTCUSDT",
+    "kline:BTCUSDT:1m",
+    "user:10001"
+  ]
+}
+{
+  "op": "unsubscribe",
+  "channels": [
+    "depth:BTCUSDT"
+  ]
+}
 ```
 
 推送给客户端的消息统一包一层：
 
 ```json
-{"channel": "depth:BTCUSDT", "data": {...}}
+{
+  "channel": "depth:BTCUSDT",
+  "data": {
+    ...
+  }
+}
 ```
 
 私有频道`user:{uid}`延续现有REST接口"明文uid占位鉴权"的既定约定（`docs/api.md`已经
@@ -137,8 +155,8 @@ Hub内部只有一个`run()` goroutine串行处理全部订阅/退订/客户端�
 
 ## 连接管理（`internal/ws/client.go`）
 
-标准`gorilla/websocket`读写两个goroutine模式：读goroutine(`readPump`)处理客户端发来的
-订阅/取消订阅控制消息、检测断连；写goroutine(`writePump`)把Hub转发过来的消息写给客户端，
+标准`gorilla/websocket`读写两个goroutine模式：读goroutine (`readPump`)处理客户端发来的
+订阅/取消订阅控制消息、检测断连；写goroutine (`writePump`)把Hub转发过来的消息写给客户端，
 带定时ping心跳（`pingPeriod`=54秒，小于`pongWait`=60秒，保证在对方判定超时之前把下一个
 ping发出去）。单个连接的发送队列（`sendBufferSize`=256）满了就丢弃新消息，不阻塞
 Hub的广播循环——一个处理不过来的慢客户端不能拖慢所有人，深度/成交这类高频公开频道丢一条

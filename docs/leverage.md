@@ -27,7 +27,7 @@
 
 ## 保证金调整：不能走`FreezeMargin`/`UnfreezeMargin`的frozen_margin路径
 
-这是这个功能里最容易写错的地方。全仓模式下，**已经开仓的仓位的保证金不记在`accounts.
+这是这个功能里最容易写错的地方。全仓模式下， **已经开仓的仓位的保证金不记在`accounts.
 frozen_margin`/`frozen_credit`这两列里**——这两列只对应"还在排队等成交的挂单"，一笔委托
 成交之后，`EngineService.settleOneFill`（`internal/service/settlement.go`）就会用
 `DecreaseFrozenMargin`把对应金额从这两列转出，同时用`SettleToAvailable`/`SettleToCredit`
@@ -37,7 +37,7 @@ PositionMargin`/`CreditMargin`只是记账用的名义值，用来在平仓时�
 [account-and-margin.md](account-and-margin.md)"资金流转的几个关键操作"）。
 
 第一版实现直接照抄了开仓下单校验那段代码，杠杆调低时调`FreezeMargin`、杠杆调高时调
-`UnfreezeMargin`——**实测直接暴露问题**：对一个刚成交、`frozen_margin`已经是0的账户
+`UnfreezeMargin`—— **实测直接暴露问题**：对一个刚成交、`frozen_margin`已经是0的账户
 调高杠杆（应该释放保证金），`UnfreezeMargin`去扣一个本来就是0的`frozen_margin`，
 返回"冻结保证金不足"这个完全文不对题的假错误，操作直接失败。
 

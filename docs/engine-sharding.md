@@ -5,7 +5,7 @@
 `contract-engine`的核心状态——内存订单簿（`matching.Engine`里每个symbol一个`Book`）——是
 进程私有的，多个进程之间没有共享。直接多起几个`contract-engine`进程、让Kafka按分区把
 下单/撤单事件随便分给其中一个处理，会导致同一个symbol的订单簿在多个进程里各自维护一份
-互不知道的副本，正确性彻底失控。要让多个实例安全地分摊撮合负载，必须保证**同一个symbol
+互不知道的副本，正确性彻底失控。要让多个实例安全地分摊撮合负载，必须保证 **同一个symbol
 在任意时刻只有一个实例在真正维护它的订单簿**——这是本文档描述的分片方案要解决的核心问题。
 
 ## 方案：静态配置分片，不依赖Kafka原生分区负载均衡
@@ -24,11 +24,11 @@ topic的member，broker端分区分配"看起来"完成了，但member实际收�
 
 ## fan-out消费 + 应用层过滤，不是Kafka分区路由
 
-每个实例对`order.submit`/`order.cancel`/`round.close`这三个topic都用**自己独立的
+每个实例对`order.submit`/`order.cancel`/`round.close`这三个topic都用 **自己独立的
 consumer group id**（`cmd/contract-engine/main.go`的`consumerGroupID`函数，未分片时
 沿用原有的固定group id、不产生任何行为变化；分片开启后按`PERP_NODE_ID`拼出`"contract-
 engine-{NodeID}"`这样的独立group id）。Kafka里不同consumer group之间是完全独立的——
-每个group都会拿到topic的**完整**消息流(fan-out)，不是Kafka原生的"同一个group内多个
+每个group都会拿到topic的 **完整**消息流 (fan-out)，不是Kafka原生的"同一个group内多个
 consumer分摊不同分区"那种负载均衡。
 
 每个实例收到消息后，在真正执行撮合/撤单之前，先用`EngineService.OwnsSymbol(symbol)`
@@ -51,11 +51,11 @@ consumer分摊不同分区"那种负载均衡。
 
 ### 1. 下单/撤单（`SubmitOrder`/`CancelOrder`）——纯粹的symbol级过滤
 
-这两个函数入口就是`OwnsSymbol`检查，不归自己管直接`return nil`。**这个检查必须在碰
+这两个函数入口就是`OwnsSymbol`检查，不归自己管直接`return nil`。 **这个检查必须在碰
 `e.matchingEngine.BookFor(symbol)`之前**——`CancelOrder`原有的实现对"订单簿里找不到
 这个orderId"是容忍的（`book.Cancel`返回`ok=false`时退回`o.RemainingAmount()`继续走
 `finalizeOrderCancel`，这是为了容忍"已经被自成交保护摘掉"这种正常场景），如果没有
-`OwnsSymbol`过滤，一个不拥有这个symbol的实例会把它**从来没有真实挂过**的订单，误判成
+`OwnsSymbol`过滤，一个不拥有这个symbol的实例会把它 **从来没有真实挂过**的订单，误判成
 "已经不在簿子上了"，直接标记CANCELED、退保证金——而真正拥有这个symbol的实例里这笔委托
 可能还在真实排队，两边状态就对不上了。这是分片设计里最容易踩的坑，加`OwnsSymbol`检查
 就是专门堵这个。
@@ -67,24 +67,24 @@ consumer分摊不同分区"那种负载均衡。
 
 ### 2. 强平（`RiskScanOnce`）、条件单触发（`ScanOnce`）——决策全局，动作按symbol过滤
 
-这套系统是全仓保证金，一个uid该不该被强平，天然要看他名下**全部symbol**的仓位合计
+这套系统是全仓保证金，一个uid该不该被强平，天然要看他名下 **全部symbol**的仓位合计
 （`checkAndLiquidate`里的`equity`/`maintainTotal`），没法只让某一个分片去算。所以这
-两个后台扫描**不做实例级别的开关**，每个实例都独立跑一遍完整扫描（读全部uid的全部
+两个后台扫描 **不做实例级别的开关**，每个实例都独立跑一遍完整扫描（读全部uid的全部
 仓位/条件单）——这部分是纯DB读，多个实例各自重复扫一遍只是浪费一点DB查询，不是正确性
 问题。
 
-真正需要按symbol过滤的是**动作**：`checkAndLiquidate`决定"这个仓位需要强平"之后，只有
+真正需要按symbol过滤的是 **动作**：`checkAndLiquidate`决定"这个仓位需要强平"之后，只有
 `OwnsSymbol(p.Symbol)`为true才会调用`queueLiquidation`挂出真正的强平单；`ScanOnce`
 判断"这个条件单该触发了"之后，只有`OwnsSymbol(co.Symbol)`为true才会调用`trigger`。
 这两处的原子状态转换（`MarkLiquidating`/`MarkTriggered`）都是"一次性"的——如果不做这层
 过滤，一个不拥有该symbol的实例会抢先把这个一次性的状态转换用掉，但它自己的`SubmitOrder`
 调用会被`OwnsSymbol`挡住、什么都不做，而真正拥有这个symbol的实例的扫描会因为状态已经
-不是"待触发"而跳过，导致这笔强平/触发**永久卡死、没有任何实例会再处理它**——这是分片
+不是"待触发"而跳过，导致这笔强平/触发 **永久卡死、没有任何实例会再处理它**——这是分片
 设计里第二容易踩的坑，比"CancelOrder误判"更隐蔽，因为不会立刻报错，只会在DB里留下一笔
 永远停在中间状态的记录。
 
-资金费率结算（`FundingService.SampleOnce`/`SettleIfDue`）**完全不需要任何分片相关的
-改动**——它的"结算记录先落一条UNIQUE KEY(symbol,funding_time)占坑再转账"这个既有设计
+资金费率结算（`FundingService.SampleOnce`/`SettleIfDue`） **完全不需要任何分片相关的
+改动**——它的"结算记录先落一条UNIQUE KEY (symbol,funding_time)占坑再转账"这个既有设计
 （见[funding-rate.md](funding-rate.md)）天然对"多个实例冗余调用"是安全的：谁先插入
 成功谁负责这笔结算，另一个会撞唯一约束失败、直接跳过，不会重复转账。采样
 （`AccumulateFundingSample`）多个实例各自独立采样也不会系统性偏离TWAP，因为最终取的
@@ -93,20 +93,20 @@ consumer分摊不同分区"那种负载均衡。
 
 ### 3. 结束本轮（`CloseRound`）——需要跨分片协调，唯一真正复杂的部分
 
-结束本轮要撤销一个uid**名下全部symbol**的挂单/条件单、强平全部仓位，最后才能清零
+结束本轮要撤销一个uid **名下全部symbol**的挂单/条件单、强平全部仓位，最后才能清零
 credit、推进round——"全部完成才清算"这个收尾动作的原子性，天然跨越了分片边界，前面两类
-操作都不需要的**跨进程协调机制**，只有这里需要。
+操作都不需要的 **跨进程协调机制**，只有这里需要。
 
 **流程**（`EngineService.CloseRound`，round.close事件fan-out给每个实例）：
 
-1. 每个实例收到事件后，先查这个uid当前(activeOrders + 活跃条件单 + 持仓)涉及到的全部
+1. 每个实例收到事件后，先查这个uid当前 (activeOrders + 活跃条件单 + 持仓)涉及到的全部
    symbol并集，往`round_close_progress`表（`uid, round, symbol, done`）用`INSERT
    IGNORE`给每个symbol占一行坑（`done=0`）——多个实例同时做这一步是安全的，只有第一个
    真正插入成功，其它都是无害的no-op。
 2. 每个实例只处理自己`OwnsSymbol`的那些symbol：撤那个symbol上的挂单+条件单、强平那个
    symbol上的仓位，全部成功才把对应的progress行`MarkDone`。
 3. 每次处理完（不管这次自己实际有没有事情要做），检查这个`(uid, round)`下全部symbol
-   是不是都`done`了。**还没全部完成不是错误**——大概率是负责其它symbol的实例还没轮到
+   是不是都`done`了。 **还没全部完成不是错误**——大概率是负责其它symbol的实例还没轮到
    处理这个事件（fan-out消费不保证同时到达），直接返回nil，不打ERROR日志，等其它实例
    做完自己那部分后会各自再检查一次。
 4. 全部完成后，用`LockService`（Redis `SETNX`，见
@@ -132,18 +132,18 @@ Kafka跑过完整验证：
 - 分别在两个symbol下单，`/depth`在各自负责的实例上能查到真实深度，在不负责的实例上被
   明确拒绝（`"这个实例不负责该symbol的撮合，请求路由到正确的分片"`），不是返回一个
   误导性的空深度。
-- 消息去重表(`processed_messages`)确认两个实例各自用自己的consumer group id
-  (`contract-engine-201`/`contract-engine-202`)独立记录了同一个offset的处理状态，
+- 消息去重表 (`processed_messages`)确认两个实例各自用自己的consumer group id (`contract-engine-201`/
+  `contract-engine-202`)独立记录了同一个offset的处理状态，
   fan-out设计按预期工作。
 - 同一个uid在两个symbol上各挂一笔单后调用结束本轮：两个实例分别撤掉了各自负责的那笔
   委托，`round_close_progress`表在最终结算完成后被正确清空，`account.round`只推进了
-  一次（不是两次），日志里"结束本轮完成"只在**一个**实例上出现（另一个实例的
+  一次（不是两次），日志里"结束本轮完成"只在 **一个**实例上出现（另一个实例的
   `tryFinalizeCloseRound`要么没抢到锁、要么重新检查时发现round已经被推进过，安静地
   no-op）。
 - 顺带因为这次改动引入了全新的consumer group id，两个新实例第一次启动时把
   `round.close`这个topic从头重新消费了一遍（Kafka对全新group id默认从最早的offset开始）
   ——这次意外的完整重放验证了一个重要的性质：`AccountService.CloseRound`的round原子
-  条件在**几十条历史事件被两个实例重复重放**的情况下，依然把每个uid的round正确地
+  条件在 **几十条历史事件被两个实例重复重放**的情况下，依然把每个uid的round正确地
   一次一次推进，没有任何一次重复推进或者卡死，没有报错。
 - 单实例默认模式（不设`PERP_ENGINE_SYMBOLS`）下完整走了一遍下单→查深度→结束本轮，
   行为跟这次改动之前完全一致，确认了向后兼容。
