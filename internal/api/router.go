@@ -80,6 +80,7 @@ func (s *Server) Router() *gin.Engine {
 	r.GET("/order/conditional/current", s.conditionalOrderCurrent)
 	r.GET("/order/conditional/history", s.conditionalOrderHistory)
 	r.GET("/position/current", s.positionCurrent)
+	r.POST("/position/leverage", s.setLeverage)
 	r.GET("/trade/history", s.tradeHistory)
 	r.GET("/funding/rate", s.fundingRate)
 	r.GET("/funding/history", s.fundingHistory)
@@ -925,6 +926,137 @@ func (s *Server) positionCurrent(c *gin.Context) {
 		return
 	}
 	ok(c, views)
+}
+
+type setLeverageRequest struct {
+	UID      uint64           `json:"uid" binding:"required"`
+	Symbol   string           `json:"symbol" binding:"required"`
+	Side     model.Side       `json:"side" binding:"required"`
+	Leverage *decimal.Decimal `json:"leverage"`
+}
+
+// setLeverage 修改一个已有仓位的杠杆——只对已经有仓位的uid+symbol+side生效，这个系统里
+// 杠杆本来就是下单时的参数，没有"没有仓位时预先声明杠杆"这种场景，见docs/leverage.md。
+// 按新杠杆重新算这个仓位应该占用多少保证金，多退少补：杠杆调低(需要的保证金变多)从
+// available/credit补冻结差额，钱不够直接拒绝；杠杆调高(需要的保证金变少)按仓位现有的
+// available/credit来源比例释放差额，不能笼统退回available——那样等于让credit经过
+// "冻结再降杠杆"这个渠道被洗成可提现的available，跟开仓保证金拆分的既有规则(见
+// account-and-margin.md)是同一个道理
+func (s *Server) setLeverage(c *gin.Context) {
+	var req setLeverageRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if req.Side != model.SideLong && req.Side != model.SideShort {
+		fail(c, 400, "side参数不合法")
+		return
+	}
+	if req.Leverage == nil {
+		fail(c, 400, "leverage参数必填")
+		return
+	}
+	leverage := *req.Leverage
+	const maxSaneLeverage = 1000
+	if leverage.Sign() <= 0 || leverage.GreaterThan(decimal.NewFromInt(maxSaneLeverage)) || !leverage.IsInteger() {
+		fail(c, 400, "leverage参数不合法")
+		return
+	}
+
+	uid, symbol, side := req.UID, req.Symbol, req.Side
+	ctx := c.Request.Context()
+
+	// 跟addOrder开仓路径共用同一把按uid+symbol+side的锁(service.OrderLockKey)——修改杠杆
+	// 和并发下单一样，都要读现有状态(这里是仓位名义价值)再决定后续动作，必须序列化，理由
+	// 见risk-limit-tiers.md"并发下单的原子性"一节，这里是同一个临界区问题在另一个入口
+	// 上的复现
+	lockErr := s.lock.WithLock(ctx, service.OrderLockKey(uid, symbol, side), func() error {
+		p, err := s.positions.Find(ctx, uid, symbol, side)
+		if err != nil {
+			return err
+		}
+		if p == nil || p.Volume.Sign() <= 0 {
+			return &httpError{400, "没有找到这个方向的持仓，不能修改杠杆"}
+		}
+		mark, hasMark := s.markPrice.Get(ctx, symbol)
+		if !hasMark {
+			return &httpError{400, "该合约暂无标记价格，无法校验杠杆"}
+		}
+		notional := p.Volume.Mul(mark)
+		tier, err := s.positions.TierFor(ctx, symbol, notional)
+		if err != nil {
+			return err
+		}
+		if tier == nil {
+			return &httpError{400, "该合约未配置保证金分档"}
+		}
+		if leverage.GreaterThan(decimal.NewFromInt(int64(tier.MaxLeverage))) {
+			return &httpError{400, "杠杆倍数超出当前仓位名义价值对应档位允许的范围"}
+		}
+
+		newMargin := notional.Div(leverage)
+		delta := newMargin.Sub(p.PositionMargin)
+		newCreditMargin := p.CreditMargin
+		switch delta.Sign() {
+		case 1:
+			// 杠杆调低，需要的保证金变多。全仓下已有仓位的position_margin不是记在
+			// frozen_margin/frozen_credit那两个"挂单专用"列里的(那两列只对应还在排队等
+			// 成交的委托，开仓成交后就已经被DecreaseFrozenMargin转出、永久体现在
+			// available/credit的余额降低里了，见account-and-margin.md)，所以不能直接
+			// UnfreezeMargin(那样会去扣一个其实是0的frozen_margin，得到"冻结保证金不足"
+			// 的假错误)。这里复用FreezeMargin的四级路径(available→credit→浮盈买力→拒绝)
+			// 判断这笔差额该从哪里出，冻结完立刻用DecreaseFrozenMargin把它从
+			// frozen_margin/frozen_credit转出——净效果是available/credit被永久扣掉delta，
+			// frozen_margin/frozen_credit不变，跟SubmitOrder"先冻结、成交时转移到仓位
+			// 记账"是同一套两步动作，只是这里没有异步撮合环节、在一次请求里连续做完
+			result, err := s.accounts.FreezeMargin(ctx, uid, delta)
+			if err != nil {
+				return err
+			}
+			if err := s.accounts.DecreaseFrozenMargin(ctx, uid, result.FromAvailable, result.FromCredit); err != nil {
+				return err
+			}
+			newCreditMargin = p.CreditMargin.Add(result.FromCredit)
+		case -1:
+			// 杠杆调高，需要的保证金变少——按仓位现有的available/credit来源比例，把差额
+			// 直接退回available/credit，不经过frozen_margin/frozen_credit(这部分保证金
+			// 本来就不记在那两列里)，是ApplyCloseFill释放持仓保证金时同样的直接退回模式
+			release := delta.Neg()
+			var releaseCredit decimal.Decimal
+			if p.PositionMargin.Sign() > 0 {
+				releaseCredit = p.CreditMargin.Mul(release).Div(p.PositionMargin)
+			}
+			releaseAvailable := release.Sub(releaseCredit)
+			if err := s.accounts.SettleToAvailable(ctx, uid, releaseAvailable); err != nil {
+				return err
+			}
+			if !releaseCredit.IsZero() {
+				if err := s.accounts.SettleToCredit(ctx, uid, releaseCredit); err != nil {
+					return err
+				}
+			}
+			newCreditMargin = p.CreditMargin.Sub(releaseCredit)
+		}
+
+		ok, err := s.positions.UpdateLeverage(ctx, p.ID, newMargin, newCreditMargin, uint32(leverage.IntPart()), p.Volume, service.NowMillis())
+		if err != nil {
+			return err
+		}
+		if !ok {
+			// 理论上不该发生(外层已经用同一把锁序列化了同一个uid+symbol+side的并发请求)，
+			// 防御性处理：仓位在读取之后到写入之前发生了变化
+			return &httpError{500, "仓位状态发生变化，请重试"}
+		}
+		return nil
+	})
+	if lockErr != nil {
+		respondLockErr(c, lockErr)
+		return
+	}
+	// 这个接口完全在contract-api内部同步完成，不经过Kafka/contract-engine，跟
+	// adjustBalance/grantCredit这些contract-api自己的资金类接口一样没有WS推送——
+	// WS私有频道的推送只从contract-engine那边发出(见docs/websocket.md)，客户端这里
+	// 拿到的HTTP响应本身就是最新状态，不需要额外通知
+	ok(c, "杠杆修改成功")
 }
 
 func (s *Server) tradeHistory(c *gin.Context) {

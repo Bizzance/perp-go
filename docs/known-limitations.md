@@ -8,8 +8,10 @@
 - **自动减仓（ADL）**：保险基金不够覆盖穿仓时的自动减仓机制没做，见
   [liquidation.md](liquidation.md)。
 - **大仓位分批强平**：见 [liquidation.md](liquidation.md)。
-- **按合约设置杠杆的独立接口**：杠杆是每次下单时传的参数，没有"先设置这个合约的杠杆倍数，
-  再下单"这种独立接口，也没有"已有仓位时改杠杆"的校验规则。
+- **"没有仓位时预先声明杠杆"的接口**：杠杆是每次下单时传的参数，没有"先设置这个合约的
+  杠杆倍数、以后下单沿用它"这种独立接口——修改已有仓位杠杆的接口已经做了（`POST
+  /position/leverage`，见 [leverage.md](leverage.md)），这里明确没做的只是"没有仓位时
+  预先声明"这一种场景，理由见该文档"范围"一节。
 
 ## 需要留意的边缘情况
 
@@ -135,3 +137,16 @@
   委托状态正确变成`canceled`、未成交部分的保证金正确退回`available`、部分成交的那部分
   正常结算进仓位。条件单触发后提交的MARKET委托复用同一条路径，同样修复，见
   [conditional-orders.md](conditional-orders.md)。
+- **已有仓位的保证金调整误用了`frozen_margin`/`frozen_credit`路径**：实现"独立杠杆
+  设置接口"（`POST /position/leverage`，见 [leverage.md](leverage.md)）第一版时，直接
+  照抄开仓下单那段代码——杠杆调低调`FreezeMargin`、调高调`UnfreezeMargin`。实测立刻
+  暴露问题：已经开仓的仓位，保证金根本不记在`accounts.frozen_margin`/`frozen_credit`
+  这两列里（那两列只对应还在排队等成交的挂单，成交后就已经被`DecreaseFrozenMargin`
+  转出、永久体现为`available`/`credit`余额的降低了），调高杠杆想释放保证金时去调
+  `UnfreezeMargin`，会因为`frozen_margin`本来就是0而返回一个文不对题的"冻结保证金
+  不足"。现在分别复用`ApplyCloseFill`释放持仓保证金（直接改`available`/`credit`，
+  不碰`frozen_margin`）和"`FreezeMargin`+立刻`DecreaseFrozenMargin`"（借用完整的四级
+  判断路径、但让净效果只体现在`available`/`credit`上、不residual在`frozen_margin`里）
+  这两条既有链路各自的正确做法，用真实仓位（含`available`+`credit`混合来源的场景）
+  实测验证过。这个模式值得记住：**这个系统里已经落地的仓位保证金，跟还在排队的挂单
+  冻结保证金，是两套完全不同的记账路径，不能混用同一套函数**。

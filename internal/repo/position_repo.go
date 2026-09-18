@@ -125,6 +125,19 @@ func (r *PositionRepo) ApplyCloseFill(
 	return realizedPnl, releasedMargin, releasedCreditMargin, closeVolume, err
 }
 
+// UpdateLeverage 修改仓位杠杆：newMargin/newCreditMargin是按新杠杆重新算好的、这个仓位
+// 应该占用的保证金(及其来自credit的部分)，覆盖写回——调用方已经按新旧保证金的差额完成了
+// FreezeMargin/UnfreezeMargin，这里只负责把仓位自己的记账字段同步成新值。expectedVolume
+// 是调用方读取仓位时看到的volume，WHERE volume=?是乐观并发保护：调用方(router.go的
+// setLeverage)本身已经用LockService按uid+symbol+side加锁序列化了，理论上不会触发，这里
+// 是防御性的第二层
+func (r *PositionRepo) UpdateLeverage(ctx context.Context, id uint64, newMargin, newCreditMargin decimal.Decimal, newLeverage uint32, expectedVolume decimal.Decimal, updateTime int64) (bool, error) {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE positions SET position_margin = ?, credit_margin = ?, leverage = ?, update_time = ? WHERE id = ? AND volume = ?`,
+		newMargin, newCreditMargin, newLeverage, updateTime, id, expectedVolume)
+	return affected(res, err)
+}
+
 // 强平挂盘口排队成交：把仓位原子标记LIQUIDATING，成功才可以往下挂强平单，
 // 失败说明上一轮已经挂出去了、还没成交完，本轮扫描跳过这个仓位
 func (r *PositionRepo) MarkLiquidating(ctx context.Context, id uint64) (bool, error) {

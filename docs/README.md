@@ -13,6 +13,7 @@ U本位永续合约交易系统，MVP阶段。文档按主题拆分，方便单�
 - [message-dedup.md](message-dedup.md) —— Kafka消息级去重
 - [conditional-orders.md](conditional-orders.md) —— 条件单（止盈止损/条件开仓）
 - [risk-limit-tiers.md](risk-limit-tiers.md) —— 保证金分档（风险限额）
+- [leverage.md](leverage.md) —— 独立杠杆设置接口
 - [funding-rate.md](funding-rate.md) —— 资金费率机制
 - [liquidation.md](liquidation.md) —— 强平与保险基金
 - [api.md](api.md) —— HTTP接口说明

@@ -108,6 +108,12 @@ func (s *PositionService) Find(ctx context.Context, uid uint64, symbol string, s
 	return s.positions.Find(ctx, uid, symbol, side)
 }
 
+// UpdateLeverage 见repo.PositionRepo.UpdateLeverage——独立杠杆设置接口(docs/leverage.md)
+// 修改完保证金冻结之后，用这个把仓位自己的记账字段(保证金/杠杆)同步成新值
+func (s *PositionService) UpdateLeverage(ctx context.Context, id uint64, newMargin, newCreditMargin decimal.Decimal, newLeverage uint32, expectedVolume decimal.Decimal, updateTime int64) (bool, error) {
+	return s.positions.UpdateLeverage(ctx, id, newMargin, newCreditMargin, newLeverage, expectedVolume, updateTime)
+}
+
 // 这个uid名下全部持仓当前未实现盈亏之和——freezeMargin的浮盈买力判断、
 // 账户权益展示、强平风控扫描三处共用同一份计算。任何一个持仓缺标记价格就把它的浮盈当0(不计入)，
 // 这是保守方向：算少了买力/权益顶多让强平判断更容易触发、开仓更容易被拒绝，不会让账户透支或
