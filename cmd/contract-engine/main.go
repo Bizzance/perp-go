@@ -55,9 +55,10 @@ func main() {
 	fundSvc := service.NewInsuranceFundService(fundRepo)
 	fundingSvc := service.NewFundingService(rdb, coinRepo, positionRepo, fundingRepo, accountSvc, txRepo, markPriceSvc)
 	klineSvc := service.NewKlineService(klineRepo)
+	pushSvc := service.NewPushService(rdb, accountSvc, positionSvc, orderRepo)
 
 	matchingEngine := matching.NewEngine()
-	engineSvc := service.NewEngineService(matchingEngine, orderRepo, conditionalOrderRepo, tradeRepo, accountSvc, positionSvc, settlementSvc, markPriceSvc, fundSvc, klineSvc)
+	engineSvc := service.NewEngineService(matchingEngine, orderRepo, conditionalOrderRepo, tradeRepo, accountSvc, positionSvc, settlementSvc, markPriceSvc, fundSvc, klineSvc, pushSvc)
 	liquidationSvc := service.NewLiquidationService(engineSvc, orderRepo, positionRepo, positionSvc, markPriceSvc, accountSvc, fundSvc, cfg.LiquidationOrderTimeoutMs)
 	conditionalOrderSvc := service.NewConditionalOrderService(conditionalOrderRepo, orderRepo, markPriceSvc, engineSvc)
 

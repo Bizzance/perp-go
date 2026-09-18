@@ -108,14 +108,23 @@ func (s *LiquidationService) queueLiquidation(ctx context.Context, p model.Posit
 	if err != nil || !ok {
 		return // 上一轮已经在强平中，跳过
 	}
+	// 仓位状态变成liquidating这件事本身就该立刻让客户端知道(这是用户能看到的风险提示)，
+	// 不能只等到强平单真的成交才推送——挂出去的保护价单可能要等一段时间才被吃到
+	s.engine.PublishUserSnapshot(ctx, p.UID)
 	mark, hasMark := s.markPrice.Get(ctx, p.Symbol)
 	if !hasMark {
 		s.positions.ClearLiquidating(ctx, p.ID)
+		// 上面已经推过一次"liquidating"快照，这里状态被撤销回normal了，必须补一次快照，
+		// 不然客户端会一直卡在"liquidating"这个已经不成立的状态上——这两次推送之间的
+		// 短暂窗口期，客户端看到的risk状态跟服务端不一致是可以接受的(风控扫描本来就是
+		// 定期轮询，不是绝对实时)，但状态回退之后不推送、永远不同步是不能接受的
+		s.engine.PublishUserSnapshot(ctx, p.UID)
 		return
 	}
 	tier, err := s.positionSvc.TierFor(ctx, p.Symbol, p.Volume.Mul(mark))
 	if err != nil || tier == nil {
 		s.positions.ClearLiquidating(ctx, p.ID)
+		s.engine.PublishUserSnapshot(ctx, p.UID)
 		return
 	}
 	buffer := mark.Mul(tier.MaintenanceMarginRate).Mul(decimal.NewFromInt(protectPriceBufferMultiplier))
@@ -147,6 +156,7 @@ func (s *LiquidationService) queueLiquidation(ctx context.Context, p model.Posit
 	if err := s.orders.Insert(ctx, o); err != nil {
 		log.Printf("[ERROR] insert liquidation order failed: %v", err)
 		s.positions.ClearLiquidating(ctx, p.ID)
+		s.engine.PublishUserSnapshot(ctx, p.UID)
 		return
 	}
 	if err := s.engine.SubmitOrder(ctx, o, time.Now().UnixNano()); err != nil {
@@ -166,7 +176,9 @@ func (s *LiquidationService) settleTimeoutFallback(ctx context.Context, orderID 
 		return // 已经成交完/取消了，没什么可兜底的
 	}
 	book := s.engine.matchingEngine.BookFor(o.Symbol)
-	book.Cancel(o.OrderID) // 摘掉簿子上剩余的部分，避免超时兜底之后又意外撮合成交
+	if _, ok := book.Cancel(o.OrderID); ok { // 摘掉簿子上剩余的部分，避免超时兜底之后又意外撮合成交
+		s.engine.PublishDepth(ctx, o.Symbol)
+	}
 
 	p, err := s.positions.Find(ctx, o.UID, o.Symbol, o.Side)
 	if err != nil || p == nil || p.Volume.Sign() <= 0 {
@@ -193,4 +205,7 @@ func (s *LiquidationService) settleTimeoutFallback(ctx context.Context, orderID 
 	if err := s.engine.HandleLiquidationSettleAftermath(ctx, o.Symbol, o.UID); err != nil {
 		log.Printf("[ERROR] liquidation aftermath (fallback) failed: %v", err)
 	}
+	// 这条路径直接调settlement.SettleFill，不经过settleOneFill，所以snapshot推送要在这里
+	// 单独补一次——跟settleOneFill里"结算完毕后推送"是同一个时机，只是走的是不同代码路径
+	s.engine.PublishUserSnapshot(ctx, o.UID)
 }

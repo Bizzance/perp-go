@@ -13,6 +13,7 @@ import (
 	"perp-go/internal/mq"
 	"perp-go/internal/repo"
 	"perp-go/internal/service"
+	"perp-go/internal/ws"
 
 	"perp-go/internal/model"
 )
@@ -28,6 +29,7 @@ type Server struct {
 	markPrice         *service.MarkPriceService
 	funding           *service.FundingService
 	producer          *mq.Producer
+	hub               *ws.Hub
 }
 
 func NewServer(
@@ -41,6 +43,7 @@ func NewServer(
 	markPrice *service.MarkPriceService,
 	funding *service.FundingService,
 	producer *mq.Producer,
+	hub *ws.Hub,
 ) *Server {
 	return &Server{
 		accounts:          accounts,
@@ -53,6 +56,7 @@ func NewServer(
 		markPrice:         markPrice,
 		funding:           funding,
 		producer:          producer,
+		hub:               hub,
 	}
 }
 
@@ -77,6 +81,7 @@ func (s *Server) Router() *gin.Engine {
 	r.GET("/funding/history", s.fundingHistory)
 	r.GET("/kline", s.kline)
 	r.POST("/index-price", s.setIndexPrice)
+	r.GET("/ws", s.ws)
 	return r
 }
 
@@ -873,42 +878,15 @@ func (s *Server) conditionalOrderHistory(c *gin.Context) {
 	ok(c, orders)
 }
 
-// PositionView 查询接口展示用：持仓原始字段+现算的标记价/未实现盈亏/回报率/名义价值/预估强平价
-type PositionView struct {
-	model.Position
-	MarkPrice        decimal.Decimal `json:"markPrice"`
-	UnrealizedPnl    decimal.Decimal `json:"unrealizedPnl"`
-	Roe              decimal.Decimal `json:"roe"`
-	NotionalValue    decimal.Decimal `json:"notionalValue"`
-	LiquidationPrice decimal.Decimal `json:"liquidationPrice"`
-}
-
 func (s *Server) positionCurrent(c *gin.Context) {
 	uid, ok1 := parseUID(c)
 	if !ok1 {
 		return
 	}
-	positions, err := s.positions.FindByUID(c.Request.Context(), uid)
+	views, err := s.positions.Views(c.Request.Context(), uid)
 	if err != nil {
 		fail(c, 500, err.Error())
 		return
-	}
-	views := make([]PositionView, 0, len(positions))
-	for _, p := range positions {
-		v := PositionView{Position: p}
-		mark, hasMark := s.markPrice.Get(c.Request.Context(), p.Symbol)
-		if hasMark {
-			v.MarkPrice = mark
-			v.UnrealizedPnl = p.UnrealizedPnl(mark)
-			v.NotionalValue = p.Volume.Mul(mark)
-			if p.PositionMargin.Sign() > 0 {
-				v.Roe = v.UnrealizedPnl.Div(p.PositionMargin)
-			}
-			if tier, err := s.positions.TierFor(c.Request.Context(), p.Symbol, v.NotionalValue); err == nil && tier != nil {
-				v.LiquidationPrice = p.LiquidationPrice(tier.MaintenanceMarginRate, tier.MaintenanceAmount)
-			}
-		}
-		views = append(views, v)
 	}
 	ok(c, views)
 }

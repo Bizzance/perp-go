@@ -64,6 +64,46 @@ func (s *PositionService) FindByUID(ctx context.Context, uid uint64) ([]model.Po
 	return s.positions.FindByUID(ctx, uid)
 }
 
+// PositionView 查询接口/WS账户快照共用的展示视图：持仓原始字段+现算的标记价/未实现盈亏/
+// 回报率/名义价值/预估强平价。之前REST的GET /position/current和WS的私有账户快照
+// (PushService.PublishUserSnapshot)各自独立算了一遍这些计算字段，WS那份漏掉了全部计算
+// 字段，只推裸的model.Position——两处对同一个资源的"完整视图"定义不一致，容易让依赖WS
+// 推送做风控展示的客户端拿到的字段跟REST查询不对等。现在统一收进这一个方法，两边共用
+type PositionView struct {
+	model.Position
+	MarkPrice        decimal.Decimal `json:"markPrice"`
+	UnrealizedPnl    decimal.Decimal `json:"unrealizedPnl"`
+	Roe              decimal.Decimal `json:"roe"`
+	NotionalValue    decimal.Decimal `json:"notionalValue"`
+	LiquidationPrice decimal.Decimal `json:"liquidationPrice"`
+}
+
+// Views 这个uid名下全部持仓的展示视图
+func (s *PositionService) Views(ctx context.Context, uid uint64) ([]PositionView, error) {
+	positions, err := s.positions.FindByUID(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
+	views := make([]PositionView, 0, len(positions))
+	for _, p := range positions {
+		v := PositionView{Position: p}
+		mark, hasMark := s.markPrice.Get(ctx, p.Symbol)
+		if hasMark {
+			v.MarkPrice = mark
+			v.UnrealizedPnl = p.UnrealizedPnl(mark)
+			v.NotionalValue = p.Volume.Mul(mark)
+			if p.PositionMargin.Sign() > 0 {
+				v.Roe = v.UnrealizedPnl.Div(p.PositionMargin)
+			}
+			if tier, err := s.TierFor(ctx, p.Symbol, v.NotionalValue); err == nil && tier != nil {
+				v.LiquidationPrice = p.LiquidationPrice(tier.MaintenanceMarginRate, tier.MaintenanceAmount)
+			}
+		}
+		views = append(views, v)
+	}
+	return views, nil
+}
+
 func (s *PositionService) Find(ctx context.Context, uid uint64, symbol string, side model.Side) (*model.Position, error) {
 	return s.positions.Find(ctx, uid, symbol, side)
 }

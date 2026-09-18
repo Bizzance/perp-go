@@ -97,3 +97,16 @@ func (c *Cache) GetFundingAccumulator(ctx context.Context, symbol string) (decim
 func (c *Cache) ResetFundingAccumulator(ctx context.Context, symbol string) error {
 	return c.rdb.Del(ctx, fundingAccumKey(symbol)).Err()
 }
+
+// Publish/Subscribe：contract-engine往外发布实时事件(深度/成交/K线/标记价格/账户快照)，
+// contract-api的WS网关订阅转发给客户端——两个进程用Redis Pub/Sub解耦，contract-engine
+// 只管发布，不知道、也不需要知道有没有人在订阅，见docs/websocket.md
+func (c *Cache) Publish(ctx context.Context, channel, payload string) error {
+	return c.rdb.Publish(ctx, channel, payload).Err()
+}
+
+// Subscribe 返回的*redis.PubSub由调用方负责关闭(defer Close())，不在这里做懒订阅/
+// 引用计数管理——那是internal/ws.Hub的职责，这一层只是对go-redis客户端的薄封装
+func (c *Cache) Subscribe(ctx context.Context, channels ...string) *redis.PubSub {
+	return c.rdb.Subscribe(ctx, channels...)
+}

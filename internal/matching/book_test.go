@@ -211,6 +211,21 @@ func TestBook_RestRejectsDuplicateOrderID(t *testing.T) {
 	}
 }
 
+func TestBook_Contains(t *testing.T) {
+	b := NewBook()
+	if b.Contains(1) {
+		t.Fatalf("空订单簿不应该包含任何orderId")
+	}
+	b.Rest(newResting(1, 1, Buy, "100", "5", 1))
+	if !b.Contains(1) {
+		t.Fatalf("挂单之后应该能查到这个orderId——EngineService.SubmitOrder靠这个防御Kafka\n\t\t重复投递: 一个仍在排队的委托不该被当成新的taker再次尝试撮合")
+	}
+	b.Cancel(1)
+	if b.Contains(1) {
+		t.Fatalf("撤销之后不应该再查到这个orderId")
+	}
+}
+
 func TestBook_DepthMaxLevels(t *testing.T) {
 	b := NewBook()
 	for i := 0; i < 5; i++ {

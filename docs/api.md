@@ -270,3 +270,17 @@ HTTP响应`"结束本轮请求已提交"`只表示请求已受理，不代表撤
   }
 }
 ```
+
+## WebSocket实时推送
+
+详细设计（channel命名、订阅协议、私有频道鉴权占位说明）见 [websocket.md](websocket.md)。
+
+### `GET /ws`（`contract-api`，默认`:7001`）
+
+升级成WebSocket连接后发JSON控制消息订阅/取消订阅：
+
+```json
+{"op": "subscribe", "channels": ["depth:BTCUSDT", "trade:BTCUSDT", "kline:BTCUSDT:1m", "user:10001"]}
+```
+
+推送消息统一格式：`{"channel": "depth:BTCUSDT", "data": {...}}`。

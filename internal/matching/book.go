@@ -309,6 +309,23 @@ func (b *Book) Cancel(orderID uint64) (decimal.Decimal, bool) {
 	return remaining, true
 }
 
+// Contains 这个orderID当前是否正挂在簿子上——SubmitOrder用这个防御Kafka at-least-once
+// 语义下的重复投递：如果一笔下单事件被重复消费、这个orderId已经在挂着，说明上一次投递
+// 已经完整处理过(撮合+挂剩余量)了，不能对它再跑一遍Match，否则一笔仍在簿子上的挂单会
+// 被当成"新的taker"再次尝试撮合，可能吃掉不该被这笔重复事件消耗的对手盘流动性——这不是
+// 假设性场景，Kafka消费者(internal/mq)本身不做去重，见docs/websocket.md和
+// docs/known-limitations.md
+func (b *Book) Contains(orderID uint64) bool {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	_, ok := b.byID[orderID]
+	return ok
+}
+
+// DefaultDepthLevels 深度快照默认返回的档位数——REST查询接口(internal/api/engine_server.go)
+// 和WS实时推送(EngineService.SubmitOrder)共用同一个默认值，不要各自硬编码一份
+const DefaultDepthLevels = 20
+
 // PriceLevel 深度快照里聚合后的一档——只暴露价格/总量/笔数，不暴露单笔委托的uid/orderID，
 // 公开的深度数据不该泄露个人挂单归属
 type PriceLevel struct {

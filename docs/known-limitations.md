@@ -4,6 +4,17 @@
 
 ## 架构级问题（优先级最高）
 
+### Kafka at-least-once语义下的重复投递，没有完整的消息去重
+
+`internal/mq`的Kafka消费者封装本身不做去重（读到消息就调用handler，没有按消息做幂等性
+标记），一笔下单/撤单事件理论上可能被重复投递给`contract-engine`处理第二遍。
+`EngineService.SubmitOrder`加了两层针对性防护（委托状态检查+`Book.Contains`检查这个
+orderId是否已经在排队），能挡住"这笔委托仍在正常排队"这一种最容易触发的重复投递场景，
+但不是完整的幂等方案——比如"提交事件先处理完、随后立刻被撤单处理完、提交事件的重复
+投递才姗姗来迟"这种跨事件的交叉时序，仅靠这两层检查不一定能完全覆盖所有情况。完整解决
+需要给消息本身加去重（比如按Kafka的topic+partition+offset记一张"已处理"表），这次没有
+做，是明确留下的范围边界，见 [websocket.md](websocket.md#kafka-at-least-once重复投递的防护enginesubmitorder)。
+
 ### 并发下单的竞态
 
 保证金分档的杠杆校验（读现有仓位/挂单 → 算档位 → 冻结保证金）整体不是原子的。同一个

@@ -23,6 +23,7 @@ type EngineService struct {
 	markPrice         *MarkPriceService
 	fund              *InsuranceFundService
 	kline             *KlineService
+	push              *PushService
 }
 
 func NewEngineService(
@@ -36,6 +37,7 @@ func NewEngineService(
 	markPrice *MarkPriceService,
 	fund *InsuranceFundService,
 	kline *KlineService,
+	push *PushService,
 ) *EngineService {
 	return &EngineService{
 		matchingEngine:    matchingEngine,
@@ -48,6 +50,7 @@ func NewEngineService(
 		markPrice:         markPrice,
 		fund:              fund,
 		kline:             kline,
+		push:              push,
 	}
 }
 
@@ -55,6 +58,23 @@ func NewEngineService(
 // 强平单由liquidation.go在这里落库。
 // 这个方法负责真正的撮合+结算+挂簿/释放。
 func (e *EngineService) SubmitOrder(ctx context.Context, order *model.Order, entryTime int64) error {
+	// 防御Kafka at-least-once语义下的重复投递(internal/mq的消费者本身不做去重)：
+	// ①状态已经不是"待处理"(已经被别的事件处理成filled/canceled/rejected)——不能对一笔
+	// 已经终结的委托再走一遍撮合；②这个orderId已经挂在簿子上——说明上一次投递已经完整
+	// 处理过(撮合+挂剩余量)了，不能让它再当一次新的taker去吃对手盘，那会造成不该发生的
+	// 二次撮合。两个检查合起来只覆盖"仍在排队中"这一种重复投递场景，不是完整的Kafka
+	// 幂等方案(比如"提交后又立刻被撤单，撤单先处理完，提交事件才重复投递过来"这种交叉时序
+	// 依然防不住)，见docs/known-limitations.md
+	if !model.ActiveOrderStatuses[order.Status] {
+		log.Printf("[WARN] orderId=%d 状态已经是%s(不是待处理状态)，跳过(可能是重复的下单事件)", order.OrderID, order.Status)
+		return nil
+	}
+	book := e.matchingEngine.BookFor(order.Symbol)
+	if book.Contains(order.OrderID) {
+		log.Printf("[WARN] orderId=%d 已经在订单簿里，跳过重复的下单事件", order.OrderID)
+		return nil
+	}
+
 	// 进入订单簿的order，只包含了下单的order中的一部分必要数据
 	resting := &matching.RestingOrder{
 		OrderID:     order.OrderID,
@@ -68,27 +88,52 @@ func (e *EngineService) SubmitOrder(ctx context.Context, order *model.Order, ent
 		ReduceOnly:  order.ReduceOnly,
 		Liquidation: order.Liquidation,
 	}
-	// 拿到订单对应的订单簿
-	book := e.matchingEngine.BookFor(order.Symbol)
 	fills, selfCanceled := book.Match(resting)
 
+	// 这笔提交涉及到的全部uid，成交完毕后每个uid只推一次账户快照——不是每笔fill各推一次：
+	// 一笔大额市价单可能一口气吃掉好几档、好几笔fill，taker都是同一个uid，中间几次快照
+	// 都会被最后一次覆盖，没必要重复查DB+发Redis
+	touchedUIDs := make(map[uint64]bool)
 	for _, f := range fills {
 		if err := e.settleOneFill(ctx, order, f); err != nil {
 			log.Printf("[ERROR] settle fill failed, orderId=%d: %v", order.OrderID, err)
 		}
+		touchedUIDs[f.MakerOrder.UID] = true
+		touchedUIDs[f.TakerOrder.UID] = true
 	}
 	e.handleSelfCanceled(ctx, selfCanceled)
 
 	// LIMIT单还有剩余量就挂回簿子；MARKET单/剩余为0就不挂——市价单吃不满剩下的量直接释放
 	// (释放动作由调用方在SubmitOrder返回后，根据委托最终状态决定要不要unfreeze剩余冻结保证金)
+	rested := false
 	if resting.Remaining.Sign() > 0 && order.Type == model.OrderTypeLimit {
-		if !book.Rest(resting) {
-			// 这个orderId已经在簿子里了，说明这次SubmitOrder调用是重复的(比如Kafka消息
-			// 被重复投递)——不是需要中断/报错的场景，簿子状态已经是对的，记一条日志留痕即可
-			log.Printf("[WARN] orderId=%d 已经在订单簿里，跳过重复挂单", order.OrderID)
-		}
+		rested = book.Rest(resting)
+	}
+	// 只有订单簿真的发生了变化(成交、自成交摘单、挂进新单)才推送深度快照——一笔市价单
+	// 缺流动性、什么都没吃到、也没有剩余量可挂的情况下，订单簿状态没变，不需要推送
+	if len(fills) > 0 || len(selfCanceled) > 0 || rested {
+		e.push.PublishDepth(ctx, order.Symbol, book.Depth(matching.DefaultDepthLevels))
+	}
+	// 提交者自己的账户快照必须推——哪怕这笔委托一口成交都没吃到、只是静静挂在簿子上，
+	// 它的出现本身也是提交者activeOrders列表的变化，不能只在有成交时才推(那样一笔纯粹
+	// 挂单不成交的委托，提交者的WS私有频道永远不会得到通知)
+	touchedUIDs[order.UID] = true
+	for uid := range touchedUIDs {
+		e.push.PublishUserSnapshot(ctx, uid)
 	}
 	return nil
+}
+
+// PublishUserSnapshot/PublishDepth 暴露给LiquidationService/ConditionalOrderService这些
+// 跟EngineService协作、但不直接持有PushService的调用方——推送逻辑还是收在EngineService
+// 内部，不是把push字段整个导出
+func (e *EngineService) PublishUserSnapshot(ctx context.Context, uid uint64) {
+	e.push.PublishUserSnapshot(ctx, uid)
+}
+
+func (e *EngineService) PublishDepth(ctx context.Context, symbol string) {
+	book := e.matchingEngine.BookFor(symbol)
+	e.push.PublishDepth(ctx, symbol, book.Depth(matching.DefaultDepthLevels))
 }
 
 // handleSelfCanceled 处理自成交保护(STP)摘掉的maker：book.Match内部已经把它们从订单簿里
@@ -131,17 +176,23 @@ func (e *EngineService) settleOneFill(ctx context.Context, incoming *model.Order
 
 	if err := e.markPrice.UpdateFromTrade(ctx, incoming.Symbol, f.Price); err != nil {
 		log.Printf("[WARN] update mark price failed: %v", err)
+	} else {
+		e.push.PublishMarkPrice(ctx, incoming.Symbol, f.Price)
 	}
 
 	tradeID := NextID()
-	if err := e.trades.Insert(ctx, &model.Trade{
+	trade := &model.Trade{
 		TradeID: tradeID, Symbol: incoming.Symbol, Price: f.Price, Volume: f.Volume,
 		BuyOrderID: buyOrderID(f), SellOrderID: sellOrderID(f),
 		BuyUID: buyUID(f), SellUID: sellUID(f), MakerOrderID: f.MakerOrder.OrderID, CreateTime: now,
-	}); err != nil {
+	}
+	if err := e.trades.Insert(ctx, trade); err != nil {
 		return err
 	}
-	e.kline.RecordTrade(ctx, incoming.Symbol, f.Price, f.Volume, now)
+	e.push.PublishTrade(ctx, trade)
+	for _, k := range e.kline.RecordTrade(ctx, incoming.Symbol, f.Price, f.Volume, now) {
+		e.push.PublishKline(ctx, incoming.Symbol, k)
+	}
 
 	for _, side := range []struct {
 		orderID     uint64
@@ -175,6 +226,9 @@ func (e *EngineService) settleOneFill(ctx context.Context, incoming *model.Order
 			}
 		}
 	}
+	// 账户快照的推送统一收在SubmitOrder那个调用方的最后(每个涉及到的uid只推一次，见
+	// touchedUIDs)，不在这里按每笔fill单独推——一口气吃掉好几档的大额市价单会产生好几笔
+	// fill，这里不推能避免同一个uid在一次SubmitOrder调用里被重复查DB+发Redis好几次
 	return nil
 }
 
@@ -323,7 +377,13 @@ func (e *EngineService) CloseRound(ctx context.Context, uid uint64) error {
 	if !allDone {
 		return fmt.Errorf("结束本轮未完全成功(还有撤单/强平失败)，uid=%d，未清算资金状态，需要重试", uid)
 	}
-	return e.accounts.CloseRound(ctx, uid)
+	if err := e.accounts.CloseRound(ctx, uid); err != nil {
+		return err
+	}
+	// 撤单/强平过程中已经推送过中间状态的账户快照，这里再推一次最终状态(credit清零、
+	// round+1)——中间那几次快照都还没反映"结束本轮"这个动作本身造成的变化
+	e.push.PublishUserSnapshot(ctx, uid)
+	return nil
 }
 
 // forceCloseOnePosition 生成一笔"已成交"的市价平仓单落库(留痕、复用SettleFill结算逻辑)，
@@ -360,14 +420,19 @@ func (e *EngineService) CancelOrder(ctx context.Context, o *model.Order) error {
 	remaining, ok := book.Cancel(o.OrderID)
 	if !ok {
 		remaining = o.RemainingAmount()
+	} else {
+		// 只有真的从订单簿里摘掉了什么(ok=true)才需要推深度变化——自成交保护(handleSelfCanceled)
+		// 走的是finalizeOrderCancel这条共用路径，但那种情况订单簿早在book.Match内部就已经
+		// 变过了，SubmitOrder那边已经推过一次深度，这里不需要再推一次
+		e.push.PublishDepth(ctx, o.Symbol, book.Depth(matching.DefaultDepthLevels))
 	}
 	return e.finalizeOrderCancel(ctx, o, remaining)
 }
 
-// finalizeOrderCancel 统一负责"标记DB为CANCELED+按剩余量释放冻结保证金"——CancelOrder
-// (正常撤单接口触发)和自成交保护(book.Match内部摘除maker，见SubmitOrder)都要走到这一步，
-// 只是"从订单簿摘除"这一步各自的时机/方式不同(前者显式调book.Cancel，后者book.Match内部
-// 已经摘完了)，DB落库+保证金释放的逻辑完全一样，不应该写两份
+// finalizeOrderCancel 统一负责"标记DB为CANCELED+按剩余量释放冻结保证金+推送账户快照"——
+// CancelOrder(正常撤单接口触发)和自成交保护(book.Match内部摘除maker，见SubmitOrder)都要
+// 走到这一步，只是"从订单簿摘除"这一步各自的时机/方式不同(前者显式调book.Cancel，后者
+// book.Match内部已经摘完了)，DB落库+保证金释放+推送的逻辑完全一样，不应该写两份
 func (e *EngineService) finalizeOrderCancel(ctx context.Context, o *model.Order, remaining decimal.Decimal) error {
 	marked, err := e.orders.MarkCanceled(ctx, o.OrderID, NowMillis())
 	if err != nil {
@@ -380,6 +445,7 @@ func (e *EngineService) finalizeOrderCancel(ctx context.Context, o *model.Order,
 		// 保证金，否则同一笔冻结会被重复释放，凭空多出一笔钱
 		return nil
 	}
+	defer e.push.PublishUserSnapshot(ctx, o.UID)
 	if o.Action == model.ActionOpen && remaining.Sign() > 0 {
 		// 按剩余比例分别算这笔委托冻结的available/credit部分该释放多少，不能笼统释放到
 		// available——那样等于让信用额度经过"冻结再撤单"这个渠道被洗成可提现的available

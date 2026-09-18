@@ -50,6 +50,31 @@ func (r *KlineRepo) UpsertBatch(ctx context.Context, symbol string, buckets []Kl
 	return err
 }
 
+// FindByBuckets 一次性查回buckets里指定的那几根K线(每个周期各自的open_time不一样，不能
+// 用简单的open_time IN(...)，要按(interval,open_time)配对匹配)——WS推送K线快照时，
+// UpsertBatch写完之后要把写入后的最新状态读回来推给客户端，用这一条SQL一次查完全部
+// 周期，不是每个周期单独查一次
+func (r *KlineRepo) FindByBuckets(ctx context.Context, symbol string, buckets []KlineBucket) ([]model.Kline, error) {
+	if len(buckets) == 0 {
+		return nil, nil
+	}
+	var sb strings.Builder
+	sb.WriteString("SELECT * FROM klines WHERE symbol = ? AND (")
+	args := make([]any, 0, len(buckets)*2+1)
+	args = append(args, symbol)
+	for i, b := range buckets {
+		if i > 0 {
+			sb.WriteString(" OR ")
+		}
+		sb.WriteString("(`interval` = ? AND open_time = ?)")
+		args = append(args, b.Interval, b.OpenTime)
+	}
+	sb.WriteString(")")
+	var rows []model.Kline
+	err := r.db.SelectContext(ctx, &rows, sb.String(), args...)
+	return rows, err
+}
+
 // FindRecent 最近limit根K线，按开盘时间升序返回(从旧到新，画图/回放的常见习惯)
 func (r *KlineRepo) FindRecent(ctx context.Context, symbol string, interval model.KlineInterval, limit int) ([]model.Kline, error) {
 	var rows []model.Kline

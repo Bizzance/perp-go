@@ -66,7 +66,7 @@ func (s *EngineServer) depth(c *gin.Context) {
 		fail(c, 400, "合约不存在或已下架")
 		return
 	}
-	levels, msg := parsePositiveIntQuery(c, "levels", 20)
+	levels, msg := parsePositiveIntQuery(c, "levels", matching.DefaultDepthLevels)
 	if msg != "" {
 		fail(c, 400, msg)
 		return
