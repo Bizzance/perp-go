@@ -6,6 +6,7 @@ U本位永续合约交易系统，MVP阶段。文档按主题拆分，方便单�
 - [account-and-margin.md](account-and-margin.md) —— 账户模型、全仓保证金、冻结/结算规则
 - [matching-and-settlement.md](matching-and-settlement.md) —— 撮合引擎、下单校验、成交结算
 - [order-book.md](order-book.md) —— 订单簿数据结构、自成交保护、深度查询
+- [order-book-recovery.md](order-book-recovery.md) —— 订单簿的进程重启恢复机制
 - [kline.md](kline.md) —— K线聚合
 - [websocket.md](websocket.md) —— WebSocket实时推送
 - [message-dedup.md](message-dedup.md) —— Kafka消息级去重

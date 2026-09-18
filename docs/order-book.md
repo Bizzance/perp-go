@@ -113,7 +113,7 @@ type DepthSnapshot struct {
 又引入一次DB往返，等于把这个优化的意义抵消掉大半；新增/停用合约这类配置变更本来就是
 低频的运营操作，几十秒的生效延迟可以接受。
 
-## 后续（这次没做，记录以便后续迭代）
+## 进程重启后的恢复
 
-- K线/行情聚合（基于`trades`表的原始成交记录）
-- WebSocket推送：公开频道（深度/成交/K线/标记价格）+ 私有频道（订单/持仓/账户变化）
+`Book`是纯内存结构，`contract-engine`进程重启会丢失全部挂单排队状态——恢复机制见
+[order-book-recovery.md](order-book-recovery.md)。

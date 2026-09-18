@@ -66,6 +66,15 @@ func main() {
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 
+	// 订单簿是纯内存结构，重启会丢——启动时先从MySQL里还在排队的委托记录重建，必须在下面
+	// 的Kafka消费者开始处理新消息之前跑完，不然新委托可能撮合到一个还没恢复完整的半成品
+	// 订单簿上，见docs/order-book-recovery.md。失败直接退出而不是带着一个不完整/空的订单簿
+	// 硬起来——那样后续撮合会悄悄产出经济上错误的结果(该撮合到的历史挂单凭空消失)，
+	// 比进程起不来更糟
+	if err := engineSvc.RecoverOrderBook(ctx); err != nil {
+		log.Fatalf("恢复订单簿失败: %v", err)
+	}
+
 	submitConsumer := mq.NewConsumer(cfg.KafkaBrokers, events.TopicOrderSubmit, "contract-engine")
 	defer submitConsumer.Close()
 	go submitConsumer.Consume(ctx, mq.WithDedup(ctx, processedMsgRepo, func(msg mq.Message) error {

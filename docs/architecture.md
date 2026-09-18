@@ -24,8 +24,10 @@
     - 资金费率采样+结算（`SampleOnce` / `SettleIfDue`）
     - （撮合本身是事件驱动的，不是定时任务）
 
-两个进程都是无状态的（engine的"状态"是内存订单簿，MVP阶段单实例部署，重启会丢失挂单——
-这是已知的、还没解决的问题，见 [known-limitations.md](known-limitations.md)）。
+两个进程都是无状态的（engine的"状态"是内存订单簿，MVP阶段单实例部署——进程重启不会丢
+挂单，启动时会从MySQL重建，见 [order-book-recovery.md](order-book-recovery.md)；但还
+不能横向扩展成多实例分摊负载，这是已知的、还没解决的问题，见
+[known-limitations.md](known-limitations.md)）。
 
 ## 为什么保证金冻结在contract-api同步完成
 

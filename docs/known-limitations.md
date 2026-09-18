@@ -4,13 +4,17 @@
 
 ## 架构级问题（优先级最高）
 
-### engine单实例，无持久化订单簿
+### engine没有横向扩展（按symbol分片到多个实例）
 
-`contract-engine`的订单簿是纯内存结构，进程重启会丢失全部挂单（不会丢失已经落库的委托
-记录，但订单簿里的排队状态会丢）。MVP阶段单实例部署，没有做订单簿的持久化/恢复机制，
-也没有做横向扩展（按symbol分片到多个engine实例）。ID生成（`service.NextID`）已经支持
-多实例部署时用`PERP_NODE_ID`区分不同实例（见下面"已经修复的历史问题"），但订单簿本身
-分片/合并的编排逻辑还没做，横向扩展依然需要额外的工作，不是配一个环境变量就能启用。
+`contract-engine`目前只能单实例部署，没有做横向扩展——同一个symbol的下单/撤单事件
+按Kafka key哈希分区，理论上可以让多个`contract-engine`实例各自负责一部分symbol，但
+"哪个实例该处理哪些symbol"这层分片/路由编排逻辑没做，多起几个`contract-engine`进程
+不会自动分摊负载（反而会导致同一个symbol被多个实例的内存订单簿各自独立维护、互相
+不知道对方存在，产生错误的撮合结果）。ID生成（`service.NextID`）已经支持多实例部署时
+用`PERP_NODE_ID`区分不同实例（见下面"已经修复的历史问题"），进程重启后单实例内部的
+订单簿状态也已经能正确恢复（见 [order-book-recovery.md](order-book-recovery.md)），
+但这两点都不等于"可以水平扩展"——横向扩展依然需要额外的分片编排工作，不是配一个环境
+变量就能启用。
 
 ## 明确排除的功能（不是遗漏，是范围决策）
 
@@ -127,3 +131,13 @@
   tier1范围内、但合计会落到只允许更低杠杆的tier2的并发下单，后到的那笔能正确读到前一笔
   已经提交的委托、按tier2的杠杆上限被拒绝。详见
   [risk-limit-tiers.md](risk-limit-tiers.md#并发下单的原子性按uidsymbolside的分布式锁)。
+- **订单簿进程重启会丢失全部挂单**：早期实现`contract-engine`重启后订单簿是空的——
+  委托本身没丢（DB里`status`依然是`open`/`partially_filled`），但内存订单簿不知道
+  该把这些委托放回哪个位置，等于这些挂单虽然DB状态显示还活着、实际已经从撮合逻辑里
+  消失（既不会被新委托撮合到，客户端撤单请求也会因为`Book.Cancel`找不到这个orderId
+  而失败）。现在启动时`EngineService.RecoverOrderBook`从MySQL按`create_time`+`order_id`
+  顺序把还在排队的LIMIT委托直接`Rest`回订单簿（不经过`Match`，理由见文档），已经用
+  真实重启验证过：重启前挂着的两笔买单，重启后深度快照完全一致，且真的可以被新提交的
+  卖单撮合成交（价格优先级也保持正确）。详见
+  [order-book-recovery.md](order-book-recovery.md)。仍然没做的是横向扩展（按symbol
+  分片到多个engine实例），见上面"架构级问题"一节。

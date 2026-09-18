@@ -61,6 +61,20 @@ func (r *OrderRepo) FindActiveByUID(ctx context.Context, uid uint64, symbol stri
 	return orders, err
 }
 
+// FindActiveLimitOrders 查全部还在排队的LIMIT委托(open/partially_filled)，按create_time
+// 升序返回，order_id做二级排序——order_id是雪花算法生成、时间单调递增，在create_time
+// (毫秒精度)不够细分同一毫秒内的相对先后时兜底提供更细的顺序。contract-engine启动时靠
+// 这个重建内存订单簿(订单簿是纯内存结构，进程重启会丢)，见docs/order-book-recovery.md。
+// 只查LIMIT单：MARKET单不管成交与否都从不挂在订单簿上(缺对手盘的剩余量直接终止在
+// open/partially_filled状态、不排队，见docs/known-limitations.md)，不该被误恢复上簿
+func (r *OrderRepo) FindActiveLimitOrders(ctx context.Context) ([]model.Order, error) {
+	var orders []model.Order
+	err := r.db.SelectContext(ctx, &orders,
+		`SELECT * FROM orders WHERE status IN ('open','partially_filled') AND type = 'limit'
+		 ORDER BY create_time ASC, order_id ASC`)
+	return orders, err
+}
+
 func (r *OrderRepo) FindHistoryByUID(ctx context.Context, uid uint64, limit int) ([]model.Order, error) {
 	var orders []model.Order
 	err := r.db.SelectContext(ctx, &orders, `SELECT * FROM orders WHERE uid = ? ORDER BY order_id DESC LIMIT ?`, uid, limit)

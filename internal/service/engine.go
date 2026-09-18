@@ -4,6 +4,7 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"time"
 
 	"github.com/shopspring/decimal"
 
@@ -52,6 +53,58 @@ func NewEngineService(
 		kline:             kline,
 		push:              push,
 	}
+}
+
+// RecoverOrderBook 进程启动时重建内存订单簿——订单簿(matching.Book)是纯内存结构，
+// contract-engine重启会丢失全部挂单排队状态，但委托记录本身已经落库，status还是
+// open/partially_filled就说明这笔委托重启前确实还在排队、剩余量就是RemainingAmount()。
+// 按create_time(+order_id兜底同一毫秒内的相对顺序)升序依次直接Rest回对应symbol的订单簿，
+// 见docs/order-book-recovery.md。
+//
+// 不能走SubmitOrder那条"先Match再Rest"的路径：这些是在重建已经存在的状态，不是新进来的
+// 委托，重新跑一遍Match会把两笔本来已经分别挂在簿子上、彼此之间事实上没有成交关系的历史
+// 挂单错误地撮合出一笔并不存在的成交(比如重启前bid/ask两边各自独立挂着、根本没碰上，
+// 重建时如果重新Match，会凭空撮合出一笔真实世界没发生过的成交)。
+//
+// EntryTime换算成跟运行时time.Now().UnixNano()同一量纲(都是纳秒)，不是直接拿
+// 毫秒级的create_time数值当纳秒用——否则恢复的挂单在数值上会比重启后新提交的委托小
+// (量纲不一致导致的巧合而已，不能依赖这种巧合)，这里显式换算保证恢复的挂单在时间优先级上
+// 确实排在重启后新提交的委托之前，符合它们本来就更早进入订单簿的事实
+func (e *EngineService) RecoverOrderBook(ctx context.Context) error {
+	orders, err := e.orders.FindActiveLimitOrders(ctx)
+	if err != nil {
+		return fmt.Errorf("查询待恢复委托失败: %w", err)
+	}
+	restored := 0
+	for _, o := range orders {
+		remaining := o.RemainingAmount()
+		if remaining.Sign() <= 0 {
+			// 理论上不会出现(open/partially_filled不该有remaining<=0)，防御性跳过而不是
+			// 直接panic——恢复流程本身不该因为一笔脏数据整体失败，见下面的日志
+			log.Printf("[WARN] 恢复订单簿时orderId=%d剩余量%s<=0(不应该发生)，跳过", o.OrderID, remaining)
+			continue
+		}
+		resting := &matching.RestingOrder{
+			OrderID:     o.OrderID,
+			UID:         o.UID,
+			Side:        o.Side,
+			Action:      o.Action,
+			Direction:   matching.DirectionOf(o.Side, o.Action),
+			Price:       o.Price,
+			Remaining:   remaining,
+			EntryTime:   o.CreateTime * int64(time.Millisecond),
+			ReduceOnly:  o.ReduceOnly,
+			Liquidation: o.Liquidation,
+		}
+		book := e.matchingEngine.BookFor(o.Symbol)
+		if !book.Rest(resting) {
+			log.Printf("[WARN] 恢复订单簿时orderId=%d已经在簿子上(不应该发生)，跳过", o.OrderID)
+			continue
+		}
+		restored++
+	}
+	log.Printf("订单簿重建完成，恢复%d笔挂单(共查到%d笔待恢复委托)", restored, len(orders))
+	return nil
 }
 
 // 委托已经由调用方落库(status=OPEN)——正常用户下单在contract-api那边落库+冻结保证金之后才发Kafka事件过来；
