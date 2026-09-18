@@ -191,9 +191,19 @@ func (s *LiquidationService) submitLiquidationClip(ctx context.Context, p model.
 		protectPrice = mark.Add(buffer)
 	}
 
+	// 查MaxVolume失败(DB抖动)不能悄悄放过、直接用未截断的p.Volume当这一批的量——那样
+	// 恰好在DB不稳定的时候，把分批强平这道"单批不超过MaxVolume"的安全阀绕过去了，等于在
+	// 最不该放松保护的时候放松了保护。查失败就跟"缺标记价格/缺分档配置"一样，退回normal、
+	// 交给下一轮风控扫描重试，不猜一个"大概率安全"的默认值往下走
+	coin, err := s.coins.FindBySymbol(ctx, p.Symbol)
+	if err != nil || coin == nil {
+		log.Printf("[ERROR] 分批强平查询合约配置失败, uid=%d, symbol=%s: %v", p.UID, p.Symbol, err)
+		s.positions.ClearLiquidating(ctx, p.ID)
+		s.engine.PublishUserSnapshot(ctx, p.UID)
+		return 0, false
+	}
 	clipVolume := p.Volume
-	if coin, err := s.coins.FindBySymbol(ctx, p.Symbol); err == nil && coin != nil &&
-		coin.MaxVolume.Sign() > 0 && clipVolume.GreaterThan(coin.MaxVolume) {
+	if coin.MaxVolume.Sign() > 0 && clipVolume.GreaterThan(coin.MaxVolume) {
 		clipVolume = coin.MaxVolume
 	}
 
@@ -255,8 +265,17 @@ func (s *LiquidationService) settleTimeoutFallback(ctx context.Context, orderID 
 	log.Printf("[WARN] 触发强平超时兜底直接结算, uid=%d, symbol=%s, side=%s, volume=%s, markPrice=%s",
 		o.UID, o.Symbol, o.Side, closeVolume, mark)
 
+	// closeVolume取min后可能小于o.RemainingAmount()——仓位剩余量比这一批订单还没成交的量
+	// 更少(比如这期间仓位被别的路径也动过)，这一批订单实际上没有被完全吃满。这种情况下
+	// 状态不能标Filled(名不副实)，标成Canceled——traded_amount照常记录真实吃到的部分，
+	// 状态上等同于"部分成交之后剩余部分被撤销"，这是标准trading语义，也避免把这笔订单
+	// 留在某个"活跃"状态导致RecoverOrderBook重启时把它错误地当成还需要处理的挂单捞回来
+	newStatus := model.OrderStatusFilled
+	if closeVolume.LessThan(o.RemainingAmount()) {
+		newStatus = model.OrderStatusCanceled
+	}
 	now := NowMillis()
-	if err := s.orders.ApplyFill(ctx, orderID, closeVolume, mark, model.OrderStatusFilled, now); err != nil {
+	if err := s.orders.ApplyFill(ctx, orderID, closeVolume, mark, newStatus, now); err != nil {
 		log.Printf("[ERROR] apply fallback fill failed: %v", err)
 		return
 	}

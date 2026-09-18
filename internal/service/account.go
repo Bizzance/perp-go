@@ -95,11 +95,32 @@ func (s *AccountService) FreezeMargin(ctx context.Context, uid uint64, amount de
 	if err != nil {
 		return FreezeResult{}, err
 	}
+	// 浮盈是跨symbol聚合持仓表+标记价格算出来的，没法像available/credit那样表达成一条
+	// SQL条件、交给数据库原子核对——这里能做的是在真正调用FreezeForceIntoNegative之前，
+	// 尽量贴近地重新读一次available/credit(不复用freshAvailable/freshCredit这两个更早
+	// 读到的、可能已经过期的值)，缩小"判断当时的账户状态"和"真正冻结时的账户状态"之间的
+	// 窗口——不能完全消除(totalUnrealized本身没法原子核对)，但比复用一个更旧的快照强
+	freshAvailable, err = s.accounts.FindFreshAvailable(ctx, account.ID)
+	if err != nil {
+		return FreezeResult{}, err
+	}
+	freshCredit, err = s.accounts.FindFreshCredit(ctx, account.ID)
+	if err != nil {
+		return FreezeResult{}, err
+	}
 	if freshAvailable.Add(freshCredit).Add(totalUnrealized).GreaterThanOrEqual(amount) {
-		if err := s.accounts.FreezeForceIntoNegative(ctx, account.ID, amount); err != nil {
+		ok, err := s.accounts.FreezeForceIntoNegative(ctx, account.ID, amount, freshAvailable, freshCredit)
+		if err != nil {
 			return FreezeResult{}, err
 		}
-		return FreezeResult{FromAvailable: amount}, nil
+		if ok {
+			return FreezeResult{FromAvailable: amount}, nil
+		}
+		// available/credit在"读出来判断够不够"和"真正冻结"这两步之间被别的并发操作改过了
+		// (比如同一个uid在另一个symbol+side上也在走FreezeMargin，OrderLockKey管不到跨
+		// symbol的并发)，不能假装冻结成功——按"这次没能安全地冻结"处理，让调用方走正常的
+		// 余额不足拒绝路径，不重试(重试的复杂度收益不成比例，极端并发下的这类边界情况
+		// 交给用户重新发起请求即可)
 	}
 	return FreezeResult{}, ErrInsufficientMargin
 }
@@ -238,16 +259,15 @@ func (s *AccountService) CloseRound(ctx context.Context, uid, round uint64) (boo
 	if err != nil {
 		return false, err
 	}
-	freshCredit, err := s.accounts.FindFreshCredit(ctx, account.ID)
-	if err != nil {
-		return false, err
-	}
-	ok, err := s.accounts.CloseRoundIfRound(ctx, account.ID, round)
+	// 清零前的credit值由CloseRoundIfRound在同一条UPDATE里原子捕获返回，不在这里单独
+	// 预读——预读的话，跟并发的GrantCredit之间有竞态，审计流水金额可能跟实际清零的
+	// 金额对不上，见account_repo.go里CloseRoundIfRound的注释
+	ok, clearedCredit, err := s.accounts.CloseRoundIfRound(ctx, account.ID, round)
 	if err != nil || !ok {
 		return ok, err
 	}
-	if freshCredit.Sign() > 0 {
-		if err := s.tx.Insert(ctx, uid, "USDT", model.TxRoundClose, freshCredit.Neg(), time.Now().UnixMilli()); err != nil {
+	if clearedCredit.Sign() > 0 {
+		if err := s.tx.Insert(ctx, uid, "USDT", model.TxRoundClose, clearedCredit.Neg(), time.Now().UnixMilli()); err != nil {
 			return true, err
 		}
 	}

@@ -74,3 +74,15 @@ func (r *ConditionalOrderRepo) MarkCanceled(ctx context.Context, orderID uint64,
 		updateTime, orderID)
 	return affected(res, err)
 }
+
+// MarkCanceledFromTriggered 只有MarkTriggered已经成功、但触发后落地成真正委托这一步失败
+// (见ConditionalOrderService.trigger)时才会用到——跟MarkCanceled几乎一样，唯一区别是
+// WHERE条件是status='triggered'而不是'pending'，这两个方法故意不合并成一个，是为了让
+// 调用方在代码层面就清楚自己是在撤销"还没触发的条件单"还是在为"触发失败"这种异常情况
+// 兜底，不能靠一个通用方法掩盖这两种场景在语义上的区别
+func (r *ConditionalOrderRepo) MarkCanceledFromTriggered(ctx context.Context, orderID uint64, updateTime int64) (bool, error) {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE conditional_orders SET status = 'canceled', update_time = ? WHERE order_id = ? AND status = 'triggered'`,
+		updateTime, orderID)
+	return affected(res, err)
+}

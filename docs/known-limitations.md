@@ -165,3 +165,79 @@
   减仓（ADL）"一节。用真实穿仓场景实测验证过（构造高杠杆多空双方仓位、直接操作标记
   价格制造大幅下跌触发多头穿仓），ADL按ROE正确排序候选、减仓量精确对应筹款需求（不是
   整仓砍掉）、跨多个候选累加凑够金额、保险基金最终余额跟手算结果完全吻合。
+- **`ApplyCloseFill`无条件把仓位状态重置成`normal`，清掉强平进行中的标记**：这是一次
+  全量代码review发现并实测复现过的最严重问题。`ApplyCloseFill`（分批平仓/强平分批扣减
+  都走这个函数）每次部分平仓后都会把`positions.status`硬编码写回`'normal'`，包括强平
+  分批clip自己的成交结算——等于每处理完一批clip，就把`MarkLiquidating`当初原子设置的
+  `'liquidating'`标记悄悄擦掉，让`MarkLiquidating`那个`WHERE status='normal'`的原子
+  保护重新被满足，一次尚未处理完的分批强平在下一轮风控扫描（`RiskScanOnce`）里会被
+  第二次`MarkLiquidating`成功、派生出第二个独立的`liquidateInClips`协程，跟第一个并发
+  处理同一个仓位。用真实压测复现过（临时把风控扫描间隔调到300ms、构造一个吃穿保证金
+  缓冲的价格暴跌场景确保每批clip的保证金释放追不上价格驱动的亏损，直接改Redis标记价格
+  强制价格崩盘）：同一个`positionID`在日志里连续3次`MarkLiquidating`成功、出现重叠的
+  分批挂单。修复方式是让`ApplyCloseFill`保留调用前读到的`p.Status`、只有仓位数量真正
+  归零时才强制置`Closed`，不再无条件覆盖成`normal`；同时把`ApplyOpenFill`/
+  `ApplyCloseFill`/`OrderRepo.ApplyFill`都改成乐观并发（CAS）重试循环（先读、算好新值、
+  `UPDATE ... WHERE`带上读到的旧值做守卫，0行受影响就重新读最新状态重试），避免并发
+  写入之间互相覆盖丢更新——之前这几个函数是"读一次、按SQL相对表达式写"，两次并发调用
+  能各自读到旧状态、写操作互不知道对方的存在。用同样的压测场景重新验证：修复后同一个
+  `positionID`只成功`MarkLiquidating`一次，分批clip严格顺序处理，最终账户状态归零且
+  正确。**这个模式值得记住：任何"部分更新一行记录的部分字段"的函数，只要这一行还有
+  其它字段承载着跨调用的状态语义（这里是`status`标记"强平进行中"），就不能用无条件覆写
+  ——必须先读、只改真正要改的字段、其余字段原样保留，否则表面上"只是改了个数量"的一次
+  调用会悄悄抹掉另一个并发流程留下的状态标记**。
+- **资金费率采样累加器不是原子操作，分片部署下会丢样本**：早期实现`AccumulateFundingSample`
+  是"GET当前累加值→在Go里加上这次的premium→SET回去"，`engine-sharding`部署下多个
+  `contract-engine`实例各自独立跑采样定时器、会并发写同一个Redis key，这个GET-加-SET
+  中间存在竞态窗口，两个实例几乎同时采样时，后写的会覆盖掉先写的、丢失一次样本的
+  贡献。当初`engine-sharding.md`文档错误地断言"这个操作本身是原子的、完全不需要任何
+  分片相关的改动"——这个断言本身没有去看`AccumulateFundingSample`的实现，只是觉得
+  "看起来是个简单操作"就假设成立。现在把累加值拆成`sum`/`count`两个Redis key，用
+  一段Lua脚本（`redis.NewScript`，`INCRBYFLOAT`+`INCR`）在Redis服务端原子地一次性
+  完成两个key的更新，不再有Go这边GET-改-SET的竞态窗口。详见
+  [engine-sharding.md](engine-sharding.md)。**这个模式值得记住：'这个操作本身是原子的'
+  这句话，要去看实现，不能只看调用方式看起来简单就假设成立**。
+- **`FreezeForceIntoNegative`用了过期的`available`/`credit`快照做守卫**：`AccountService.
+  FreezeMargin`在四级判断的最后一级（`available+credit+未实现盈亏`覆盖但`available`单独
+  不够）里调用`FreezeForceIntoNegative`时，用的是这次调用早前读到的、可能已经过期的
+  `freshAvailable`/`freshCredit`；如果在这两次读取之间有另一笔并发的资金变动，实际执行
+  的扣减会基于一个不再准确的基准。现在改成在真正调用前紧邻着重新读一次最新值，且
+  `FreezeForceIntoNegative`自己也改成`UPDATE ... WHERE available=? AND credit=?`的CAS
+  写法，读到的快照跟实际生效的这次扣减不一致时返回`false`、上层按余额不足处理，而不是
+  静默用一个过期基准执行扣减。
+- **条件单触发后落库委托失败会让冻结的保证金永久卡住**：`ConditionalOrderService.
+  trigger`原本的顺序是`MarkTriggered`（原子标记，跟撤单竞争）成功后直接`orders.
+  Insert`，如果`Insert`失败就直接返回——条件单已经停在`triggered`状态（`ScanOnce`
+  只扫`pending`的，永远不会再发现它），触发前冻结的`FrozenMargin`/`FrozenCredit`
+  也没有任何路径能退回来。现在补了一个失败补偿：`Insert`失败时调用新增的
+  `MarkCanceledFromTriggered`把条件单状态改回`canceled`（专门只匹配`status='triggered'`，
+  跟撤单用的`MarkCanceled`区分开，见该方法注释），并对`ActionOpen`且确实冻结过保证金
+  的情况调用`EngineService.UnfreezeMargin`退还，等效于"这次触发没有真的发生"，用户
+  损失的只是这一次止盈止损/条件开仓的机会，不是钱。
+- **强平超时兜底成交，部分成交也标记成`Filled`**：`settleTimeoutFallback`原来不管实际
+  成交量是不是覆盖了委托剩余量，一律把状态写成`Filled`——如果这笔兜底成交量小于委托
+  剩余量（部分成交），错误的终态会导致`RecoverOrderBook`未来进程重启时，`FindActiveLimitOrders`
+  （只查`open`/`partially_filled`）永远查不到这笔委托、复活不了剩余部分，同时状态又
+  显示"已完全成交"，跟实际账目对不上。现在按`closeVolume`是否覆盖`o.RemainingAmount()`
+  分别写`Filled`/`Canceled`，跟`SubmitOrder`里MARKET单缺对手盘的终态判断逻辑保持一致。
+- **`submitLiquidationClip`查询合约配置失败时静默放过`MaxVolume`限制**：分批强平每一批
+  开始前都要重新查一次`coins.FindBySymbol`拿当前的`MaxVolume`分批上限，早期实现查询出错
+  或者查到`nil`时既不重试也不中止，直接让这一批按整个剩余仓位量提交——DB不稳定的时候
+  恰好是最不该放过安全限制的时候，属于"失败开放"。现在改成失败关闭：出错时清除
+  `liquidating`标记、推送账户快照、直接返回，交给下一轮风控扫描重新发起，不带着一个
+  没有校验过的批次量继续往下走。
+- **`CloseRound`结算credit时用的是清零前单独预读的旧值，跟并发`GrantCredit`竞态**：
+  `AccountService.CloseRound`原本先`FindFreshCredit`单独读一次当前credit、再调用
+  `CloseRoundIfRound`（`UPDATE ... credit=0 ... WHERE round=?`）真正清零，这两步之间
+  如果有并发的`GrantCredit`把credit改大，`UPDATE`清零的是并发写入后的真实值，但
+  `TxRoundClose`审计流水记的金额用的是清零前更早读到的、偏小的旧值，导致审计记录跟
+  实际清零的金额永久对不上（不影响账户实际余额，`UPDATE`本身是原子且正确的，只影响
+  审计流水这一个数字）。修复方式沿用`FreezeSpillToCredit`已经用过的MySQL会话变量
+  捕获写法：`CloseRoundIfRound`在同一条`UPDATE`语句里用`credit = (@perpgo_old_credit
+  := credit) - credit`原子地把清零前的值存进会话变量，`RowsAffected()>0`之后再
+  `SELECT @perpgo_old_credit`读出来当作返回值，全程用同一条`sql.Conn`（会话变量是
+  连接级别状态，跟连接池的其它连接无关，必须保证`UPDATE`和后续`SELECT`落在同一条
+  物理连接上）。`CloseRound`不再单独预读，直接用`CloseRoundIfRound`原子返回的清零前
+  金额记审计流水。用真实请求验证过：`GrantCredit`发放50、`CloseRound`结束本轮后
+  `credit`正确归零、`member_transactions`审计流水显示`credit_grant +50`紧跟着
+  `round_close -50`，金额精确对应。

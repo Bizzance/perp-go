@@ -5,7 +5,6 @@ import (
 	"errors"
 	"fmt"
 	"strconv"
-	"strings"
 	"time"
 
 	"github.com/redis/go-redis/v9"
@@ -56,34 +55,53 @@ func (c *Cache) GetIndexPrice(ctx context.Context, symbol string) (string, error
 	return v, err
 }
 
-func fundingAccumKey(symbol string) string { return "perpgo:funding:accum:" + symbol }
+func fundingAccumSumKey(symbol string) string   { return "perpgo:funding:accum:sum:" + symbol }
+func fundingAccumCountKey(symbol string) string { return "perpgo:funding:accum:count:" + symbol }
 
-// 把这一次采样的溢价率累加进这个symbol当前资金费率周期的累加器——
-// sum/count压缩存成一个"sum|count"字符串，省一次round trip。只有FundingService.SampleOnce
-// 单个goroutine会写这个key，不存在并发覆盖问题，不需要用Lua脚本做原子读改写
+// accumulateFundingSampleScript 原子地把sum和count一起累加——不能拆成两条独立的Redis命令
+// 分别执行(哪怕各自都是原子的INCRBYFLOAT/INCR)，那样两条命令之间有一个窗口，某个读取方
+// (FundingService结算读累加器算TWAP均值)可能读到"sum已经加了这次采样、count还没加"的
+// 中间状态，多算出一次样本不存在的贡献。Lua脚本在Redis里整体原子执行，两条命令要么都生效
+// 要么都还没生效，读取方不会看到半更新的中间态
+var accumulateFundingSampleScript = redis.NewScript(`
+redis.call("INCRBYFLOAT", KEYS[1], ARGV[1])
+redis.call("INCR", KEYS[2])
+return 1
+`)
+
+// AccumulateFundingSample 把这一次采样的溢价率累加进这个symbol当前资金费率周期的累加器。
+// sum/count分别存成两个独立key，用Redis原生的INCRBYFLOAT/INCR(包在一个Lua脚本里原子执行，
+// 见上面)做累加——不是"GET当前值→在Go里算新值→SET回去"这种读改写。engine分片部署下
+// (docs/engine-sharding.md)多个实例各自独立跑自己的采样ticker，GET-改-SET之间的窗口会
+// 让后写的实例把先写的实例那次采样静默覆盖掉，不是"重复采样只是提高密度、不影响均值"那么
+// 无害——那个结论只在累加操作本身是原子的前提下才成立，早期实现这里的注释就是被这个
+// 想当然的假设误导的，实际上会丢样本。premium先转成float64存进Redis的浮点累加器——
+// 溢价率是统计意义上的近似量(结算时还要clamp到FundingRateCap)，不是像账户余额那样必须
+// 保持decimal库的精确精度，float64/long double的精度对这个量级的值绰绰有余
 func (c *Cache) AccumulateFundingSample(ctx context.Context, symbol string, premium decimal.Decimal) error {
-	sum, count, err := c.GetFundingAccumulator(ctx, symbol)
-	if err != nil {
-		return err
-	}
-	newValue := sum.Add(premium).String() + "|" + strconv.FormatInt(count+1, 10)
-	return c.rdb.Set(ctx, fundingAccumKey(symbol), newValue, 0).Err()
+	f, _ := premium.Float64()
+	return accumulateFundingSampleScript.Run(ctx, c.rdb,
+		[]string{fundingAccumSumKey(symbol), fundingAccumCountKey(symbol)}, f).Err()
 }
 
-// 返回这个symbol当前周期已经累计的溢价率之和与采样次数，从没采样过返回(0, 0)——FundingService结算时用sum/count算TWAP均值
+// GetFundingAccumulator 返回这个symbol当前周期已经累计的溢价率之和与采样次数，从没采样过
+// 返回(0, 0)——FundingService结算时用sum/count算TWAP均值
 func (c *Cache) GetFundingAccumulator(ctx context.Context, symbol string) (decimal.Decimal, int64, error) {
-	v, err := c.rdb.Get(ctx, fundingAccumKey(symbol)).Result()
+	sumStr, err := c.rdb.Get(ctx, fundingAccumSumKey(symbol)).Result()
 	if errors.Is(err, redis.Nil) {
 		return decimal.Zero, 0, nil
 	}
 	if err != nil {
 		return decimal.Zero, 0, err
 	}
-	sumStr, countStr, ok := strings.Cut(v, "|")
-	if !ok {
-		return decimal.Zero, 0, nil
-	}
 	sum, err := decimal.NewFromString(sumStr)
+	if err != nil {
+		return decimal.Zero, 0, err
+	}
+	countStr, err := c.rdb.Get(ctx, fundingAccumCountKey(symbol)).Result()
+	if errors.Is(err, redis.Nil) {
+		return sum, 0, nil
+	}
 	if err != nil {
 		return decimal.Zero, 0, err
 	}
@@ -96,7 +114,7 @@ func (c *Cache) GetFundingAccumulator(ctx context.Context, symbol string) (decim
 
 // 一个周期结算完之后清空累加器，开始下一周期的采样
 func (c *Cache) ResetFundingAccumulator(ctx context.Context, symbol string) error {
-	return c.rdb.Del(ctx, fundingAccumKey(symbol)).Err()
+	return c.rdb.Del(ctx, fundingAccumSumKey(symbol), fundingAccumCountKey(symbol)).Err()
 }
 
 // Publish/Subscribe：contract-engine往外发布实时事件(深度/成交/K线/标记价格/账户快照)，

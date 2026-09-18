@@ -238,6 +238,13 @@ func (e *EngineService) PublishDepth(ctx context.Context, symbol string) {
 	e.push.PublishDepth(ctx, symbol, book.Depth(matching.DefaultDepthLevels))
 }
 
+// UnfreezeMargin 暴露给ConditionalOrderService用——条件单触发后落地成真正委托失败时
+// (见conditional_order.go的trigger)要把触发前冻结的保证金退回去，跟cancelConditionalOrder
+// 释放冻结保证金是同一个操作，只是调用方所在的service不直接持有AccountService
+func (e *EngineService) UnfreezeMargin(ctx context.Context, uid uint64, availableAmount, creditAmount decimal.Decimal) error {
+	return e.accounts.UnfreezeMargin(ctx, uid, availableAmount, creditAmount)
+}
+
 // handleSelfCanceled 处理自成交保护(STP)摘掉的maker：book.Match内部已经把它们从订单簿里
 // 摘掉了，这里只需要按正常撤单的收尾逻辑处理DB状态+退保证金。用RestingOrder.Remaining
 // (book.Match返回的、摘除时刻内存里权威的剩余量)，不用再去DB反查——两者理论上一致，但
@@ -316,11 +323,18 @@ func (e *EngineService) settleOneFill(ctx context.Context, incoming *model.Order
 		if order.TradedAmount.Add(f.Volume).GreaterThanOrEqual(order.Amount) {
 			newStatus = model.OrderStatusFilled
 		}
+		// maker/taker两边分开处理，一方结算失败只记日志、跳过它继续处理另一方，不能直接
+		// return——这笔成交在Book.Match阶段已经在内存里生效、trade记录也已经落库了，如果
+		// 这里maker结算失败就直接return，taker那一方会连尝试的机会都没有，变成"记了一笔
+		// 交易但只有一边真的结算了"的经济不对称状态，比"两边都失败"更难排查。跟
+		// funding.go的settlePositions"单个仓位失败只记日志、不中断其它仓位"是同一个取舍
 		if err := e.orders.ApplyFill(ctx, side.orderID, f.Volume, f.Price, newStatus, now); err != nil {
-			return err
+			log.Printf("[ERROR] apply fill failed, orderId=%d: %v", side.orderID, err)
+			continue
 		}
 		if _, err := e.settlement.SettleFill(ctx, order, f.Volume, f.Price, side.isMaker, now); err != nil {
-			return err
+			log.Printf("[ERROR] settle fill failed, orderId=%d: %v", side.orderID, err)
+			continue
 		}
 		if side.liquidation {
 			if err := e.HandleLiquidationSettleAftermath(ctx, order.Symbol, side.uid, side.side); err != nil {

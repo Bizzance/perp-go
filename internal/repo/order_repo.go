@@ -81,20 +81,35 @@ func (r *OrderRepo) FindHistoryByUID(ctx context.Context, uid uint64, limit int)
 	return orders, err
 }
 
-// 一笔成交对这个委托的影响：累加tradedAmount、重算加权平均成交价、按剩余量更新状态
+// 一笔成交对这个委托的影响：累加tradedAmount、重算加权平均成交价、按剩余量更新状态。
+// 用乐观并发重试循环，跟PositionRepo.ApplyCloseFill同样的理由——正常撮合下同一个orderId
+// 不会被两笔fill并发处理(Book.mu保证同一时刻只有一方在改这个订单在簿子里的状态)，但强平
+// 超时兜底(settleTimeoutFallback)是从簿子里摘掉之后再单独调ApplyFill，用WHERE条件核对
+// 读到的旧值没被改过，比无条件覆盖更稳妥，不依赖"这个场景理论上不会并发"这种假设
 func (r *OrderRepo) ApplyFill(ctx context.Context, orderID uint64, dealVolume, dealPrice decimal.Decimal, newStatus model.OrderStatus, updateTime int64) error {
-	o, err := r.FindByOrderID(ctx, orderID)
-	if err != nil || o == nil {
-		return err
+	for {
+		o, err := r.FindByOrderID(ctx, orderID)
+		if err != nil || o == nil {
+			return err
+		}
+		newTraded := o.TradedAmount.Add(dealVolume)
+		newAvgDeal := o.AvgDealPrice
+		if newTraded.Sign() > 0 {
+			newAvgDeal = o.AvgDealPrice.Mul(o.TradedAmount).Add(dealPrice.Mul(dealVolume)).Div(newTraded)
+		}
+		res, err := r.db.ExecContext(ctx,
+			`UPDATE orders SET traded_amount = ?, avg_deal_price = ?, status = ?, update_time = ?
+			 WHERE order_id = ? AND traded_amount = ? AND avg_deal_price = ?`,
+			newTraded, newAvgDeal, newStatus, updateTime, orderID, o.TradedAmount, o.AvgDealPrice)
+		ok, err := affected(res, err)
+		if err != nil {
+			return err
+		}
+		if ok {
+			return nil
+		}
+		// 命中了并发写冲突，重新读最新状态重试
 	}
-	newTraded := o.TradedAmount.Add(dealVolume)
-	newAvgDeal := o.AvgDealPrice
-	if newTraded.Sign() > 0 {
-		newAvgDeal = o.AvgDealPrice.Mul(o.TradedAmount).Add(dealPrice.Mul(dealVolume)).Div(newTraded)
-	}
-	_, err = r.db.ExecContext(ctx, `UPDATE orders SET traded_amount = ?, avg_deal_price = ?, status = ?, update_time = ? WHERE order_id = ?`,
-		newTraded, newAvgDeal, newStatus, updateTime, orderID)
-	return err
 }
 
 func (r *OrderRepo) MarkCanceled(ctx context.Context, orderID uint64, updateTime int64) (bool, error) {

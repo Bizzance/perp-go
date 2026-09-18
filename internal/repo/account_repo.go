@@ -116,11 +116,22 @@ func (r *AccountRepo) FreezeSpillToCredit(ctx context.Context, id uint64, amount
 // 未实现盈亏验证过权益足够，这里只是把"允许借用浮盈"这个决定落地，available可能因此变负，
 // 全仓模式下这是合法状态(强平穿仓/保险基金垫付走的就是这套)。不动credit：浮盈是不确定、
 // 随时可能反转的钱，不应该跟"已经到账的保险赔付"混在一起算作已用掉
-func (r *AccountRepo) FreezeForceIntoNegative(ctx context.Context, id uint64, amount decimal.Decimal) error {
-	_, err := r.db.ExecContext(ctx,
-		`UPDATE accounts SET available = available - ?, frozen_margin = frozen_margin + ? WHERE id = ?`,
-		amount, amount, id)
-	return err
+// FreezeForceIntoNegative 强制冻结、允许available变负——币安式"持仓浮盈也能当买力开新仓"
+// 这条路径本身故意不设available/credit够不够的门槛(允许变负是设计意图，见
+// service.AccountService.FreezeMargin)，但WHERE条件核对expectedAvailable/expectedCredit
+// 没有被改过：调用方(FreezeMargin)判断"值不值得走这条路径"用的是available+credit+浮盈
+// 的合计，其中浮盈来自跨symbol聚合持仓表+标记价格、没法用一条SQL条件表达，只能在Go层
+// 算好门槛判断之后再调这个方法——这中间有一个没法完全消除的窗口，但至少可以保证"调用方
+// 判断时读到的available/credit"和"这条UPDATE真正要改的available/credit"是同一份，没有
+// 在窗口期被另一笔并发操作(比如同一个uid在另一个symbol+side上的FreezeMargin，
+// OrderLockKey只按uid+symbol+side加锁，管不到跨symbol的并发)偷偷改过——改过了就返回
+// ok=false，调用方按"这次没能安全地冻结"处理(不能假装冻结成功了)
+func (r *AccountRepo) FreezeForceIntoNegative(ctx context.Context, id uint64, amount, expectedAvailable, expectedCredit decimal.Decimal) (bool, error) {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE accounts SET available = available - ?, frozen_margin = frozen_margin + ?
+		 WHERE id = ? AND available = ? AND credit = ?`,
+		amount, amount, id, expectedAvailable, expectedCredit)
+	return affected(res, err)
 }
 
 // UnfreezeMargin 撤单/未成交部分释放冻结的保证金——availableAmount/creditAmount分别对应
@@ -225,10 +236,43 @@ func (r *AccountRepo) SetInsured(ctx context.Context, id uint64, insured bool) e
 // 独立观察到"这个uid的结束本轮所有symbol都处理完了"、都尝试做这最后一步，这个条件保证
 // 只有第一个真正推进round的调用生效，返回false表示没有满足条件的行(round已经被别的调用
 // 推进过)，是正常情况，不是错误，见docs/engine-sharding.md
-func (r *AccountRepo) CloseRoundIfRound(ctx context.Context, id, round uint64) (bool, error) {
-	res, err := r.db.ExecContext(ctx,
-		`UPDATE accounts SET credit = 0, is_insured = 0, round = round + 1 WHERE id = ? AND round = ?`, id, round)
-	return affected(res, err)
+//
+// 清零前的credit值通过MySQL会话变量在同一条UPDATE里原子捕获后返回(用法跟
+// FreezeSpillToCredit一致，见下面注释)，不能先单独SELECT credit再执行这条UPDATE——
+// 两次读写之间如果有并发的GrantCredit把credit改大，UPDATE清零的是并发写入后的真实值，
+// 但如果审计流水金额用的是UPDATE之前读到的旧值，就会跟实际清零的金额对不上
+func (r *AccountRepo) CloseRoundIfRound(ctx context.Context, id, round uint64) (ok bool, clearedCredit decimal.Decimal, err error) {
+	// 会话变量是连接级别的状态，必须让UPDATE和后面的SELECT @xxx用同一条物理连接，
+	// 否则连接池可能把SELECT分派到另一条从来没执行过这条UPDATE的连接上，读到的是
+	// 陌生会话里的旧值/NULL，而不是本次UPDATE刚写入的值
+	conn, err := r.db.Conn(ctx)
+	if err != nil {
+		return false, decimal.Zero, err
+	}
+	defer conn.Close()
+
+	res, err := conn.ExecContext(ctx,
+		`UPDATE accounts SET
+			credit = (@perpgo_old_credit := credit) - credit,
+			is_insured = 0,
+			round = round + 1
+		 WHERE id = ? AND round = ?`,
+		id, round)
+	if err != nil {
+		return false, decimal.Zero, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return false, decimal.Zero, err
+	}
+	if n == 0 {
+		// round已经被别的并发调用推进过，会话变量没有被这条UPDATE写过，不能读
+		return false, decimal.Zero, nil
+	}
+	if err := conn.QueryRowContext(ctx, `SELECT @perpgo_old_credit`).Scan(&clearedCredit); err != nil {
+		return false, decimal.Zero, err
+	}
+	return true, clearedCredit, nil
 }
 
 func affected(res sql.Result, err error) (bool, error) {

@@ -110,6 +110,18 @@ func (s *ConditionalOrderService) trigger(ctx context.Context, co model.Conditio
 		co.OrderID, co.UID, co.Symbol, co.Side, co.Action, co.TriggerPrice, mark)
 	if err := s.orders.Insert(ctx, o); err != nil {
 		log.Printf("[ERROR] 条件单触发后落库委托失败, orderId=%d: %v", co.OrderID, err)
+		// MarkTriggered已经成功了，但落地成真正委托这一步失败——不能就这样返回：条件单
+		// 会永久停在triggered状态(ScanOnce只扫pending的，永远不会再发现它)，触发前冻结的
+		// FrozenMargin/FrozenCredit也永远要不回来，用户的钱凭空消失。这里补一个兜底：
+		// 把这个条件单标记成canceled、退回冻结的保证金，等效于"这次触发没有真的发生"，
+		// 用户损失的只是这一次止盈止损/条件开仓的机会，不是钱
+		if ok, cancelErr := s.conditionalOrders.MarkCanceledFromTriggered(ctx, co.OrderID, now); cancelErr != nil {
+			log.Printf("[ERROR] 条件单触发失败后回滚状态也失败, orderId=%d: %v", co.OrderID, cancelErr)
+		} else if ok && co.Action == model.ActionOpen && (co.FrozenMargin.Sign() > 0 || co.FrozenCredit.Sign() > 0) {
+			if err := s.engine.UnfreezeMargin(ctx, co.UID, co.FrozenMargin, co.FrozenCredit); err != nil {
+				log.Printf("[ERROR] 条件单触发失败后退还冻结保证金失败, orderId=%d uid=%d: %v", co.OrderID, co.UID, err)
+			}
+		}
 		return
 	}
 	if err := s.engine.SubmitOrder(ctx, o, time.Now().UnixNano()); err != nil {
