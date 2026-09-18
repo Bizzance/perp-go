@@ -264,7 +264,7 @@ func (s *LiquidationService) settleTimeoutFallback(ctx context.Context, orderID 
 		log.Printf("[ERROR] settle fallback fill failed: %v", err)
 		return
 	}
-	if err := s.engine.HandleLiquidationSettleAftermath(ctx, o.Symbol, o.UID); err != nil {
+	if err := s.engine.HandleLiquidationSettleAftermath(ctx, o.Symbol, o.UID, o.Side); err != nil {
 		log.Printf("[ERROR] liquidation aftermath (fallback) failed: %v", err)
 	}
 	// 这条路径直接调settlement.SettleFill，不经过settleOneFill，所以snapshot推送要在这里

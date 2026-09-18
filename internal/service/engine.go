@@ -323,7 +323,7 @@ func (e *EngineService) settleOneFill(ctx context.Context, incoming *model.Order
 			return err
 		}
 		if side.liquidation {
-			if err := e.HandleLiquidationSettleAftermath(ctx, order.Symbol, side.uid); err != nil {
+			if err := e.HandleLiquidationSettleAftermath(ctx, order.Symbol, side.uid, side.side); err != nil {
 				log.Printf("[ERROR] liquidation aftermath failed, uid=%d: %v", side.uid, err)
 			}
 		}
@@ -360,11 +360,16 @@ func sellUID(f matching.Fill) uint64 {
 }
 
 // HandleLiquidationSettleAftermath 强平结算之后调用(挂单排队正常成交见settleOneFill、超时
-// 兜底直接结算见liquidation.go的settleTimeoutFallback，两条路径都会走到这里)。判断依据是
-// available+credit的合计，不是available单独判断——credit也是账户权益的一部分(见
-// checkAndLiquidate的equity计算)，穿仓/缓冲的定义要跟触发强平时用的权益口径一致：
-//  1. 合计为负(穿仓)：用户自己的钱和信用额度都耗尽了还倒欠钱，保险基金垫付缺口，基金不够
-//     就让基金余额变负+记日志告警——MVP不做ADL，这是明确排除项，见plan文件
+// 兜底直接结算见liquidation.go的settleTimeoutFallback，两条路径都会走到这里)。side是刚
+// 被强平的这个仓位的方向，穿仓分支触发ADL时要用来定位"该向哪个方向的持仓者强制减仓"（跟
+// 被强平方向相反——比如多头被强平是因为价格下跌亏钱，跟这次价格下跌方向相反、真正因为
+// 这次下跌赚钱的是空头，ADL该找空头里最赚钱的仓位，不是随便找）。判断依据是available+
+// credit的合计，不是available单独判断——credit也是账户权益的一部分(见checkAndLiquidate
+// 的equity计算)，穿仓/缓冲的定义要跟触发强平时用的权益口径一致：
+//  1. 合计为负(穿仓)：用户自己的钱和信用额度都耗尽了还倒欠钱。保险基金余额不够覆盖这笔
+//     缺口时，先用ADL(runADL，见adl.go)强制减仓对手方最赚钱的仓位补一部分，补不满剩下的
+//     仍然由基金硬扛(基金余额可能因此变得更负)，这是明确接受的取舍，不是ADL的失败——极端
+//     行情下没有足够的反向盈利仓位可以减，基金兜底是最后一道防线
 //  2. 这个uid已经没有剩余仓位了(这一轮强平彻底结束)、合计为正：这部分是维持保证金要求留下
 //     的缓冲，不退给用户——真实交易所是按破产价结算、多出来的差价当清算费进保险基金，这里
 //     不改结算价格/撮合逻辑，改成结算完直接把这部分正数余额扫进保险基金、账户清零，经济
@@ -373,7 +378,7 @@ func sellUID(f matching.Fill) uint64 {
 // 两种情况下available和credit最终都会被清零——不管available/credit各自是正是负，"结清"
 // 的终态就是两个字段都变成0，保险基金拿走或垫付两者的合计净值，这里不需要区分"先清哪个"：
 // 清算的是两个字段的总和，不是循环着一点点从某个字段里扣，最终状态跟顺序无关
-func (e *EngineService) HandleLiquidationSettleAftermath(ctx context.Context, symbol string, uid uint64) error {
+func (e *EngineService) HandleLiquidationSettleAftermath(ctx context.Context, symbol string, uid uint64, side model.Side) error {
 	available, err := e.accounts.FindFreshAvailable(ctx, uid)
 	if err != nil {
 		return err
@@ -385,6 +390,15 @@ func (e *EngineService) HandleLiquidationSettleAftermath(ctx context.Context, sy
 	combined := available.Add(credit)
 	if combined.Sign() < 0 {
 		shortfall := combined.Neg()
+		fundBalance, err := e.fund.FreshBalance(ctx)
+		if err != nil {
+			return err
+		}
+		if usable := decimal.Max(fundBalance, decimal.Zero); shortfall.GreaterThan(usable) {
+			if raised := e.runADL(ctx, symbol, side.Opposite(), shortfall.Sub(usable)); raised.Sign() > 0 {
+				log.Printf("[INFO] ADL补充保险基金, symbol=%s, 触发uid=%d, 筹到=%s", symbol, uid, raised)
+			}
+		}
 		if err := e.fund.Adjust(ctx, symbol, uid, 0, shortfall.Neg(), "强平穿仓垫付"); err != nil {
 			return err
 		}
@@ -535,7 +549,7 @@ func (e *EngineService) closeRoundForSymbol(ctx context.Context, uid uint64, sym
 			allDone = false
 			continue
 		}
-		if err := e.forceCloseOnePosition(ctx, p, mark); err != nil {
+		if _, err := e.forceCloseOnePosition(ctx, p, p.Volume, mark); err != nil {
 			log.Printf("[ERROR] 结束本轮强制平仓失败, uid=%d, symbol=%s: %v", uid, p.Symbol, err)
 			allDone = false
 		}
@@ -606,7 +620,9 @@ func (e *EngineService) tryFinalizeCloseRound(ctx context.Context, uid, round ui
 
 // forceCloseOnePosition 生成一笔"已成交"的市价平仓单落库(留痕、复用SettleFill结算逻辑)，
 // 立即按标记价全部结算掉——不进撮合引擎的订单簿，不用等对手盘
-func (e *EngineService) forceCloseOnePosition(ctx context.Context, p model.Position, mark decimal.Decimal) error {
+// forceCloseOnePosition closeVolume是要强制平掉的量，调用方保证不超过p.Volume(CloseRound
+// 传p.Volume整笔平掉；ADL(adl.go)按需要筹到的金额反推一个更小的量，只平够用的部分)
+func (e *EngineService) forceCloseOnePosition(ctx context.Context, p model.Position, closeVolume, mark decimal.Decimal) (FillResult, error) {
 	now := NowMillis()
 	o := &model.Order{
 		OrderID:      NextID(),
@@ -616,8 +632,8 @@ func (e *EngineService) forceCloseOnePosition(ctx context.Context, p model.Posit
 		Action:       model.ActionClose,
 		Type:         model.OrderTypeMarket,
 		Price:        mark,
-		Amount:       p.Volume,
-		TradedAmount: p.Volume,
+		Amount:       closeVolume,
+		TradedAmount: closeVolume,
 		AvgDealPrice: mark,
 		Leverage:     p.Leverage,
 		ReduceOnly:   true,
@@ -626,10 +642,9 @@ func (e *EngineService) forceCloseOnePosition(ctx context.Context, p model.Posit
 		UpdateTime:   now,
 	}
 	if err := e.orders.Insert(ctx, o); err != nil {
-		return err
+		return FillResult{}, err
 	}
-	_, err := e.settlement.SettleFill(ctx, o, p.Volume, mark, false, now)
-	return err
+	return e.settlement.SettleFill(ctx, o, closeVolume, mark, false, now)
 }
 
 // CancelOrder 从订单簿摘掉委托、退回剩余冻结保证金、落库改CANCELED

@@ -108,6 +108,12 @@ func (s *PositionService) Find(ctx context.Context, uid uint64, symbol string, s
 	return s.positions.Find(ctx, uid, symbol, side)
 }
 
+// FindOpenBySymbol 这个symbol下全部还有仓位的记录，不分uid——ADL(见adl.go)挑选反向最
+// 赚钱的仓位强制减仓时用来找候选池
+func (s *PositionService) FindOpenBySymbol(ctx context.Context, symbol string) ([]model.Position, error) {
+	return s.positions.FindOpenBySymbol(ctx, symbol)
+}
+
 // UpdateLeverage 见repo.PositionRepo.UpdateLeverage——独立杠杆设置接口(docs/leverage.md)
 // 修改完保证金冻结之后，用这个把仓位自己的记账字段(保证金/杠杆)同步成新值
 func (s *PositionService) UpdateLeverage(ctx context.Context, id uint64, newMargin, newCreditMargin decimal.Decimal, newLeverage uint32, expectedVolume decimal.Decimal, updateTime int64) (bool, error) {
