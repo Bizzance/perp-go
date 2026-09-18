@@ -2,6 +2,7 @@ package api
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"strconv"
 	"time"
@@ -30,6 +31,7 @@ type Server struct {
 	funding           *service.FundingService
 	producer          *mq.Producer
 	hub               *ws.Hub
+	lock              *service.LockService
 }
 
 func NewServer(
@@ -44,6 +46,7 @@ func NewServer(
 	funding *service.FundingService,
 	producer *mq.Producer,
 	hub *ws.Hub,
+	lock *service.LockService,
 ) *Server {
 	return &Server{
 		accounts:          accounts,
@@ -57,6 +60,7 @@ func NewServer(
 		funding:           funding,
 		producer:          producer,
 		hub:               hub,
+		lock:              lock,
 	}
 }
 
@@ -87,6 +91,31 @@ func (s *Server) Router() *gin.Engine {
 
 func fail(c *gin.Context, code int, msg string) {
 	c.JSON(http.StatusOK, gin.H{"code": code, "message": msg})
+}
+
+// httpError携带这笔请求最终该返回给客户端的code/message，用在LockService.WithLock的闭包
+// 内部——闭包内不能直接调fail()+return，那样只会终止闭包本身、外层handler会继续往下执行
+// (插入订单、发Kafka事件)，等于绕过了刚刚在闭包里失败的校验，必须靠error传出闭包边界
+type httpError struct {
+	code int
+	msg  string
+}
+
+func (e *httpError) Error() string { return e.msg }
+
+// respondLockErr 把WithLock返回的error翻译成对应的HTTP失败响应：httpError按它自带的
+// code/message处理，ErrLockBusy按429处理，其它一律当成500——三个下单相关handler共用
+func respondLockErr(c *gin.Context, err error) {
+	var he *httpError
+	if errors.As(err, &he) {
+		fail(c, he.code, he.msg)
+		return
+	}
+	if errors.Is(err, service.ErrLockBusy) {
+		fail(c, 429, err.Error())
+		return
+	}
+	fail(c, 500, err.Error())
 }
 
 func ok(c *gin.Context, data any) {
@@ -468,36 +497,39 @@ func (s *Server) addOrder(c *gin.Context) {
 		// 开仓单，每一笔单独提交时都看不到彼此，会各自按"当前还没有仓位/挂单垫底"通过校验，等
 		// 行情走到这些价位一起成交，合并起来的真实仓位可能远超单笔校验时的档位——顺序提交多笔
 		// 远离盘口的限价单就能稳定触发，所以这里除了已成交仓位，还要把这个方向上全部还在排队的
-		// OPEN单也算进去。这段"读现有仓位/挂单→算档位→冻结保证金"整体不是原子的，并发对同一
-		// uid+symbol+side提交多笔请求，每一笔读到的都是对方还没提交时的旧状态，理论上仍能绕开——
-		// 这套系统一直没有为这类极端并发加锁(FreezeMargin等其它地方同样如此)，属于已知、接受的
-		// MVP简化，这里只堵顺序提交这条更容易触发、不需要精确时机就能稳定复现的路径
-		existingNotional, err := s.existingOpenNotional(c.Request.Context(), uid, symbol, side, hasMark, mark)
-		if err != nil {
-			fail(c, 500, err.Error())
+		// OPEN单也算进去。"读现有仓位/挂单→算档位→冻结保证金"这段临界区不是天然原子的，靠
+		// s.lock.WithLock按uid+symbol+side序列化并发请求来保证原子性，详见
+		// docs/risk-limit-tiers.md"并发下单的原子性"一节——不是进程内mutex，因为
+		// contract-api是无状态服务、允许多实例水平扩展(docs/architecture.md)，进程内锁
+		// 只能防住单实例内部的竞态
+		lockErr := s.lock.WithLock(c.Request.Context(), service.OrderLockKey(uid, symbol, side), func() error {
+			existingNotional, err := s.existingOpenNotional(c.Request.Context(), uid, symbol, side, hasMark, mark)
+			if err != nil {
+				return err
+			}
+			// 这笔新委托自己的名义价值用orderNotionalPrice(上面已经算好，SHORT+OPEN时是
+			// max(price,markPrice))，跟冻结保证金用的是同一个基准，两处口径必须一致
+			tier, err := s.positions.TierFor(c.Request.Context(), symbol, existingNotional.Add(amount.Mul(orderNotionalPrice)))
+			if err != nil {
+				return err
+			}
+			if tier == nil {
+				return &httpError{400, "该合约未配置保证金分档，暂不允许开仓"}
+			}
+			if leverage.GreaterThan(decimal.NewFromInt(int64(tier.MaxLeverage))) {
+				return &httpError{400, "杠杆倍数超出当前仓位名义价值对应档位允许的范围"}
+			}
+			result, err := s.accounts.FreezeMargin(c.Request.Context(), uid, requiredMargin)
+			if err != nil {
+				return err
+			}
+			freezeResult = result
+			return nil
+		})
+		if lockErr != nil {
+			respondLockErr(c, lockErr)
 			return
 		}
-		// 这笔新委托自己的名义价值用orderNotionalPrice(上面已经算好，SHORT+OPEN时是
-		// max(price,markPrice))，跟冻结保证金用的是同一个基准，两处口径必须一致
-		tier, err := s.positions.TierFor(c.Request.Context(), symbol, existingNotional.Add(amount.Mul(orderNotionalPrice)))
-		if err != nil {
-			fail(c, 500, err.Error())
-			return
-		}
-		if tier == nil {
-			fail(c, 400, "该合约未配置保证金分档，暂不允许开仓")
-			return
-		}
-		if leverage.GreaterThan(decimal.NewFromInt(int64(tier.MaxLeverage))) {
-			fail(c, 400, "杠杆倍数超出当前仓位名义价值对应档位允许的范围")
-			return
-		}
-		result, err := s.accounts.FreezeMargin(c.Request.Context(), uid, requiredMargin)
-		if err != nil {
-			fail(c, 500, err.Error())
-			return
-		}
-		freezeResult = result
 	}
 
 	orderID := service.NextID()
@@ -748,30 +780,34 @@ func (s *Server) addConditionalOrder(c *gin.Context) {
 	requiredMargin := amount.Mul(orderNotionalPrice).Div(leverage)
 	var freezeResult service.FreezeResult
 	if action == model.ActionOpen {
-		existingNotional, err := s.existingOpenNotional(c.Request.Context(), uid, symbol, side, hasMark, mark)
-		if err != nil {
-			fail(c, 500, err.Error())
+		// 跟addOrder同一处临界区、同一把锁(按uid+symbol+side)，理由见addOrder里的详细注释：
+		// 条件单触发前的"占坑"校验一样要防并发绕开保证金分档限制
+		lockErr := s.lock.WithLock(c.Request.Context(), service.OrderLockKey(uid, symbol, side), func() error {
+			existingNotional, err := s.existingOpenNotional(c.Request.Context(), uid, symbol, side, hasMark, mark)
+			if err != nil {
+				return err
+			}
+			tier, err := s.positions.TierFor(c.Request.Context(), symbol, existingNotional.Add(amount.Mul(orderNotionalPrice)))
+			if err != nil {
+				return err
+			}
+			if tier == nil {
+				return &httpError{400, "该合约未配置保证金分档，暂不允许开仓"}
+			}
+			if leverage.GreaterThan(decimal.NewFromInt(int64(tier.MaxLeverage))) {
+				return &httpError{400, "杠杆倍数超出当前仓位名义价值对应档位允许的范围"}
+			}
+			result, err := s.accounts.FreezeMargin(c.Request.Context(), uid, requiredMargin)
+			if err != nil {
+				return err
+			}
+			freezeResult = result
+			return nil
+		})
+		if lockErr != nil {
+			respondLockErr(c, lockErr)
 			return
 		}
-		tier, err := s.positions.TierFor(c.Request.Context(), symbol, existingNotional.Add(amount.Mul(orderNotionalPrice)))
-		if err != nil {
-			fail(c, 500, err.Error())
-			return
-		}
-		if tier == nil {
-			fail(c, 400, "该合约未配置保证金分档，暂不允许开仓")
-			return
-		}
-		if leverage.GreaterThan(decimal.NewFromInt(int64(tier.MaxLeverage))) {
-			fail(c, 400, "杠杆倍数超出当前仓位名义价值对应档位允许的范围")
-			return
-		}
-		result, err := s.accounts.FreezeMargin(c.Request.Context(), uid, requiredMargin)
-		if err != nil {
-			fail(c, 500, err.Error())
-			return
-		}
-		freezeResult = result
 	}
 
 	orderID := service.NextID()

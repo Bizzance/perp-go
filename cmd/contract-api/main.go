@@ -48,10 +48,11 @@ func main() {
 	positionSvc := service.NewPositionService(positionRepo, riskLimitRepo, markPriceSvc)
 	accountSvc := service.NewAccountService(accountRepo, positionSvc, txRepo)
 	fundingSvc := service.NewFundingService(rdb, coinRepo, positionRepo, fundingRepo, accountSvc, txRepo, markPriceSvc)
+	lockSvc := service.NewLockService(rdb)
 
 	hub := ws.NewHub(rdb)
 
-	srv := api.NewServer(accountSvc, positionSvc, coinRepo, orderRepo, conditionalOrderRepo, tradeRepo, klineRepo, markPriceSvc, fundingSvc, producer, hub)
+	srv := api.NewServer(accountSvc, positionSvc, coinRepo, orderRepo, conditionalOrderRepo, tradeRepo, klineRepo, markPriceSvc, fundingSvc, producer, hub, lockSvc)
 	log.Printf("contract-api listening on %s", cfg.APIAddr)
 	if err := srv.Router().Run(cfg.APIAddr); err != nil {
 		log.Fatalf("http server error: %v", err)

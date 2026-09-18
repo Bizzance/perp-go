@@ -63,6 +63,36 @@ tier = TierFor(symbol, projectedNotional)
   （买跌），只会按这个低价成交，不需要也不应该套用标记价格，否则会把正常订单误判进
   更严格的档位、平白无故拒单
 
+## 并发下单的原子性：按uid+symbol+side的分布式锁
+
+上面`projectedNotional`的算法本身没问题，但"读现有仓位/挂单 → 算档位 → 冻结保证金"
+这一整段（`router.go`的`addOrder`/`addConditionalOrder`）不是天然原子的：如果不加保护，
+同一个uid在同一个symbol+side上并发提交多笔请求，每一笔读到的`existingOpenNotional`都是
+对方还没提交时的旧值，各自单独校验都能通过，合并起来的真实仓位却可能远超单笔校验时的
+档位——比如两笔单独名义价值都在tier1范围内、都能用tier1允许的高杠杆，但两笔加起来已经
+超出tier1的`max_notional`、该落到杠杆上限更低的tier2。
+
+这段临界区现在靠`internal/service.LockService`（`internal/service/lock.go`）序列化：
+`WithLock(ctx, service.OrderLockKey(uid, symbol, side), fn)`——同一个uid+symbol+side的
+两笔并发请求，后到的会等前一笔完整跑完（拿到锁→读现有仓位/挂单→算分档→冻结保证金→
+释放锁）才开始，读到的`existingOpenNotional`一定包含前一笔已经提交的委托，不会漏算。
+不同symbol/不同side/不同uid之间完全不互斥，不会因为一个用户在BTCUSDT上频繁操作就拖慢
+它在ETHUSDT上的下单。
+
+锁的实现是Redis`SETNX`+TTL（`internal/cache.Cache.AcquireLock`/`ReleaseLock`），不是
+进程内`sync.Mutex`——`contract-api`在架构上是无状态服务、允许水平扩展多实例部署
+（见 [architecture.md](architecture.md)），进程内锁只能防住单个实例内部的竞态，多实例
+部署时不同实例各自持有的锁互不知道对方存在，起不到效果。拿不到锁会在500ms内短暂重试
+（应对"两笔请求恰好同时到达但不是真的高频冲突"这种正常场景），超时后返回
+`ErrLockBusy`（HTTP层面是429），不会让请求无限期挂起。TTL（3秒）给了一个远超临界区
+正常耗时的上限，即使持锁的那个请求异常崩溃，锁也会在TTL到期后自动释放，不会永久卡死
+这个uid+symbol+side的后续下单。
+
+这不是完整意义上的Redlock（没有考虑多Redis节点场景的容错），跟这个项目现有的单Redis
+实例部署假设一致，够用，不是过度设计。`FreezeMargin`内部对`available`/`credit`字段的
+读-改-写仍然是"原子条件UPDATE"那一套（见 [account-and-margin.md](account-and-margin.md)
+"并发控制"一节），这把锁解决的是更上层的"分档校验决策"竞态，两者互补、不冲突。
+
 ## 平仓单不校验分档
 
 平仓单只过一道跟分档配置无关的`maxSaneLeverage`（1000）离谱值兜底，不查`risk_limit_tiers`。

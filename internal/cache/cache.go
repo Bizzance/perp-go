@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/redis/go-redis/v9"
 	"github.com/shopspring/decimal"
@@ -109,4 +110,27 @@ func (c *Cache) Publish(ctx context.Context, channel, payload string) error {
 // 引用计数管理——那是internal/ws.Hub的职责，这一层只是对go-redis客户端的薄封装
 func (c *Cache) Subscribe(ctx context.Context, channels ...string) *redis.PubSub {
 	return c.rdb.Subscribe(ctx, channels...)
+}
+
+// AcquireLock 基于SETNX的简单分布式锁原语：key不存在才能设置成功(ok=true)，同时给一个
+// TTL防止持锁方崩溃/异常导致永久死锁。token是调用方生成的随机值，配合ReleaseLock按token
+// 校验一致才删——避免"锁已经过期自动释放、被别人抢到，自己却把别人的锁误删"。上层封装见
+// internal/service.LockService
+func (c *Cache) AcquireLock(ctx context.Context, key, token string, ttl time.Duration) (bool, error) {
+	return c.rdb.SetNX(ctx, key, token, ttl).Result()
+}
+
+var releaseLockScript = redis.NewScript(`
+if redis.call("GET", KEYS[1]) == ARGV[1] then
+	return redis.call("DEL", KEYS[1])
+else
+	return 0
+end
+`)
+
+// ReleaseLock 只有key当前的值还等于token(还是自己持有的那把锁，没有过期后被别人抢走)才会
+// 真的删除——用Lua脚本保证"比较+删除"这两步原子完成，不是先GET再判断再DEL(那样中间有
+// 竞态窗口)
+func (c *Cache) ReleaseLock(ctx context.Context, key, token string) error {
+	return releaseLockScript.Run(ctx, c.rdb, []string{key}, token).Err()
 }

@@ -72,9 +72,12 @@ FromCredit}`告诉调用方这笔钱分别从两个来源各拿了多少：
 涉及`credit`的多分支逻辑（比如`FreezeSpillToCredit`要同时判断`available`不够、
 `available+credit`够、`available`可能已经是负数）用SQL的`GREATEST`/`LEAST`函数把
 分支判断内嵌进一条`UPDATE`语句，保证整个多字段读-判断-写是原子的，不需要应用层加锁。
-`UPDATE`受影响行数为0就代表"条件不满足"，调用方判断`RowsAffected() > 0`即可。极端并发
-下（同一个uid同时提交多笔请求）这套方式没有完全的一致性保证，属于MVP阶段已知、接受的
-简化——详见 [known-limitations.md](known-limitations.md)。
+`UPDATE`受影响行数为0就代表"条件不满足"，调用方判断`RowsAffected() > 0`即可。这一层
+保证的是单次`available`/`credit`加减操作本身的原子性，不覆盖"先读一批状态、再决定要
+冻结多少"这种跨越多次读写的复合决策——开仓时"读现有仓位/挂单→算分档→冻结保证金"这段
+复合临界区另外用分布式锁保护，见 [risk-limit-tiers.md](risk-limit-tiers.md#并发下单的原子性按uidsymbolside的分布式锁)。
+其它没有额外加锁的极端并发场景（比如同一个uid同时触发强平结算与主动撤单）仍然只靠
+这套原子UPDATE兜底，属于MVP阶段已知、接受的简化——详见 [known-limitations.md](known-limitations.md)。
 
 ## 账户查询视图（`AccountView`）
 
