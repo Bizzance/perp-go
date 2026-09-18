@@ -4,6 +4,7 @@ import (
 	"log"
 	"os"
 	"strconv"
+	"strings"
 )
 
 type Config struct {
@@ -26,6 +27,11 @@ type Config struct {
 
 	DedupRetentionHours    int64 // Kafka消息去重记录(processed_messages)保留多久，早于这个时长的清掉
 	DedupCleanupIntervalMs int64 // 去重记录清理任务的扫描周期
+
+	// EngineSymbols 这个contract-engine实例负责撮合的symbol列表，来自PERP_ENGINE_SYMBOLS
+	// (逗号分隔，如"BTCUSDT,ETHUSDT")。nil(没设这个环境变量)=负责全部symbol，这是单实例
+	// 部署的默认行为，不需要额外配置。见docs/engine-sharding.md
+	EngineSymbols []string
 }
 
 func envOr(key, def string) string {
@@ -64,5 +70,24 @@ func Load(defaultNodeID uint64) Config {
 		SymbolCacheRefreshMs:      30_000,
 		DedupRetentionHours:       168,       // 7天，跟Kafka topic的常见默认retention对齐
 		DedupCleanupIntervalMs:    3_600_000, // 1小时扫一次，清理任务本身很轻量，不需要跑得更勤
+		EngineSymbols:             parseEngineSymbols(os.Getenv("PERP_ENGINE_SYMBOLS")),
 	}
+}
+
+func parseEngineSymbols(raw string) []string {
+	if raw == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ",")
+	symbols := make([]string, 0, len(parts))
+	for _, p := range parts {
+		p = strings.TrimSpace(p)
+		if p != "" {
+			symbols = append(symbols, p)
+		}
+	}
+	if len(symbols) == 0 {
+		return nil
+	}
+	return symbols
 }

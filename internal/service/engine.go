@@ -14,17 +14,20 @@ import (
 )
 
 type EngineService struct {
-	matchingEngine    *matching.Engine // 撮合引擎，里面有多个orderbook，每个币种一个orderbook
-	orders            *repo.OrderRepo
-	conditionalOrders *repo.ConditionalOrderRepo
-	trades            *repo.TradeRepo
-	accounts          *AccountService
-	positionSvc       *PositionService
-	settlement        *SettlementService
-	markPrice         *MarkPriceService
-	fund              *InsuranceFundService
-	kline             *KlineService
-	push              *PushService
+	matchingEngine     *matching.Engine // 撮合引擎，里面有多个orderbook，每个币种一个orderbook
+	orders             *repo.OrderRepo
+	conditionalOrders  *repo.ConditionalOrderRepo
+	trades             *repo.TradeRepo
+	accounts           *AccountService
+	positionSvc        *PositionService
+	settlement         *SettlementService
+	markPrice          *MarkPriceService
+	fund               *InsuranceFundService
+	kline              *KlineService
+	push               *PushService
+	roundCloseProgress *repo.RoundCloseProgressRepo
+	lock               *LockService
+	ownedSymbols       map[string]bool // nil=负责全部symbol(单实例默认)，见docs/engine-sharding.md
 }
 
 func NewEngineService(
@@ -39,20 +42,45 @@ func NewEngineService(
 	fund *InsuranceFundService,
 	kline *KlineService,
 	push *PushService,
+	roundCloseProgress *repo.RoundCloseProgressRepo,
+	lock *LockService,
+	engineSymbols []string,
 ) *EngineService {
-	return &EngineService{
-		matchingEngine:    matchingEngine,
-		orders:            orders,
-		conditionalOrders: conditionalOrders,
-		trades:            trades,
-		accounts:          accounts,
-		positionSvc:       positionSvc,
-		settlement:        settlement,
-		markPrice:         markPrice,
-		fund:              fund,
-		kline:             kline,
-		push:              push,
+	var owned map[string]bool
+	if len(engineSymbols) > 0 {
+		owned = make(map[string]bool, len(engineSymbols))
+		for _, s := range engineSymbols {
+			owned[s] = true
+		}
 	}
+	return &EngineService{
+		matchingEngine:     matchingEngine,
+		orders:             orders,
+		conditionalOrders:  conditionalOrders,
+		trades:             trades,
+		accounts:           accounts,
+		positionSvc:        positionSvc,
+		settlement:         settlement,
+		markPrice:          markPrice,
+		fund:               fund,
+		kline:              kline,
+		push:               push,
+		roundCloseProgress: roundCloseProgress,
+		lock:               lock,
+		ownedSymbols:       owned,
+	}
+}
+
+// OwnsSymbol 这个engine实例是不是负责撮合这个symbol——单实例部署(ownedSymbols为nil)下
+// 恒为true，分片部署下只有配置在PERP_ENGINE_SYMBOLS里的symbol才返回true。任何会碰
+// e.matchingEngine里某个symbol真实订单簿的操作，在处理前都必须先过这道检查——见
+// docs/engine-sharding.md，误判会导致撤单/强平这类操作在一个从来没有真实挂单的本地
+// 空订单簿上"假装成功"，跟另一个真正持有这个symbol订单簿的实例的状态对不上
+func (e *EngineService) OwnsSymbol(symbol string) bool {
+	if e.ownedSymbols == nil {
+		return true
+	}
+	return e.ownedSymbols[symbol]
 }
 
 // RecoverOrderBook 进程启动时重建内存订单簿——订单簿(matching.Book)是纯内存结构，
@@ -77,6 +105,12 @@ func (e *EngineService) RecoverOrderBook(ctx context.Context) error {
 	}
 	restored := 0
 	for _, o := range orders {
+		if !e.OwnsSymbol(o.Symbol) {
+			// 分片部署下，这个symbol的真实订单簿在另一个实例里，这里恢复了也只是个永远
+			// 用不到、跟真实状态失联的本地副本，白占内存还可能误导查询到这个实例的/depth，
+			// 见docs/engine-sharding.md
+			continue
+		}
 		remaining := o.RemainingAmount()
 		if remaining.Sign() <= 0 {
 			// 理论上不会出现(open/partially_filled不该有remaining<=0)，防御性跳过而不是
@@ -111,6 +145,14 @@ func (e *EngineService) RecoverOrderBook(ctx context.Context) error {
 // 强平单由liquidation.go在这里落库。
 // 这个方法负责真正的撮合+结算+挂簿/释放。
 func (e *EngineService) SubmitOrder(ctx context.Context, order *model.Order, entryTime int64) error {
+	// 分片部署下，这个symbol可能根本不归这个实例负责——e.matchingEngine.BookFor(order.Symbol)
+	// 只会拿到一个从来没有真实挂单的本地空订单簿，绝不能在上面跑真正的撮合，那会把这笔
+	// 委托错误地判定成"没有对手盘"，而真正拥有这个symbol订单簿的实例会独立收到同一条
+	// (fan-out)事件、正常处理，这里必须直接跳过，不碰book也不做任何DB变更。见
+	// docs/engine-sharding.md
+	if !e.OwnsSymbol(order.Symbol) {
+		return nil
+	}
 	// 防御Kafka at-least-once语义下的重复投递(internal/mq的消费者本身不做去重)：
 	// ①状态已经不是"待处理"(已经被别的事件处理成filled/canceled/rejected)——不能对一笔
 	// 已经终结的委托再走一遍撮合；②这个orderId已经挂在簿子上——说明上一次投递已经完整
@@ -373,19 +415,23 @@ func (e *EngineService) HandleLiquidationSettleAftermath(ctx context.Context, sy
 // 本轮，没必要等撮合，直接按标记价了结最快，也不需要保护价滑点缓冲。
 // 跟CancelOrder/正常下单一样通过Kafka事件从contract-api路由到这里执行——撤单要摘掉
 // contract-engine内存里的订单簿，contract-api那边看不到、摸不到。
+// CloseRound 结束本轮——engine分片部署下(docs/engine-sharding.md)这个函数会在每个分片
+// 实例上各自独立跑一遍(round.close事件fan-out给所有实例)，每个实例只处理自己拥有的
+// symbol那部分(撤单/撤条件单/强平)，全部symbol都确认处理完之后才由抢到锁的那个实例做
+// 一次性的最终资金结算(清零credit、round+1)。单实例部署(没配PERP_ENGINE_SYMBOLS)下
+// 这套流程完全退化成"自己处理完自己立刻结算"，行为跟分片之前一样，只是多了一次进度表
+// 读写(可以忽略不计的开销)
 func (e *EngineService) CloseRound(ctx context.Context, uid uint64) error {
+	account, err := e.accounts.GetOrCreate(ctx, uid)
+	if err != nil {
+		return err
+	}
+	round := account.Round
+
 	activeOrders, err := e.orders.FindActiveByUID(ctx, uid, "")
 	if err != nil {
 		return err
 	}
-	allDone := true
-	for i := range activeOrders {
-		if err := e.CancelOrder(ctx, &activeOrders[i]); err != nil {
-			log.Printf("[ERROR] 结束本轮撤单失败, uid=%d, orderId=%d: %v", uid, activeOrders[i].OrderID, err)
-			allDone = false
-		}
-	}
-
 	// 条件单(止盈止损/条件开仓)触发前从来没进过撮合引擎的订单簿，CancelOrder摘不到它们，
 	// 必须单独撤销——不然结束本轮之后credit清零了，这些条件单开仓方向上冻结的frozen_credit
 	// 还留在账上没释放，等它们后来真的触发/被撤销，会把上一轮已经作废的credit又"复活"
@@ -394,19 +440,85 @@ func (e *EngineService) CloseRound(ctx context.Context, uid uint64) error {
 	if err != nil {
 		return err
 	}
-	for _, co := range pendingConditional {
+	positions, err := e.positionSvc.FindByUID(ctx, uid)
+	if err != nil {
+		return err
+	}
+
+	symbols := collectRoundCloseSymbols(activeOrders, pendingConditional, positions)
+	now := NowMillis()
+	for _, sym := range symbols {
+		if err := e.roundCloseProgress.Seed(ctx, uid, round, sym, now); err != nil {
+			return fmt.Errorf("结束本轮进度登记失败, uid=%d, symbol=%s: %w", uid, sym, err)
+		}
+	}
+
+	for _, sym := range symbols {
+		if !e.OwnsSymbol(sym) {
+			continue // 不归这个实例负责，等真正拥有这个symbol的实例自己(fan-out独立)处理
+		}
+		if e.closeRoundForSymbol(ctx, uid, sym, activeOrders, pendingConditional, positions) {
+			if err := e.roundCloseProgress.MarkDone(ctx, uid, round, sym); err != nil {
+				log.Printf("[ERROR] 结束本轮标记分片进度失败, uid=%d, symbol=%s: %v", uid, sym, err)
+			}
+		}
+		// 没成功不标记done，日志已经在closeRoundForSymbol内部打过——等下一次这个uid的
+		// round.close事件被重新处理(客户端重新调用接口)时会重试，见tryFinalizeCloseRound
+	}
+
+	return e.tryFinalizeCloseRound(ctx, uid, round)
+}
+
+// collectRoundCloseSymbols 结束本轮涉及到的全部symbol并集(活跃挂单+条件单+持仓)，去重
+func collectRoundCloseSymbols(orders []model.Order, conditional []model.ConditionalOrder, positions []model.Position) []string {
+	seen := make(map[string]bool)
+	var symbols []string
+	add := func(sym string) {
+		if !seen[sym] {
+			seen[sym] = true
+			symbols = append(symbols, sym)
+		}
+	}
+	for _, o := range orders {
+		add(o.Symbol)
+	}
+	for _, co := range conditional {
+		add(co.Symbol)
+	}
+	for _, p := range positions {
+		if p.Volume.Sign() > 0 {
+			add(p.Symbol)
+		}
+	}
+	return symbols
+}
+
+// closeRoundForSymbol 结束本轮里属于这一个symbol的部分：撤这个symbol上的挂单+条件单，
+// 强平这个symbol上的仓位。调用前调用方已经确认e.OwnsSymbol(symbol)——只有真正拥有这个
+// symbol订单簿的实例才能安全执行CancelOrder，见docs/engine-sharding.md。返回true表示
+// 这个symbol的部分全部处理成功
+func (e *EngineService) closeRoundForSymbol(ctx context.Context, uid uint64, symbol string, orders []model.Order, conditional []model.ConditionalOrder, positions []model.Position) bool {
+	allDone := true
+	for i := range orders {
+		if orders[i].Symbol != symbol {
+			continue
+		}
+		if err := e.CancelOrder(ctx, &orders[i]); err != nil {
+			log.Printf("[ERROR] 结束本轮撤单失败, uid=%d, orderId=%d: %v", uid, orders[i].OrderID, err)
+			allDone = false
+		}
+	}
+	for _, co := range conditional {
+		if co.Symbol != symbol {
+			continue
+		}
 		if err := e.cancelConditionalOrder(ctx, co); err != nil {
 			log.Printf("[ERROR] 结束本轮撤销条件单失败, uid=%d, orderId=%d: %v", uid, co.OrderID, err)
 			allDone = false
 		}
 	}
-
-	positions, err := e.positionSvc.FindByUID(ctx, uid)
-	if err != nil {
-		return err
-	}
 	for _, p := range positions {
-		if p.Volume.Sign() <= 0 {
+		if p.Symbol != symbol || p.Volume.Sign() <= 0 {
 			continue
 		}
 		mark, hasMark := e.markPrice.Get(ctx, p.Symbol)
@@ -421,22 +533,52 @@ func (e *EngineService) CloseRound(ctx context.Context, uid uint64) error {
 			allDone = false
 		}
 	}
+	return allDone
+}
 
-	// AccountService.CloseRound的前提是这个uid名下已经没有持仓/挂单——只要上面撤单/强平
-	// 有任何一笔没成功，就不能清零credit/推进round，否则一个仍然持仓的uid会在credit缓冲
-	// 被清空、round已经翻篇的状态下留着旧仓位，风控口径全乱。这里不清算、直接报错返回，
-	// 让调用方(Kafka消费者)记录日志——运营/合作方需要在缺失条件解决后(比如标记价格恢复)
-	// 重新调用一次结束本轮接口
-	if !allDone {
-		return fmt.Errorf("结束本轮未完全成功(还有撤单/强平失败)，uid=%d，未清算资金状态，需要重试", uid)
-	}
-	if err := e.accounts.CloseRound(ctx, uid); err != nil {
+// tryFinalizeCloseRound 检查这个(uid,round)涉及到的全部symbol是不是都处理完了，全部
+// 完成才做"清零credit+round前进"这个只能发生一次的最终结算。还没全部完成不是错误——
+// 大概率是负责其它symbol的分片实例还没轮到处理这个round.close事件(fan-out消费不保证
+// 同时到达每个实例)，直接返回nil、不打ERROR日志，其它实例做完自己那部分之后会各自
+// 再调用一次这个函数，最终由真正凑齐"全部完成"这个条件的那一次触发结算。用
+// LockService保证即使多个实例同时观察到"全部完成"也只有一个真正执行结算——
+// AccountService.CloseRound自带的round原子条件是第二层保险，理论上锁已经能保证互斥，
+// 这层是防御性的
+func (e *EngineService) tryFinalizeCloseRound(ctx context.Context, uid, round uint64) error {
+	allDone, err := e.roundCloseProgress.AllDone(ctx, uid, round)
+	if err != nil {
 		return err
 	}
-	// 撤单/强平过程中已经推送过中间状态的账户快照，这里再推一次最终状态(credit清零、
-	// round+1)——中间那几次快照都还没反映"结束本轮"这个动作本身造成的变化
-	e.push.PublishUserSnapshot(ctx, uid)
-	return nil
+	if !allDone {
+		return nil
+	}
+	lockKey := fmt.Sprintf("perpgo:lock:closeround:%d:%d", uid, round)
+	return e.lock.WithLock(ctx, lockKey, func() error {
+		recheck, err := e.roundCloseProgress.AllDone(ctx, uid, round)
+		if err != nil {
+			return err
+		}
+		if !recheck {
+			return nil // 理论上不该发生(done只会0→1，不会倒退)，防御性处理
+		}
+		ok, err := e.accounts.CloseRound(ctx, uid, round)
+		if err != nil {
+			return err
+		}
+		if err := e.roundCloseProgress.Delete(ctx, uid, round); err != nil {
+			log.Printf("[WARN] 清理结束本轮进度记录失败, uid=%d, round=%d: %v", uid, round, err)
+		}
+		if !ok {
+			// round已经被别的实例/别的调用推进过了(比如这是同一个round.close事件的
+			// Kafka重复投递，上一次已经成功结算过)，不是错误，进度记录已经清理，收尾
+			return nil
+		}
+		// 撤单/强平过程中已经推送过中间状态的账户快照，这里再推一次最终状态(credit清零、
+		// round+1)——中间那几次快照都还没反映"结束本轮"这个动作本身造成的变化
+		e.push.PublishUserSnapshot(ctx, uid)
+		log.Printf("结束本轮完成, uid=%d, round=%d", uid, round)
+		return nil
+	})
 }
 
 // forceCloseOnePosition 生成一笔"已成交"的市价平仓单落库(留痕、复用SettleFill结算逻辑)，
@@ -469,6 +611,13 @@ func (e *EngineService) forceCloseOnePosition(ctx context.Context, p model.Posit
 
 // CancelOrder 从订单簿摘掉委托、退回剩余冻结保证金、落库改CANCELED
 func (e *EngineService) CancelOrder(ctx context.Context, o *model.Order) error {
+	// 分片部署下这个symbol可能不归这个实例负责——绝不能落到下面的fallback分支(book.Cancel
+	// 在本地空订单簿上找不到、以为"已经不在簿子上了"，误把它当CANCELED落库+退保证金，而
+	// 真正拥有这个symbol订单簿的实例里这笔委托可能还实实在在挂着，会造成DB状态和真实撮合
+	// 状态对不上，见docs/engine-sharding.md
+	if !e.OwnsSymbol(o.Symbol) {
+		return nil
+	}
 	book := e.matchingEngine.BookFor(o.Symbol)
 	remaining, ok := book.Cancel(o.OrderID)
 	if !ok {

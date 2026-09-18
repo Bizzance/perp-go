@@ -322,17 +322,52 @@ CREATE TABLE IF NOT EXISTS funding_rate_history (
   UNIQUE KEY uk_funding_rate_history_symbol_time (symbol, funding_time)
 ) ENGINE=InnoDB;
 
--- Kafka消息级去重：给at-least-once语义下的重复投递做最后一道防线，按(topic,partition,offset)
--- 这个Kafka消息的全局唯一坐标标记"已处理"，处理前先INSERT IGNORE占位，插入失败(0行受影响)
--- 说明这条消息之前已经处理过，直接跳过业务逻辑。见docs/message-dedup.md。create_time上的索引
--- 供定期清理过期记录用，不然这张表会无限增长
+-- Kafka消息级去重：给at-least-once语义下的重复投递做最后一道防线，按(consumer_group,topic,
+-- partition,offset)这个坐标标记"已处理"，处理前先INSERT IGNORE占位，插入失败(0行受影响)
+-- 说明这条消息之前已经处理过，直接跳过业务逻辑。见docs/message-dedup.md。consumer_group在
+-- 主键里(不是只按topic+partition+offset)是因为engine分片(docs/engine-sharding.md)之后，
+-- 同一条消息会被多个engine实例各自独立的consumer group各消费一次(fan-out，不是Kafka原生的
+-- 分区负载均衡)，去重必须按"这个consumer group有没有处理过"分别判断，不能用一个全局共享的
+-- 去重状态——否则先处理到这条消息的那个实例会把其它本来也需要独立处理这条消息的实例给挡住。
+-- create_time上的索引供定期清理过期记录用，不然这张表会无限增长
 CREATE TABLE IF NOT EXISTS processed_messages (
-  topic        VARCHAR(191) NOT NULL,
-  `partition`  INT NOT NULL,
-  `offset`     BIGINT NOT NULL,
-  create_time  TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (topic, `partition`, `offset`),
+  consumer_group VARCHAR(191) NOT NULL,
+  topic          VARCHAR(191) NOT NULL,
+  `partition`    INT NOT NULL,
+  `offset`       BIGINT NOT NULL,
+  create_time    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+  PRIMARY KEY (consumer_group, topic, `partition`, `offset`),
   KEY idx_processed_messages_create_time (create_time)
+) ENGINE=InnoDB;
+
+-- 老版本的processed_messages表主键是(topic,partition,offset)，没有consumer_group列——
+-- 补列+把主键换成新的四元组，让这个文件对"全新库"和"已经建过旧版表"两种情况都能安全重复执行
+SET @sql := (SELECT IF(
+  (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'processed_messages' AND COLUMN_NAME = 'consumer_group') = 0,
+  'ALTER TABLE processed_messages ADD COLUMN consumer_group VARCHAR(191) NOT NULL DEFAULT ''''',
+  'SELECT 1'
+));
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+SET @sql := (SELECT IF(
+  (SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'processed_messages' AND CONSTRAINT_NAME = 'PRIMARY' AND COLUMN_NAME = 'consumer_group') = 0,
+  'ALTER TABLE processed_messages DROP PRIMARY KEY, ADD PRIMARY KEY (consumer_group, topic, `partition`, `offset`)',
+  'SELECT 1'
+));
+PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
+
+-- 结束本轮(CloseRound)在engine分片部署下的跨分片完成度追踪：一个uid结束某一round时涉及到
+-- 的每个symbol各占一行(done=0)，负责这个symbol的分片实例做完自己那部分(撤单+强平)之后
+-- 把done改成1，全部symbol都done了才能做"清零credit+round前进"这个只能发生一次的最终结算——
+-- 见docs/engine-sharding.md"结束本轮的异步化"一节。单实例部署(没配PERP_ENGINE_SYMBOLS)下
+-- 这张表也会用到，只是每次都只有当前实例自己在读写，退化成一个进度记录，没有实际的跨进程协调
+CREATE TABLE IF NOT EXISTS round_close_progress (
+  uid          BIGINT UNSIGNED NOT NULL,
+  round        BIGINT UNSIGNED NOT NULL,
+  symbol       VARCHAR(32) NOT NULL,
+  done         TINYINT(1) NOT NULL DEFAULT 0,
+  create_time  BIGINT UNSIGNED NOT NULL,
+  PRIMARY KEY (uid, round, symbol)
 ) ENGINE=InnoDB;
 
 -- 演示用初始合约配置，方便本地对照测试

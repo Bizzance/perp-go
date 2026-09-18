@@ -7,9 +7,11 @@ import (
 	"github.com/jmoiron/sqlx"
 )
 
-// ProcessedMessageRepo 记录处理过的Kafka消息坐标(topic+partition+offset)，用于防御
-// at-least-once语义下的重复投递被业务handler处理第二遍——完整的消息级去重方案，见
-// docs/message-dedup.md
+// ProcessedMessageRepo 记录处理过的Kafka消息坐标(consumer_group+topic+partition+offset)，
+// 用于防御at-least-once语义下的重复投递被业务handler处理第二遍——完整的消息级去重方案，见
+// docs/message-dedup.md。consumer_group在key里是因为engine分片(docs/engine-sharding.md)
+// 之后，同一条消息会被多个engine实例各自独立的consumer group各fan-out消费一次，去重必须
+// 按"这个consumer group有没有处理过"分别判断，不能用一个全局共享的去重状态
 type ProcessedMessageRepo struct{ db *sqlx.DB }
 
 func NewProcessedMessageRepo(db *sqlx.DB) *ProcessedMessageRepo { return &ProcessedMessageRepo{db: db} }
@@ -18,10 +20,10 @@ func NewProcessedMessageRepo(db *sqlx.DB) *ProcessedMessageRepo { return &Proces
 // 继续执行业务逻辑)，返回false表示这条消息之前已经处理过(重复投递，调用方应该跳过)。
 // 用INSERT IGNORE+受影响行数判断，不是先SELECT再INSERT——避免"先查后插"之间的竞态窗口，
 // 唯一约束本身就是并发安全的去重屏障
-func (r *ProcessedMessageRepo) TryMark(ctx context.Context, topic string, partition int, offset int64) (bool, error) {
+func (r *ProcessedMessageRepo) TryMark(ctx context.Context, consumerGroup, topic string, partition int, offset int64) (bool, error) {
 	result, err := r.db.ExecContext(ctx,
-		"INSERT IGNORE INTO processed_messages (topic, `partition`, `offset`) VALUES (?, ?, ?)",
-		topic, partition, offset)
+		"INSERT IGNORE INTO processed_messages (consumer_group, topic, `partition`, `offset`) VALUES (?, ?, ?, ?)",
+		consumerGroup, topic, partition, offset)
 	if err != nil {
 		return false, err
 	}

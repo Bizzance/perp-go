@@ -218,12 +218,17 @@ func (r *AccountRepo) SetInsured(ctx context.Context, id uint64, insured bool) e
 	return err
 }
 
-// CloseRound 结束本轮：credit清零(没用完的赔付额度不追讨，也不留到下一轮)、is_insured
-// 重置、round+1，为下一轮做准备。调用前调用方要保证这个uid名下已经没有持仓/挂单(强平/
-// 撤单已经在更上层完成)，这里只做资金状态的收尾
-func (r *AccountRepo) CloseRound(ctx context.Context, id uint64) error {
-	_, err := r.db.ExecContext(ctx, `UPDATE accounts SET credit = 0, is_insured = 0, round = round + 1 WHERE id = ?`, id)
-	return err
+// CloseRoundIfRound 结束本轮：credit清零(没用完的赔付额度不追讨，也不留到下一轮)、
+// is_insured重置、round+1，为下一轮做准备。调用前调用方要保证这个uid名下已经没有持仓/
+// 挂单(强平/撤单已经在更上层完成)，这里只做资金状态的收尾。多一个"当前round必须等于
+// round参数"的原子条件(WHERE id=? AND round=?)——engine分片部署下，多个实例可能各自
+// 独立观察到"这个uid的结束本轮所有symbol都处理完了"、都尝试做这最后一步，这个条件保证
+// 只有第一个真正推进round的调用生效，返回false表示没有满足条件的行(round已经被别的调用
+// 推进过)，是正常情况，不是错误，见docs/engine-sharding.md
+func (r *AccountRepo) CloseRoundIfRound(ctx context.Context, id, round uint64) (bool, error) {
+	res, err := r.db.ExecContext(ctx,
+		`UPDATE accounts SET credit = 0, is_insured = 0, round = round + 1 WHERE id = ? AND round = ?`, id, round)
+	return affected(res, err)
 }
 
 func affected(res sql.Result, err error) (bool, error) {

@@ -5,6 +5,7 @@ package main
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"log"
 	"os/signal"
 	"syscall"
@@ -20,6 +21,17 @@ import (
 	"perp-go/internal/repo"
 	"perp-go/internal/service"
 )
+
+// consumerGroupID 未开启分片(PERP_ENGINE_SYMBOLS没配)时沿用原有的固定group id，兼容
+// 现有单实例部署、零迁移成本；开启分片后按NodeID给每个实例分配独立的group id，让每个
+// 实例都能独立拿到topic的完整消息流(fan-out)，不依赖Kafka原生的分区负载均衡，见
+// docs/engine-sharding.md
+func consumerGroupID(base string, cfg config.Config) string {
+	if len(cfg.EngineSymbols) == 0 {
+		return base
+	}
+	return fmt.Sprintf("%s-%d", base, cfg.NodeID)
+}
 
 func main() {
 	cfg := config.Load(1) // contract-engine默认node id=1，跟contract-api(默认0)区分开
@@ -48,6 +60,7 @@ func main() {
 	riskLimitRepo := repo.NewRiskLimitRepo(conn)
 	klineRepo := repo.NewKlineRepo(conn)
 	processedMsgRepo := repo.NewProcessedMessageRepo(conn)
+	roundCloseProgressRepo := repo.NewRoundCloseProgressRepo(conn)
 
 	markPriceSvc := service.NewMarkPriceService(rdb)
 	positionSvc := service.NewPositionService(positionRepo, riskLimitRepo, markPriceSvc)
@@ -57,9 +70,14 @@ func main() {
 	fundingSvc := service.NewFundingService(rdb, coinRepo, positionRepo, fundingRepo, accountSvc, txRepo, markPriceSvc)
 	klineSvc := service.NewKlineService(klineRepo)
 	pushSvc := service.NewPushService(rdb, accountSvc, positionSvc, orderRepo)
+	lockSvc := service.NewLockService(rdb)
+
+	if len(cfg.EngineSymbols) > 0 {
+		log.Printf("engine分片模式：这个实例负责的symbol=%v，见docs/engine-sharding.md", cfg.EngineSymbols)
+	}
 
 	matchingEngine := matching.NewEngine()
-	engineSvc := service.NewEngineService(matchingEngine, orderRepo, conditionalOrderRepo, tradeRepo, accountSvc, positionSvc, settlementSvc, markPriceSvc, fundSvc, klineSvc, pushSvc)
+	engineSvc := service.NewEngineService(matchingEngine, orderRepo, conditionalOrderRepo, tradeRepo, accountSvc, positionSvc, settlementSvc, markPriceSvc, fundSvc, klineSvc, pushSvc, roundCloseProgressRepo, lockSvc, cfg.EngineSymbols)
 	liquidationSvc := service.NewLiquidationService(engineSvc, orderRepo, positionRepo, positionSvc, markPriceSvc, accountSvc, fundSvc, cfg.LiquidationOrderTimeoutMs)
 	conditionalOrderSvc := service.NewConditionalOrderService(conditionalOrderRepo, orderRepo, markPriceSvc, engineSvc)
 
@@ -75,9 +93,10 @@ func main() {
 		log.Fatalf("恢复订单簿失败: %v", err)
 	}
 
-	submitConsumer := mq.NewConsumer(cfg.KafkaBrokers, events.TopicOrderSubmit, "contract-engine")
+	submitGroupID := consumerGroupID("contract-engine", cfg)
+	submitConsumer := mq.NewConsumer(cfg.KafkaBrokers, events.TopicOrderSubmit, submitGroupID)
 	defer submitConsumer.Close()
-	go submitConsumer.Consume(ctx, mq.WithDedup(ctx, processedMsgRepo, func(msg mq.Message) error {
+	go submitConsumer.Consume(ctx, mq.WithDedup(ctx, submitGroupID, processedMsgRepo, func(msg mq.Message) error {
 		var evt events.OrderSubmitEvent
 		if err := json.Unmarshal(msg.Value, &evt); err != nil {
 			return err
@@ -90,9 +109,12 @@ func main() {
 		return engineSvc.SubmitOrder(ctx, o, time.Now().UnixNano())
 	}))
 
-	cancelConsumer := mq.NewConsumer(cfg.KafkaBrokers, events.TopicOrderCancel, "contract-engine")
+	// 跟submit共用同一个group id(未分片时都是"contract-engine")——这是已经实测验证过能
+	// 正常工作的2-member同group形状，见下面round-close的注释
+	cancelGroupID := consumerGroupID("contract-engine", cfg)
+	cancelConsumer := mq.NewConsumer(cfg.KafkaBrokers, events.TopicOrderCancel, cancelGroupID)
 	defer cancelConsumer.Close()
-	go cancelConsumer.Consume(ctx, mq.WithDedup(ctx, processedMsgRepo, func(msg mq.Message) error {
+	go cancelConsumer.Consume(ctx, mq.WithDedup(ctx, cancelGroupID, processedMsgRepo, func(msg mq.Message) error {
 		var evt events.OrderCancelEvent
 		if err := json.Unmarshal(msg.Value, &evt); err != nil {
 			return err
@@ -104,14 +126,18 @@ func main() {
 		return engineSvc.CancelOrder(ctx, o)
 	}))
 
-	// 用独立的group id，不要跟下面的submit/cancel共用"contract-engine"——同一个group id挂
-	// 多个订阅不同topic的member，Kafka的分区分配在这种异构订阅场景下不可靠(实测过：3个
-	// member共用一个group id时，broker端分配阶段完成了，但每个member实际收不到任何分区，
-	// 消费彻底卡住，连已有的submit/cancel两个topic也一起被拖挂)，每个独立的消费职责必须用
-	// 自己独立的group id
-	roundCloseConsumer := mq.NewConsumer(cfg.KafkaBrokers, events.TopicRoundClose, "contract-engine-round-close")
+	// 用独立的group id，不要跟上面的submit/cancel共用——同一个group id挂多个订阅不同topic的
+	// member，Kafka的分区分配在这种异构订阅场景下不可靠(实测过：3个member共用一个group id时，
+	// broker端分配阶段完成了，但每个member实际收不到任何分区，消费彻底卡住，连已有的
+	// submit/cancel两个topic也一起被拖挂)，每个独立的消费职责必须用自己独立的group id。
+	// 分片部署下round.close事件要fan-out给每个实例(每个实例只处理自己拥有的symbol那部分，
+	// 见EngineService.CloseRound)，所以这里也要按实例分配独立group id，不能让Kafka把它当
+	// 普通消费者组去做分区负载均衡(那样一个uid的round.close只会被随机分配到的某一个实例
+	// 处理到，其它symbol永远没人处理，进度永远凑不齐)
+	roundCloseGroupID := consumerGroupID("contract-engine-round-close", cfg)
+	roundCloseConsumer := mq.NewConsumer(cfg.KafkaBrokers, events.TopicRoundClose, roundCloseGroupID)
 	defer roundCloseConsumer.Close()
-	go roundCloseConsumer.Consume(ctx, mq.WithDedup(ctx, processedMsgRepo, func(msg mq.Message) error {
+	go roundCloseConsumer.Consume(ctx, mq.WithDedup(ctx, roundCloseGroupID, processedMsgRepo, func(msg mq.Message) error {
 		var evt events.RoundCloseEvent
 		if err := json.Unmarshal(msg.Value, &evt); err != nil {
 			return err
@@ -177,7 +203,7 @@ func main() {
 		}
 	}()
 
-	engineSrv := api.NewEngineServer(matchingEngine, coinRepo)
+	engineSrv := api.NewEngineServer(matchingEngine, coinRepo, engineSvc.OwnsSymbol)
 	engineSrv.RefreshSymbols(ctx) // 启动时先同步刷一次，不然/depth接口刚起来那段时间缓存是空的、全部请求都会被当成"合约不存在"拒绝
 	go func() {
 		ticker := time.NewTicker(time.Duration(cfg.SymbolCacheRefreshMs) * time.Millisecond)

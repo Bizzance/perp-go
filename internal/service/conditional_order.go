@@ -55,9 +55,19 @@ func (s *ConditionalOrderService) ScanOnce(ctx context.Context) {
 			}
 			marks[co.Symbol] = mark
 		}
-		if co.Triggered(mark) {
-			s.trigger(ctx, co, mark)
+		if !co.Triggered(mark) {
+			continue
 		}
+		if !s.engine.OwnsSymbol(co.Symbol) {
+			// 分片部署下(docs/engine-sharding.md)这个扫描在每个实例上都独立跑一遍，
+			// 不归自己管的symbol跳过——如果在这里MarkTriggered，触发后的委托会提交给
+			// 一个从来没有真实订单簿的本地实例，SubmitOrder里的OwnsSymbol保护会让它
+			// 直接跳过、永远不会被真正撮合，而这个条件单已经被标记成triggered、真正
+			// 拥有这个symbol的实例的扫描也不会再发现它，委托会永久卡死。必须让真正
+			// 拥有这个symbol的实例自己的扫描独立发现并触发它
+			continue
+		}
+		s.trigger(ctx, co, mark)
 	}
 }
 

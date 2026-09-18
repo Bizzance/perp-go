@@ -5,7 +5,7 @@
 ```
                  ┌──────────────────┐         ┌───────────────────┐
   HTTP 请求  ───▶ │   contract-api   │──Kafka─▶│  contract-engine  │
-                 │ (Gin, 无状态)     │         │ (内存订单簿, 单实例) │
+                 │ (Gin, 无状态)     │         │ (内存订单簿, 可分片)  │
                  └──────────────────┘         └───────────────────┘
                          │                              │
                          ├──────────────┬───────────────┤
@@ -24,10 +24,10 @@
     - 资金费率采样+结算（`SampleOnce` / `SettleIfDue`）
     - （撮合本身是事件驱动的，不是定时任务）
 
-两个进程都是无状态的（engine的"状态"是内存订单簿，MVP阶段单实例部署——进程重启不会丢
-挂单，启动时会从MySQL重建，见 [order-book-recovery.md](order-book-recovery.md)；但还
-不能横向扩展成多实例分摊负载，这是已知的、还没解决的问题，见
-[known-limitations.md](known-limitations.md)）。
+contract-api是无状态的，可以直接多开实例。contract-engine的"状态"是内存订单簿——进程
+重启不会丢挂单，启动时会从MySQL重建（见 [order-book-recovery.md](order-book-recovery.md)），
+也支持按symbol静态分片到多个实例分摊撮合负载（见 [engine-sharding.md](engine-sharding.md)），
+默认（不配置分片）仍然是单实例部署全部symbol，跟上图画的一致。
 
 ## 为什么保证金冻结在contract-api同步完成
 

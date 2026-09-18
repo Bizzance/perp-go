@@ -18,11 +18,12 @@ import (
 type EngineServer struct {
 	matchingEngine *matching.Engine
 	coins          *repo.CoinRepo
+	ownsSymbol     func(symbol string) bool        // 见docs/engine-sharding.md，nil或恒真=单实例部署
 	enabledSymbols atomic.Pointer[map[string]bool] // 见RefreshSymbols
 }
 
-func NewEngineServer(matchingEngine *matching.Engine, coins *repo.CoinRepo) *EngineServer {
-	s := &EngineServer{matchingEngine: matchingEngine, coins: coins}
+func NewEngineServer(matchingEngine *matching.Engine, coins *repo.CoinRepo, ownsSymbol func(symbol string) bool) *EngineServer {
+	s := &EngineServer{matchingEngine: matchingEngine, coins: coins, ownsSymbol: ownsSymbol}
 	empty := map[string]bool{}
 	s.enabledSymbols.Store(&empty)
 	return s
@@ -64,6 +65,13 @@ func (s *EngineServer) depth(c *gin.Context) {
 	// 内存膨胀入口，必须先挡掉不存在的symbol——用内存缓存校验(见RefreshSymbols)，不查DB
 	if !(*s.enabledSymbols.Load())[symbol] {
 		fail(c, 400, "合约不存在或已下架")
+		return
+	}
+	// 分片部署下这个实例可能根本不负责这个symbol——它的本地Book要么是空的、要么(重启
+	// 恢复时已经按ownedSymbols过滤过)压根没有这个symbol的条目，返回一个看起来"合法但是
+	// 空"的深度会误导调用方，不如直接明确拒绝，见docs/engine-sharding.md
+	if s.ownsSymbol != nil && !s.ownsSymbol(symbol) {
+		fail(c, 400, "这个实例不负责该symbol的撮合，请求路由到正确的分片")
 		return
 	}
 	levels, msg := parsePositiveIntQuery(c, "levels", matching.DefaultDepthLevels)

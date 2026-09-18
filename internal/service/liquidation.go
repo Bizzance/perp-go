@@ -98,6 +98,15 @@ func (s *LiquidationService) checkAndLiquidate(ctx context.Context, uid uint64) 
 	}
 	log.Printf("[WARN] 触发全仓联合强平, uid=%d, 账户权益=%s, 维持保证金要求=%s, 仓位数=%d", uid, equity, maintainTotal, len(pending))
 	for _, p := range pending {
+		if !s.engine.OwnsSymbol(p.Symbol) {
+			// 分片部署下(docs/engine-sharding.md)风控扫描在每个实例上都独立跑一遍(全仓强平
+			// 判断本来就需要看这个uid名下全部symbol的仓位，没法只让owning实例扫)，但真正
+			// 挂强平单这个动作只能由拥有这个symbol订单簿的实例来做——不然queueLiquidation
+			// 会把MarkLiquidating这个一次性的原子状态转换在一个从来没有真实订单簿的实例上
+			// 用掉，真正拥有这个symbol的实例的扫描会看到MarkLiquidating已经失败(不是
+			// normal状态了)而放弃，这个仓位就再也没人真正挂强平单
+			continue
+		}
 		s.queueLiquidation(ctx, p)
 	}
 	return nil

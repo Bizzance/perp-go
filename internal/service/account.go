@@ -229,23 +229,29 @@ func (s *AccountService) SetInsured(ctx context.Context, uid uint64, insured boo
 
 // CloseRound 结束本轮的资金收尾：credit清零(没用完的赔付额度不追讨)、is_insured重置、
 // round+1。调用前必须已经没有持仓/挂单——这里只做资金状态收尾，强平仓位/撤销挂单由
-// 更上层的编排负责(见EngineService.CloseRound)
-func (s *AccountService) CloseRound(ctx context.Context, uid uint64) error {
+// 更上层的编排负责(见EngineService.CloseRound)。round是调用方预期的"当前轮次"，只有
+// account当前round还是这个值才会真的执行，返回false表示round已经被别的调用推进过了
+// (engine分片部署下多个实例可能都观察到"这个uid可以结算了"，见docs/engine-sharding.md)，
+// 这种情况不是错误，调用方应该当no-op处理，不能重复插入round-close的资金流水记录
+func (s *AccountService) CloseRound(ctx context.Context, uid, round uint64) (bool, error) {
 	account, err := s.accounts.GetOrCreate(ctx, uid)
 	if err != nil {
-		return err
+		return false, err
 	}
 	freshCredit, err := s.accounts.FindFreshCredit(ctx, account.ID)
 	if err != nil {
-		return err
+		return false, err
 	}
-	if err := s.accounts.CloseRound(ctx, account.ID); err != nil {
-		return err
+	ok, err := s.accounts.CloseRoundIfRound(ctx, account.ID, round)
+	if err != nil || !ok {
+		return ok, err
 	}
 	if freshCredit.Sign() > 0 {
-		return s.tx.Insert(ctx, uid, "USDT", model.TxRoundClose, freshCredit.Neg(), time.Now().UnixMilli())
+		if err := s.tx.Insert(ctx, uid, "USDT", model.TxRoundClose, freshCredit.Neg(), time.Now().UnixMilli()); err != nil {
+			return true, err
+		}
 	}
-	return nil
+	return true, nil
 }
 
 // AccountView 查询接口用：账户原始字段+现算的未实现盈亏/权益
