@@ -199,11 +199,17 @@ func (e *EngineService) SubmitOrder(ctx context.Context, order *model.Order, ent
 	}
 	e.handleSelfCanceled(ctx, selfCanceled)
 
-	// LIMIT单还有剩余量就挂回簿子；MARKET单/剩余为0就不挂——市价单吃不满剩下的量直接释放
-	// (释放动作由调用方在SubmitOrder返回后，根据委托最终状态决定要不要unfreeze剩余冻结保证金)
+	// LIMIT单还有剩余量就挂回簿子；MARKET单不挂——市价单本来就不该排队等待，缺流动性/
+	// 吃不满剩下的部分直接终结成CANCELED、按比例释放冻结保证金，不然这笔委托会永久停在
+	// open/partially_filled状态、冻结的保证金永远要不回来(早期实现的遗留问题，实测
+	// 确认过，见docs/known-limitations.md)
 	rested := false
-	if resting.Remaining.Sign() > 0 && order.Type == model.OrderTypeLimit {
-		rested = book.Rest(resting)
+	if resting.Remaining.Sign() > 0 {
+		if order.Type == model.OrderTypeLimit {
+			rested = book.Rest(resting)
+		} else if _, err := e.cancelAndReleaseMargin(ctx, order, resting.Remaining); err != nil {
+			log.Printf("[ERROR] 终结MARKET单未成交剩余部分失败, orderId=%d: %v", order.OrderID, err)
+		}
 	}
 	// 只有订单簿真的发生了变化(成交、自成交摘单、挂进新单)才推送深度快照——一笔市价单
 	// 缺流动性、什么都没吃到、也没有剩余量可挂的情况下，订单簿状态没变，不需要推送
@@ -653,25 +659,41 @@ func (e *EngineService) CancelOrder(ctx context.Context, o *model.Order) error {
 // 走到这一步，只是"从订单簿摘除"这一步各自的时机/方式不同(前者显式调book.Cancel，后者
 // book.Match内部已经摘完了)，DB落库+保证金释放+推送的逻辑完全一样，不应该写两份
 func (e *EngineService) finalizeOrderCancel(ctx context.Context, o *model.Order, remaining decimal.Decimal) error {
-	marked, err := e.orders.MarkCanceled(ctx, o.OrderID, NowMillis())
+	marked, err := e.cancelAndReleaseMargin(ctx, o, remaining)
 	if err != nil {
 		return err
+	}
+	if marked {
+		e.push.PublishUserSnapshot(ctx, o.UID)
+	}
+	return nil
+}
+
+// cancelAndReleaseMargin 是finalizeOrderCancel的核心逻辑，单独拆出来是因为SubmitOrder
+// 处理MARKET单缺流动性未成交剩余部分时(见下面)也要用这套"标记CANCELED+按比例释放冻结
+// 保证金"逻辑，但不能再推一次账户快照——SubmitOrder末尾已经有统一的touchedUIDs快照推送，
+// 这里再推会重复
+func (e *EngineService) cancelAndReleaseMargin(ctx context.Context, o *model.Order, remaining decimal.Decimal) (bool, error) {
+	marked, err := e.orders.MarkCanceled(ctx, o.OrderID, NowMillis())
+	if err != nil {
+		return false, err
 	}
 	if !marked {
 		// MarkCanceled的WHERE status IN ('open','partially_filled')没匹配到行，说明这笔
 		// 委托已经被别的路径终结过了(比如正常撤单和自成交保护并发撞到同一笔单子，或者
 		// CloseRound用的是撤单前拍的旧快照、这笔单子已经在别处被处理完)——不能再往下走释放
 		// 保证金，否则同一笔冻结会被重复释放，凭空多出一笔钱
-		return nil
+		return false, nil
 	}
-	defer e.push.PublishUserSnapshot(ctx, o.UID)
 	if o.Action == model.ActionOpen && remaining.Sign() > 0 {
 		// 按剩余比例分别算这笔委托冻结的available/credit部分该释放多少，不能笼统释放到
 		// available——那样等于让信用额度经过"冻结再撤单"这个渠道被洗成可提现的available
 		releaseAvailable, releaseCredit := o.ProportionalFrozen(remaining)
-		return e.accounts.UnfreezeMargin(ctx, o.UID, releaseAvailable, releaseCredit)
+		if err := e.accounts.UnfreezeMargin(ctx, o.UID, releaseAvailable, releaseCredit); err != nil {
+			return true, err
+		}
 	}
-	return nil
+	return true, nil
 }
 
 // cancelConditionalOrder 撤销一笔还没触发的条件单——跟router.go里contract-api那个撤销

@@ -24,10 +24,10 @@ MySQL的`orders`表里，这笔委托的`status`依然正确地是`open`/`partia
 2. 依次直接调用`Book.Rest(...)`把每一笔按顺序插回对应symbol的订单簿，**不经过
    `Book.Match`**
 
-只查`type = 'limit'`：MARKET单不管成交与否都从不挂在订单簿上（缺对手盘的剩余量直接
-终止在`open`/`partially_filled`状态、不排队，见
-[known-limitations.md](known-limitations.md)里"MARKET单缺对手盘会永久停在未成交状态"
-一节），恢复时如果不加这个过滤，会把这些本来就不该在簿子上的委托误挂上去。
+只查`type = 'limit'`：MARKET单不管成交与否都从不挂在订单簿上（撮合后没吃掉的剩余部分
+直接终结成`canceled`、不排队等待，见 [known-limitations.md](known-limitations.md)"已经
+修复的历史问题"里"MARKET单缺对手盘会永久停在未成交状态"一节），恢复时如果不加这个过滤，
+会把这些本来就不该在簿子上的委托误挂上去。
 
 ### 为什么不能走`SubmitOrder`那条"先`Match`再`Rest`"的路径
 

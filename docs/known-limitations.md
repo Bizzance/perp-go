@@ -23,14 +23,6 @@
   symbol一次查询、结果在同一次请求/扫描内复用"。分档配置在一次请求/一次扫描周期内基本
   不会变化，这是可以优化但目前没做的性能点——账户持仓symbol数量不多的MVP阶段影响有限，
   持仓/扫描规模变大后需要重新评估。
-- **MARKET单缺对手盘会永久停在未成交状态**：`EngineService.SubmitOrder`对MARKET单的
-  处理是"能吃多少吃多少，剩余量不挂簿"——如果提交时撮合引擎那个symbol的订单簿对应方向
-  完全没有挂单，这笔MARKET委托会全程停留在`open`（完全没吃到）或`partially_filled`
-  （吃到一部分）状态，不会再被重新撮合，也不会被自动标记成某种"因缺流动性而终止"的
-  终态。这是MARKET单从最早实现开始就有的行为（不是条件单触发新引入的问题，条件单触发后
-  提交的MARKET委托复用同一条路径，见 [conditional-orders.md](conditional-orders.md)），
-  实测确认过。
-
 ## 已经修复的历史问题（记录一下，避免以后重新踩坑）
 
 这些是开发过程中review发现并修复的问题，之所以记在这里，是因为它们代表了这个代码库里
@@ -133,3 +125,13 @@
   跨分片协调。已经用两个真实进程分别负责BTCUSDT/ETHUSDT实测验证过：下单/深度查询/结束
   本轮跨分片协调、消息去重fan-out隔离都符合预期，单实例默认模式向后兼容。详见
   [engine-sharding.md](engine-sharding.md)。
+- **MARKET单缺对手盘会永久停在未成交状态**：早期实现`EngineService.SubmitOrder`对
+  MARKET单的处理是"能吃多少吃多少，剩余量不挂簿"，但剩余量既不挂簿也没有被终结——如果
+  提交时撮合引擎那个symbol的订单簿对应方向完全没有挂单（或没吃满），这笔MARKET委托会
+  全程停留在`open`/`partially_filled`状态不会再变化，冻结的保证金也永远要不回来。现在
+  `SubmitOrder`把MARKET单撮合后没吃掉的剩余部分直接终结成`canceled`、按比例释放冻结
+  保证金（复用`CancelOrder`已有的`finalizeOrderCancel`核心逻辑，拆出不重复推送快照的
+  `cancelAndReleaseMargin`），完全没吃到和部分吃到两种场景都用真实成交实测验证过：
+  委托状态正确变成`canceled`、未成交部分的保证金正确退回`available`、部分成交的那部分
+  正常结算进仓位。条件单触发后提交的MARKET委托复用同一条路径，同样修复，见
+  [conditional-orders.md](conditional-orders.md)。
