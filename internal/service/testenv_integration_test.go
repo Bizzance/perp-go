@@ -28,10 +28,13 @@ type engineEnv struct {
 	orders      *repo.OrderRepo
 	conditional *repo.ConditionalOrderRepo
 	trades      *repo.TradeRepo
+	positions   *repo.PositionRepo
 	markPrice   *service.MarkPriceService
 	book        *matching.Engine
 	engine      *service.EngineService
 	condSvc     *service.ConditionalOrderService
+	liq         *service.LiquidationService
+	fund        *service.InsuranceFundService
 
 	uidBase uint64
 	nextID  atomic.Uint64
@@ -51,6 +54,7 @@ func newEngineEnv(t *testing.T) *engineEnv {
 	e.orders = repo.NewOrderRepo(conn)
 	e.conditional = repo.NewConditionalOrderRepo(conn)
 	positionRepo := repo.NewPositionRepo(conn)
+	e.positions = positionRepo
 	e.trades = repo.NewTradeRepo(conn)
 	txRepo := repo.NewTxRepo(conn)
 	fundRepo := repo.NewInsuranceFundRepo(conn)
@@ -63,6 +67,7 @@ func newEngineEnv(t *testing.T) *engineEnv {
 	e.accounts = service.NewAccountService(e.accountRepo, positionSvc, txRepo)
 	settlementSvc := service.NewSettlementService(e.accounts, positionRepo, coinRepo, txRepo)
 	fundSvc := service.NewInsuranceFundService(fundRepo)
+	e.fund = fundSvc
 	klineSvc := service.NewKlineService(klineRepo)
 	pushSvc := service.NewPushService(rdb, e.accounts, positionSvc, e.orders)
 	lockSvc := service.NewLockService(rdb)
@@ -71,6 +76,9 @@ func newEngineEnv(t *testing.T) *engineEnv {
 	e.engine = service.NewEngineService(e.book, e.orders, e.conditional, e.trades, e.accounts, positionSvc,
 		settlementSvc, e.markPrice, fundSvc, klineSvc, pushSvc, roundCloseProgressRepo, lockSvc, nil)
 	e.condSvc = service.NewConditionalOrderService(e.conditional, e.orders, e.markPrice, e.engine)
+	// 强平单超时兜底设短一点(200ms)，测试里不用干等
+	e.liq = service.NewLiquidationService(e.engine, e.orders, positionRepo, positionSvc, e.markPrice, e.accounts,
+		fundSvc, coinRepo, 200)
 	return e
 }
 
@@ -136,6 +144,7 @@ type orderOpts struct {
 	amount      string
 	margin      string // 开仓时冻结的保证金，从available划到frozen_margin；平仓单填空
 	liquidation bool
+	symbol      string // 空=testSymbol
 }
 
 // 模拟contract-api下单的落库结果：开仓先冻结保证金，再插入status=open的委托。不发事件、不撮合，
@@ -153,10 +162,14 @@ func (e *engineEnv) insertOrder(t *testing.T, uid uint64, o orderOpts) *model.Or
 		}
 	}
 	now := time.Now().UnixMilli()
+	symbol := o.symbol
+	if symbol == "" {
+		symbol = testSymbol
+	}
 	order := &model.Order{
 		OrderID:      e.id(),
 		UID:          uid,
-		Symbol:       testSymbol,
+		Symbol:       symbol,
 		Side:         o.side,
 		Action:       o.action,
 		Type:         model.OrderTypeLimit,
@@ -217,4 +230,60 @@ func newConditionalOpen(e *engineEnv, uid uint64, trigger, amount, margin string
 		CreateTime:       now,
 		UpdateTime:       now,
 	}
+}
+
+func (e *engineEnv) position(t *testing.T, uid uint64, side model.Side) *model.Position {
+	t.Helper()
+	p, err := e.positions.Find(context.Background(), uid, testSymbol, side)
+	if err != nil || p == nil {
+		t.Fatalf("查仓位失败: %v %v", p, err)
+	}
+	return p
+}
+
+// 这个uid某类型流水的金额合计
+func (e *engineEnv) ledgerSum(t *testing.T, uid uint64, txType string) decimal.Decimal {
+	t.Helper()
+	var sum decimal.Decimal
+	if err := e.db.Get(&sum, `SELECT COALESCE(SUM(amount), 0) FROM member_transactions WHERE uid = ? AND type = ?`, uid, txType); err != nil {
+		t.Fatal(err)
+	}
+	return sum
+}
+
+func mustParse(t *testing.T, s string) decimal.Decimal { return decimalOf(t, s) }
+
+// 直接把标记价格写进Redis(等价于刚有一笔这个价格的成交)
+func (e *engineEnv) setMark(t *testing.T, symbol, price string) {
+	t.Helper()
+	if err := e.markPrice.UpdateFromTrade(context.Background(), symbol, decimalOf(t, price)); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// 删掉某个symbol的标记价格，模拟"还从没成交过"。Redis是各测试共用的，标记价格键按symbol、
+// 不按测试隔离，需要"没有标记价格"的测试必须显式清一下
+func (e *engineEnv) clearMark(t *testing.T, symbol string) {
+	t.Helper()
+	if err := testutil.NewRedisClient(t).Del(context.Background(), "perpgo:mark:"+symbol).Err(); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// 直接给账户设信用额度和投保状态
+func (e *engineEnv) setCredit(t *testing.T, uid uint64, credit string, insured bool) {
+	t.Helper()
+	if _, err := e.db.Exec(`UPDATE accounts SET credit = ?, is_insured = ? WHERE uid = ?`, credit, insured, uid); err != nil {
+		t.Fatal(err)
+	}
+}
+
+// 按symbol查仓位
+func (e *engineEnv) positionOf(t *testing.T, uid uint64, symbol string, side model.Side) *model.Position {
+	t.Helper()
+	p, err := e.positions.Find(context.Background(), uid, symbol, side)
+	if err != nil || p == nil {
+		t.Fatalf("查仓位失败: %v %v", p, err)
+	}
+	return p
 }

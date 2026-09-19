@@ -14,6 +14,7 @@ import (
 
 	"github.com/go-sql-driver/mysql"
 	"github.com/jmoiron/sqlx"
+	"github.com/redis/go-redis/v9"
 
 	"perp-go/internal/cache"
 	"perp-go/internal/db"
@@ -92,6 +93,15 @@ func NewCache(t testing.TB) *cache.Cache {
 	if err != nil {
 		t.Fatalf("连接测试Redis失败: %v", err)
 	}
+	return c
+}
+
+// 直连测试Redis的原始客户端，给测试用来直接读写/删除键(比如清掉某个symbol的标记价格，
+// 让"还没有标记价格"这类场景可控)。业务代码走的是NewCache返回的Cache
+func NewRedisClient(t testing.TB) *redis.Client {
+	t.Helper()
+	c := redis.NewClient(&redis.Options{Addr: requireEnv(t, envRedisAddr), Password: os.Getenv(envRedisPass)})
+	t.Cleanup(func() { c.Close() })
 	return c
 }
 
