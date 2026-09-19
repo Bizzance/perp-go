@@ -70,6 +70,8 @@ CREATE TABLE IF NOT EXISTS processed_messages (
 部署下按`PERP_NODE_ID`区分，见 [engine-sharding.md](engine-sharding.md)），同一个
 变量既传给`mq.NewConsumer`订阅，也传给`mq.WithDedup`去重——两处必须用同一个值，不然
 去重记录的key就跟这个Consumer实际订阅的group对不上，不需要三处各自实现一遍去重逻辑。
+三个消费者的业务处理是`EngineService`的`HandleOrderSubmit`/`HandleOrderCancel`/`HandleRoundClose`
+（`internal/service/consumer_handlers.go`），`main.go`里只负责把它们包上`WithDedup`交给消费循环。
 
 注意消息级去重只管"**同一条Kafka消息**被重复投递"（按offset判断）。合作方**自己再调一次接口**产生的是一条
 全新的消息，它管不到——这类重复要靠接口自己的幂等键：下单/条件单/资金操作的`requestId`、结束本轮的`round`

@@ -78,7 +78,9 @@ deploy/         容器化部署：Dockerfile、docker-compose.yml(+deps叠加层
    唯一索引说明是并发的重复请求，退回刚冻结的保证金、按重复请求处理
 5. `contract-api`通过`mq.Producer`发一条事件到Kafka（`perpgo.order.submit`）
 6. `contract-engine`的消费循环（`cmd/contract-engine/main.go`）用`mq.WithDedup`包一层
-   去重，调用`EngineService.SubmitOrder`
+   去重，调用`EngineService.HandleOrderSubmit`（`internal/service/consumer_handlers.go`，
+   解析事件、按`orderId`查库、交给`SubmitOrder`；撤单和结束本轮同理是`HandleOrderCancel`、
+   `HandleRoundClose`，提成方法是为了能不起Kafka直接拿消息做集成测试）
 7. `SubmitOrder`：从`matching.Engine.BookFor(symbol)`拿到这个symbol的订单簿，
    `Book.Match`尝试撮合，产生`[]Fill`；没吃完的部分`Book.Rest`挂回簿子
 8. 每笔`Fill`调用`settleOneFill`：maker/taker分别`OrderRepo.ApplyFill`更新委托状态、

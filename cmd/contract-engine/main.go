@@ -4,7 +4,6 @@ package main
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"os/signal"
@@ -115,16 +114,7 @@ func main() {
 	submitConsumer := mq.NewConsumer(cfg.KafkaBrokers, events.TopicOrderSubmit, submitGroupID)
 	defer submitConsumer.Close()
 	go submitConsumer.Consume(ctx, mq.WithDedup(ctx, submitGroupID, processedMsgRepo, func(msg mq.Message) error {
-		var evt events.OrderSubmitEvent
-		if err := json.Unmarshal(msg.Value, &evt); err != nil {
-			return err
-		}
-		o, err := orderRepo.FindByOrderID(ctx, evt.OrderID)
-		if err != nil || o == nil {
-			log.Printf("[ERROR] order %d not found for submit event", evt.OrderID)
-			return err
-		}
-		return engineSvc.SubmitOrder(ctx, o, time.Now().UnixNano())
+		return engineSvc.HandleOrderSubmit(ctx, msg)
 	}))
 
 	// 跟submit共用同一个group id(未分片时都是"contract-engine")——这是已经实测验证过能
@@ -133,15 +123,7 @@ func main() {
 	cancelConsumer := mq.NewConsumer(cfg.KafkaBrokers, events.TopicOrderCancel, cancelGroupID)
 	defer cancelConsumer.Close()
 	go cancelConsumer.Consume(ctx, mq.WithDedup(ctx, cancelGroupID, processedMsgRepo, func(msg mq.Message) error {
-		var evt events.OrderCancelEvent
-		if err := json.Unmarshal(msg.Value, &evt); err != nil {
-			return err
-		}
-		o, err := orderRepo.FindByOrderID(ctx, evt.OrderID)
-		if err != nil || o == nil {
-			return err
-		}
-		return engineSvc.CancelOrder(ctx, o)
+		return engineSvc.HandleOrderCancel(ctx, msg)
 	}))
 
 	// 用独立的group id，不要跟上面的submit/cancel共用——同一个group id挂多个订阅不同topic的
@@ -156,11 +138,7 @@ func main() {
 	roundCloseConsumer := mq.NewConsumer(cfg.KafkaBrokers, events.TopicRoundClose, roundCloseGroupID)
 	defer roundCloseConsumer.Close()
 	go roundCloseConsumer.Consume(ctx, mq.WithDedup(ctx, roundCloseGroupID, processedMsgRepo, func(msg mq.Message) error {
-		var evt events.RoundCloseEvent
-		if err := json.Unmarshal(msg.Value, &evt); err != nil {
-			return err
-		}
-		return engineSvc.CloseRound(ctx, evt.UID, evt.Round)
+		return engineSvc.HandleRoundClose(ctx, msg)
 	}))
 
 	go func() {

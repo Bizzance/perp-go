@@ -89,10 +89,21 @@ make test-integration ARGS='-v -run TestEngineFreeze ./internal/service/'
 补平缺口、还有仓位没平完时不提前结算、同一个uid的强平后结算串行（并发只垫付一次）、双仓位并发强平最终账目一致。
 其中并发那两个测试去掉分布式锁会变红。
 
+**Kafka事件处理和消息去重**：不起Kafka，直接拿消息驱动`contract-engine`的三个处理函数
+（`HandleOrderSubmit`/`HandleOrderCancel`/`HandleRoundClose`）：下单事件按库里的委托进订单簿且事件里的
+价格数量symbol不可信、撤单事件摘单并退保证金且重复撤单不多退、结束本轮事件的`round`字段名与
+`contract-api`发出的一致且过期`round`被忽略、找不到委托只记日志不算错误、损坏的消息返回错误。
+`processed_messages`去重表：`TryMark`的坐标语义（偏移/分区/topic不同都是新消息、不同consumer group各自独立）、
+16个并发只有1个赢、`DeleteOlderThan`清理后同一坐标可再标记；`WithDedup`接真实去重表时重复投递和并发重复
+投递都只处理一次。
+
 没覆盖的：
 
 - 条件开仓单创建后的"落库后再查一次冻结状态"：要制造"冻结刚好卡在检查和落库之间"的竞态，需要
   在代码里埋钩子，先没做
 - 资金费率结算、K线聚合：过去是靠隔离环境里
   手工端到端验证的，还没有自动化的集成测试。夹具已经能搭出完整的引擎服务，后续可以按同样的方式补
-- Kafka消费者、WebSocket：没有起Kafka，这两块仍然靠手工验证
+- 真实的Kafka broker（分区分配、消费位移、`WatchPartitionChanges`发现新topic）和WebSocket：没有起Kafka，
+  这两块仍然靠手工验证。事件处理的业务逻辑上面已经覆盖，这里剩的是基础设施层的行为
+- 消费者处理失败的消息不重试：`WithDedup`先标记再处理，处理出错的消息之后被重投也会被当成重复跳过，
+  这是文档里已经写明的取舍（见 [message-dedup.md](message-dedup.md)），没有测试去钉住它
