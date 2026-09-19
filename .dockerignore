@@ -1,0 +1,11 @@
+.git
+.idea
+.vscode
+.claude
+CLAUDE.md
+bin
+logs
+temp
+*.log
+docs
+deploy

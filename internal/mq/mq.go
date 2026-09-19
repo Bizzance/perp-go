@@ -4,6 +4,7 @@ import (
 	"context"
 	"encoding/json"
 	"log"
+	"time"
 
 	kafka "github.com/segmentio/kafka-go"
 )
@@ -46,6 +47,12 @@ func NewConsumer(brokers []string, topic, groupID string) *Consumer {
 			Brokers: brokers,
 			Topic:   topic,
 			GroupID: groupID,
+			// 全新的Kafka上引擎启动时topic可能还不存在(topic是下单接口第一次写入时才自动创建的)，
+			// 消费者这时加入消费者组拿到的分区数是0，之后topic建出来了它也不会自己发现，一直空转
+			// 消费不到任何消息。打开分区变化监听，周期性检查分区数变化、变了就触发重新分配，
+			// 这种"先启动消费者、后有topic"的顺序就能自己恢复，不需要人工重启引擎
+			WatchPartitionChanges:  true,
+			PartitionWatchInterval: 5 * time.Second,
 		}),
 	}
 }

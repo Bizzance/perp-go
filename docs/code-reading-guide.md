@@ -57,6 +57,8 @@ internal/
   config/       环境变量加载，全部可调参数（扫描间隔、超时阈值、node id等）集中在这里
   db/           MySQL连接
   events/       Kafka消息体struct（下单/撤单/结束本轮三种事件）
+
+deploy/         容器化部署：Dockerfile、docker-compose.yml(+deps叠加层)、环境变量模板，见deployment.md
 ```
 
 ## 一次下单的完整代码路径

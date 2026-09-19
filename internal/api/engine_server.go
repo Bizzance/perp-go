@@ -49,8 +49,15 @@ func (s *EngineServer) RefreshSymbols(ctx context.Context) {
 
 func (s *EngineServer) Router() *gin.Engine {
 	r := gin.Default()
+	r.GET("/health", s.health)
 	r.GET("/depth", s.depth)
 	return r
+}
+
+// 存活探针，容器编排用。能响应说明进程已经启动完成——订单簿恢复在HTTP服务启动之前就跑完了
+// (恢复失败进程会直接退出)，所以探针通过就代表订单簿是完整的
+func (s *EngineServer) health(c *gin.Context) {
+	ok(c, gin.H{"status": "ok"})
 }
 
 func (s *EngineServer) depth(c *gin.Context) {

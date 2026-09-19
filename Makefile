@@ -1,6 +1,6 @@
 BIN_DIR := bin
 
-.PHONY: fmt vet race-check build build-api build-engine test test-race build-race run-api run-engine run-api-race run-engine-race clean
+.PHONY: fmt vet race-check build build-api build-engine test test-race build-race run-api run-engine run-api-race run-engine-race clean docker-build compose-test-up compose-test-down compose-prod-up
 
 fmt:
 	gofmt -w .
@@ -50,3 +50,24 @@ run-engine-race: build-race
 
 clean:
 	rm -rf $(BIN_DIR)
+
+# ---- 容器化部署，详见docs/deployment.md ----
+# IMAGE_TAG默认latest，生产建议传具体版本号或提交哈希：make docker-build IMAGE_TAG=$(git rev-parse --short HEAD)
+IMAGE_TAG ?= latest
+COMPOSE_TEST = docker compose --env-file deploy/.env -f deploy/docker-compose.yml -f deploy/docker-compose.deps.yml
+
+docker-build:
+	docker build -f deploy/Dockerfile --target api    -t perp-go/api:$(IMAGE_TAG) .
+	docker build -f deploy/Dockerfile --target engine -t perp-go/engine:$(IMAGE_TAG) .
+
+# 测试/联调环境：依赖(MySQL/Redis/Kafka)一起拉起来，需要先 cp deploy/.env.test.example deploy/.env
+compose-test-up:
+	$(COMPOSE_TEST) up -d --build
+
+# 连数据卷一起删掉，下次up会重新初始化数据库
+compose-test-down:
+	$(COMPOSE_TEST) down -v
+
+# 生产环境：只起两个应用服务，依赖走托管服务，需要先 cp deploy/.env.prod.example deploy/.env 并填好
+compose-prod-up:
+	docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d

@@ -79,6 +79,7 @@ internal/
   events/             Kafka事件结构体
 sql/
   schema.sql          唯一的建库脚本(纯建表+初始数据)，见下方"数据库"
+deploy/               容器化部署：Dockerfile、docker-compose.yml、环境变量模板，见 [deployment.md](deployment.md)
 ```
 
 ## 数据库

@@ -7,3 +7,6 @@ CLAUDE.md
 temp/
 bin/
 *.log
+
+# 部署环境变量(含密码)，模板见deploy/.env.*.example
+deploy/.env

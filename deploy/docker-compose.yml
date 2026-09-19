@@ -1,0 +1,81 @@
+# perp-go 服务编排：只包含两个应用服务，MySQL/Redis/Kafka通过环境变量指向外部(生产用托管服务)。
+# 测试/联调环境需要连依赖一起拉起来，叠加docker-compose.deps.yml：
+#   docker compose --env-file deploy/.env -f deploy/docker-compose.yml -f deploy/docker-compose.deps.yml up -d --build
+# 生产环境只用本文件：
+#   docker compose --env-file deploy/.env -f deploy/docker-compose.yml up -d
+# 详见docs/deployment.md
+
+name: perpgo
+
+x-common-env: &common-env
+  GIN_MODE: release
+  TZ: ${TZ:-UTC}
+  PERP_MYSQL_DSN: ${PERP_MYSQL_DSN:?必须设置PERP_MYSQL_DSN}
+  PERP_REDIS_ADDR: ${PERP_REDIS_ADDR:?必须设置PERP_REDIS_ADDR}
+  PERP_REDIS_PASS: ${PERP_REDIS_PASS:?必须设置PERP_REDIS_PASS}
+  PERP_KAFKA_BROKER: ${PERP_KAFKA_BROKER:?必须设置PERP_KAFKA_BROKER}
+
+services:
+  # 有状态：订单簿在内存里，重启时从MySQL重建。默认单实例，同一个symbol的订单簿只能在
+  # 一个实例里，扩容按symbol分片见docs/engine-sharding.md
+  engine:
+    image: perp-go/engine:${IMAGE_TAG:-latest}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: engine
+      args:
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+    restart: unless-stopped
+    # 给进程足够时间收到SIGTERM后干净退出
+    stop_grace_period: 30s
+    environment:
+      <<: *common-env
+      PERP_ENGINE_HTTP_ADDR: ":7002"
+      PERP_NODE_ID: ${ENGINE_NODE_ID:-1}
+      PERP_ENGINE_SYMBOLS: ${PERP_ENGINE_SYMBOLS:-}
+    # 默认只绑本机回环地址：目前没有鉴权，不能直接暴露到网络。生产在前面放带鉴权/TLS的
+    # 网关，网关和这台机器通网时再把BIND_ADDR改成0.0.0.0(或内网地址)
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${ENGINE_PORT:-7002}:7002"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7002/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 20s
+    logging: &logging
+      driver: json-file
+      options:
+        max-size: "50m"
+        max-file: "5"
+
+  # 无状态：可以多实例，但每个实例的PERP_NODE_ID必须不同(雪花ID用)，见docs/deployment.md
+  api:
+    image: perp-go/api:${IMAGE_TAG:-latest}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: api
+      args:
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+    restart: unless-stopped
+    stop_grace_period: 30s
+    environment:
+      <<: *common-env
+      PERP_API_ADDR: ":7001"
+      PERP_NODE_ID: ${API_NODE_ID:-0}
+    ports:
+      - "${BIND_ADDR:-127.0.0.1}:${API_PORT:-7001}:7001"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7001/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 10s
+    # 先等engine健康再起api：engine启动时会先重建订单簿，api不依赖它启动，但这样顺序更符合
+    # 直觉，避免刚启动时下单事件堆在Kafka里
+    depends_on:
+      engine:
+        condition: service_healthy
+    logging: *logging

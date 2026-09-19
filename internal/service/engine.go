@@ -86,14 +86,15 @@ func (e *EngineService) OwnsSymbol(symbol string) bool {
 
 // 进程启动时重建内存订单簿——订单簿(matching.Book)是纯内存结构，
 // contract-engine重启会丢失全部挂单排队状态，但委托记录本身已经落库，status还是
-// open/partially_filled就说明这笔委托重启前确实还在排队、剩余量就是RemainingAmount()。
-// 按create_time(+order_id兜底同一毫秒内的相对顺序)升序依次直接Rest回对应symbol的订单簿，
-// 见docs/order-book-recovery.md。
+// open/partially_filled就说明这笔委托还没有走完，剩余量就是RemainingAmount()。
+// 按create_time(+order_id兜底同一毫秒内的相对顺序)升序依次重放进撮合，见
+// docs/order-book-recovery.md。
 //
-// 不能走SubmitOrder那条"先Match再Rest"的路径：这些是在重建已经存在的状态，不是新进来的
-// 委托，重新跑一遍Match会把两笔本来已经分别挂在簿子上、彼此之间事实上没有成交关系的历史
-// 挂单错误地撮合出一笔并不存在的成交(比如重启前bid/ask两边各自独立挂着、根本没碰上，
-// 重建时如果重新Match，会凭空撮合出一笔真实世界没发生过的成交)。
+// 重放走的是正常下单那条"先Match再Rest"的路径(submitOrder，纯挂单不推送)，而不是直接Rest：
+// 落库的活跃委托里，除了重启前已经处理过、静静挂在簿子上的，还有落库了但引擎还没处理过的
+// (引擎宕机或落后期间，下单接口已经落库、事件还堆在Kafka里)，两种在数据库里长得一模一样。
+// 直接Rest会让后一种交叉地挂在簿子上，随后Kafka里它们的下单事件又被当成重复跳过，永远不成交。
+// 重放对前一种是安全的：一组互不相交的挂单，按任何顺序重放都不会产生成交。
 //
 // EntryTime换算成跟运行时time.Now().UnixNano()同一量纲(都是纳秒)，不是直接拿
 // 毫秒级的create_time数值当纳秒用——否则恢复的挂单在数值上会比重启后新提交的委托小
@@ -104,41 +105,39 @@ func (e *EngineService) RecoverOrderBook(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("查询待恢复委托失败: %w", err)
 	}
-	restored := 0
-	for _, o := range orders {
+	restored, healed := 0, 0
+	for i := range orders {
+		o := &orders[i]
 		if !e.OwnsSymbol(o.Symbol) {
 			// 分片部署下，这个symbol的真实订单簿在另一个实例里，这里恢复了也只是个永远
 			// 用不到、跟真实状态失联的本地副本，白占内存还可能误导查询到这个实例的/depth，
 			// 见docs/engine-sharding.md
 			continue
 		}
-		remaining := o.RemainingAmount()
-		if remaining.Sign() <= 0 {
+		if o.RemainingAmount().Sign() <= 0 {
 			// 理论上不会出现(open/partially_filled不该有remaining<=0)，防御性跳过而不是
 			// 直接panic——恢复流程本身不该因为一笔脏数据整体失败，见下面的日志
-			log.Printf("[WARN] 恢复订单簿时orderId=%d剩余量%s<=0(不应该发生)，跳过", o.OrderID, remaining)
+			log.Printf("[WARN] 恢复订单簿时orderId=%d剩余量%s<=0(不应该发生)，跳过", o.OrderID, o.RemainingAmount())
 			continue
 		}
-		resting := &matching.RestingOrder{
-			OrderID:     o.OrderID,
-			UID:         o.UID,
-			Side:        o.Side,
-			Action:      o.Action,
-			Direction:   matching.DirectionOf(o.Side, o.Action),
-			Price:       o.Price,
-			Remaining:   remaining,
-			EntryTime:   o.CreateTime * int64(time.Millisecond),
-			ReduceOnly:  o.ReduceOnly,
-			Liquidation: o.Liquidation,
+		// 按create_time顺序把每笔活跃委托重放进撮合(先Match再Rest，就是正常下单走的那条路径)，
+		// 而不是直接Rest。落库的活跃委托里有两种：重启前已经处理过、静静挂在簿子上的；落库了但
+		// 引擎还没处理过的(引擎宕机或落后期间，下单接口已经落库、事件还堆在Kafka里)。这两种在
+		// 数据库里长得一模一样，直接Rest会让第二种交叉地挂在簿子上，随后Kafka里它们的下单
+		// 事件又被当成重复跳过，永远不成交。重放进Match对第一种是安全的——一组互不相交的挂单
+		// 不管按什么顺序重放都不会产生成交，见matching.TestBook_ReplayUncrossedSetThroughMatch；
+		// 对第二种正好补上它们本该有的撮合。见docs/order-book-recovery.md
+		matched, err := e.submitOrder(ctx, o, o.CreateTime*int64(time.Millisecond), true)
+		if err != nil {
+			return fmt.Errorf("恢复订单簿重放orderId=%d失败: %w", o.OrderID, err)
 		}
-		book := e.matchingEngine.BookFor(o.Symbol)
-		if !book.Rest(resting) {
-			log.Printf("[WARN] 恢复订单簿时orderId=%d已经在簿子上(不应该发生)，跳过", o.OrderID)
-			continue
+		if matched {
+			healed++
+			log.Printf("[WARN] 恢复订单簿时orderId=%d重放产生了成交(落库后引擎没来得及处理的委托，已补上撮合)", o.OrderID)
 		}
 		restored++
 	}
-	log.Printf("订单簿重建完成，恢复%d笔挂单(共查到%d笔待恢复委托)", restored, len(orders))
+	log.Printf("订单簿重建完成，重放%d笔活跃委托(共查到%d笔待恢复)，其中%d笔重放时补上了撮合", restored, len(orders), healed)
 	return nil
 }
 
@@ -146,13 +145,23 @@ func (e *EngineService) RecoverOrderBook(ctx context.Context) error {
 // 强平单由liquidation.go在这里落库。
 // 这个方法负责真正的撮合+结算+挂簿/释放。
 func (e *EngineService) SubmitOrder(ctx context.Context, order *model.Order, entryTime int64) error {
+	_, err := e.submitOrder(ctx, order, entryTime, false)
+	return err
+}
+
+// SubmitOrder的实际实现，多返回一个matched表示这次有没有产生成交/自成交摘单。recovering=true是
+// 进程启动恢复订单簿时的重放：纯挂单(没有成交)时不推送深度和账户快照——恢复一个有几万笔挂单
+// 的订单簿，每笔都推一次会变成几万次Redis发布加几万次数据库查询，而这些挂单在重启前早就
+// 推送过了，客户端本来就知道；只有真的产生了成交(重放帮"落库了但引擎还没处理过"的订单补上了
+// 撮合)才需要推送
+func (e *EngineService) submitOrder(ctx context.Context, order *model.Order, entryTime int64, recovering bool) (matched bool, err error) {
 	// 分片部署下，这个symbol可能根本不归这个实例负责——e.matchingEngine.BookFor(order.Symbol)
 	// 只会拿到一个从来没有真实挂单的本地空订单簿，绝不能在上面跑真正的撮合，那会把这笔
 	// 委托错误地判定成"没有对手盘"，而真正拥有这个symbol订单簿的实例会独立收到同一条
 	// (fan-out)事件、正常处理，这里必须直接跳过，不碰book也不做任何DB变更。见
 	// docs/engine-sharding.md
 	if !e.OwnsSymbol(order.Symbol) {
-		return nil
+		return false, nil
 	}
 	// 防御Kafka at-least-once语义下的重复投递(internal/mq的消费者本身不做去重)：
 	// ①状态已经不是"待处理"(已经被别的事件处理成filled/canceled/rejected)——不能对一笔
@@ -163,12 +172,12 @@ func (e *EngineService) SubmitOrder(ctx context.Context, order *model.Order, ent
 	// 依然防不住)，见docs/known-limitations.md
 	if !model.ActiveOrderStatuses[order.Status] {
 		log.Printf("[WARN] orderId=%d 状态已经是%s(不是待处理状态)，跳过(可能是重复的下单事件)", order.OrderID, order.Status)
-		return nil
+		return false, nil
 	}
 	book := e.matchingEngine.BookFor(order.Symbol)
 	if book.Contains(order.OrderID) {
 		log.Printf("[WARN] orderId=%d 已经在订单簿里，跳过重复的下单事件", order.OrderID)
-		return nil
+		return false, nil
 	}
 
 	// 进入订单簿的order，只包含了下单的order中的一部分必要数据
@@ -213,7 +222,11 @@ func (e *EngineService) SubmitOrder(ctx context.Context, order *model.Order, ent
 	}
 	// 只有订单簿真的发生了变化(成交、自成交摘单、挂进新单)才推送深度快照——一笔市价单
 	// 缺流动性、什么都没吃到、也没有剩余量可挂的情况下，订单簿状态没变，不需要推送
-	if len(fills) > 0 || len(selfCanceled) > 0 || rested {
+	matched = len(fills) > 0 || len(selfCanceled) > 0
+	if recovering && !matched {
+		return false, nil // 恢复时的纯挂单：见submitOrder上面的说明，不推送
+	}
+	if matched || rested {
 		e.push.PublishDepth(ctx, order.Symbol, book.Depth(matching.DefaultDepthLevels))
 	}
 	// 提交者自己的账户快照必须推——哪怕这笔委托一口成交都没吃到、只是静静挂在簿子上，
@@ -223,7 +236,7 @@ func (e *EngineService) SubmitOrder(ctx context.Context, order *model.Order, ent
 	for uid := range touchedUIDs {
 		e.push.PublishUserSnapshot(ctx, uid)
 	}
-	return nil
+	return matched, nil
 }
 
 // /PublishDepth 暴露给LiquidationService/ConditionalOrderService这些

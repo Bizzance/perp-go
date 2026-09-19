@@ -669,6 +669,11 @@ GET /order/detail?uid=10001&requestId=order-20260919-0001
 `PERP_ENGINE_HTTP_ADDR`可配），理由见 [order-book.md](order-book.md#为什么深度接口开在contract-engine而不是contract-api)。
 分片部署下只有负责这个合约的实例能回答，见 [engine-sharding.md](engine-sharding.md)。
 
+### `GET /health`（`contract-engine`）
+
+存活探针，返回`{"status":"ok"}`。订单簿恢复在HTTP服务启动之前就跑完了（恢复失败进程会直接退出），所以探针
+通过就代表订单簿是完整的。
+
 ### `GET /depth?symbol=BTCUSDT&levels=20`
 
 `levels`默认20档。按价格聚合，不含单笔委托的uid/orderId：

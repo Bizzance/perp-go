@@ -240,3 +240,64 @@ func TestBook_DepthMaxLevels(t *testing.T) {
 		t.Fatalf("应该是价格最高的前2档, got %+v", depth.Bids)
 	}
 }
+
+// 订单簿恢复时把落库的活跃挂单按时间顺序逐个重放进Match，依赖这个不变量：一组互不相交的
+// 挂单(最高买价<最低卖价)，不管按什么顺序重放，任何一步的对手盘都是这组挂单的子集，不可能
+// 交叉，所以不会撮合出任何成交——恢复不会凭空造出世界上没发生过的成交
+func TestBook_ReplayUncrossedSetThroughMatch_ProducesNoFills(t *testing.T) {
+	orders := []*RestingOrder{
+		newResting(1, 1, Buy, "99", "1", 1),
+		newResting(2, 2, Sell, "101", "2", 2),
+		newResting(3, 3, Buy, "100", "1.5", 3),
+		newResting(4, 4, Sell, "102", "1", 4),
+		newResting(5, 5, Buy, "98", "3", 5),
+		newResting(6, 6, Sell, "101", "0.5", 6),
+	}
+	// 时间顺序、倒序、乱序三种重放顺序结果必须一样
+	for name, order := range map[string][]int{
+		"时间顺序": {0, 1, 2, 3, 4, 5},
+		"倒序":   {5, 4, 3, 2, 1, 0},
+		"乱序":   {3, 0, 5, 2, 4, 1},
+	} {
+		b := NewBook()
+		for _, i := range order {
+			o := *orders[i] // 拷贝一份，Match会改Remaining
+			fills, selfCanceled := b.Match(&o)
+			if len(fills) != 0 || len(selfCanceled) != 0 {
+				t.Fatalf("%s: 互不相交的挂单重放不该有成交, orderId=%d got %d fills", name, o.OrderID, len(fills))
+			}
+			if o.Remaining.Sign() > 0 {
+				b.Rest(&o)
+			}
+		}
+		depth := b.Depth(0)
+		if len(depth.Bids) != 3 || len(depth.Asks) != 2 {
+			t.Fatalf("%s: 重放后应该全部挂在簿子上, got bids=%d asks=%d", name, len(depth.Bids), len(depth.Asks))
+		}
+	}
+}
+
+// 落库了但引擎还没处理过的订单(引擎宕机/落后期间，下单接口已经落库、事件还堆在Kafka里)，
+// 重启恢复时它们是交叉的。之前恢复直接Rest不Match，随后Kafka里的下单事件又被当成重复跳过，
+// 这两笔单会永远交叉挂在簿子上不成交；重放进Match就能正常撮合
+func TestBook_ReplayCrossedPairThroughMatch_Fills(t *testing.T) {
+	b := NewBook()
+	sell := newResting(1, 1, Sell, "60000", "0.1", 1)
+	buy := newResting(2, 2, Buy, "60000", "0.1", 2)
+
+	if fills, _ := b.Match(sell); len(fills) != 0 {
+		t.Fatal("第一笔进空簿子不该有成交")
+	}
+	b.Rest(sell)
+
+	fills, _ := b.Match(buy)
+	if len(fills) != 1 || !fills[0].Volume.Equal(d("0.1")) || !fills[0].Price.Equal(d("60000")) {
+		t.Fatalf("交叉的一对应该撮合成一笔0.1@60000, got %+v", fills)
+	}
+	if buy.Remaining.Sign() != 0 {
+		t.Errorf("买单应该被吃完, remaining=%s", buy.Remaining)
+	}
+	if depth := b.Depth(0); len(depth.Bids) != 0 || len(depth.Asks) != 0 {
+		t.Errorf("成交后簿子应该是空的, got %+v", depth)
+	}
+}
