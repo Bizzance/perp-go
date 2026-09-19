@@ -35,6 +35,7 @@ type Server struct {
 	hub               *ws.Hub
 	lock              *service.LockService
 	txs               *repo.TxRepo
+	auth              *Auth
 }
 
 func NewServer(
@@ -51,6 +52,7 @@ func NewServer(
 	hub *ws.Hub,
 	lock *service.LockService,
 	txs *repo.TxRepo,
+	auth *Auth,
 ) *Server {
 	return &Server{
 		accounts:          accounts,
@@ -66,43 +68,48 @@ func NewServer(
 		hub:               hub,
 		lock:              lock,
 		txs:               txs,
+		auth:              auth,
 	}
 }
 
 func (s *Server) Router() *gin.Engine {
 	r := gin.Default()
-	r.POST("/account/create", s.createAccount)
-	r.POST("/account/balance", s.adjustBalance)
-	r.GET("/account/info", s.accountInfo)
-	r.POST("/account/credit", s.grantCredit)
-	r.POST("/account/insured", s.setInsured)
-	r.POST("/account/round/close", s.closeRound)
-	r.POST("/order/add", s.addOrder)
-	r.POST("/order/cancel/:orderId", s.cancelOrder)
-	r.GET("/order/current", s.orderCurrent)
-	r.GET("/order/history", s.orderHistory)
-	r.POST("/order/conditional/add", s.addConditionalOrder)
-	r.POST("/order/conditional/cancel/:orderId", s.cancelConditionalOrder)
-	r.GET("/order/conditional/current", s.conditionalOrderCurrent)
-	r.GET("/order/conditional/history", s.conditionalOrderHistory)
-	r.GET("/position/current", s.positionCurrent)
-	r.POST("/position/leverage", s.setLeverage)
-	r.GET("/trade/history", s.tradeHistory)
-	r.GET("/funding/rate", s.fundingRate)
-	r.GET("/funding/history", s.fundingHistory)
-	r.GET("/kline", s.kline)
-	r.POST("/index-price", s.setIndexPrice)
-	r.GET("/ws", s.ws)
+	// 全局签名校验+权限检查。每个路由必须用s.auth.Route声明权限范围：ops是运营类接口(加钱扣钱、
+	// 发信用额度、设投保、喂指数价)，其余都是trade；没声明的路由默认拒绝。/health免鉴权，
+	// 用普通的r.GET注册，由中间件内部放行
+	r.Use(s.auth.Middleware())
+	s.auth.Route(r, "POST", "/account/create", ScopeTrade, s.createAccount)
+	s.auth.Route(r, "POST", "/account/balance", ScopeOps, s.adjustBalance)
+	s.auth.Route(r, "GET", "/account/info", ScopeTrade, s.accountInfo)
+	s.auth.Route(r, "POST", "/account/credit", ScopeOps, s.grantCredit)
+	s.auth.Route(r, "POST", "/account/insured", ScopeOps, s.setInsured)
+	s.auth.Route(r, "POST", "/account/round/close", ScopeTrade, s.closeRound)
+	s.auth.Route(r, "POST", "/order/add", ScopeTrade, s.addOrder)
+	s.auth.Route(r, "POST", "/order/cancel/:orderId", ScopeTrade, s.cancelOrder)
+	s.auth.Route(r, "GET", "/order/current", ScopeTrade, s.orderCurrent)
+	s.auth.Route(r, "GET", "/order/history", ScopeTrade, s.orderHistory)
+	s.auth.Route(r, "POST", "/order/conditional/add", ScopeTrade, s.addConditionalOrder)
+	s.auth.Route(r, "POST", "/order/conditional/cancel/:orderId", ScopeTrade, s.cancelConditionalOrder)
+	s.auth.Route(r, "GET", "/order/conditional/current", ScopeTrade, s.conditionalOrderCurrent)
+	s.auth.Route(r, "GET", "/order/conditional/history", ScopeTrade, s.conditionalOrderHistory)
+	s.auth.Route(r, "GET", "/position/current", ScopeTrade, s.positionCurrent)
+	s.auth.Route(r, "POST", "/position/leverage", ScopeTrade, s.setLeverage)
+	s.auth.Route(r, "GET", "/trade/history", ScopeTrade, s.tradeHistory)
+	s.auth.Route(r, "GET", "/funding/rate", ScopeTrade, s.fundingRate)
+	s.auth.Route(r, "GET", "/funding/history", ScopeTrade, s.fundingHistory)
+	s.auth.Route(r, "GET", "/kline", ScopeTrade, s.kline)
+	s.auth.Route(r, "POST", "/index-price", ScopeOps, s.setIndexPrice)
+	s.auth.Route(r, "GET", "/ws", ScopeTrade, s.ws)
 	r.GET("/health", s.health)
-	r.GET("/contract/list", s.contractList)
-	r.GET("/contract/detail", s.contractDetail)
-	r.GET("/market/ticker", s.marketTicker)
-	r.GET("/market/trades", s.marketTrades)
-	r.GET("/order/detail", s.orderDetail)
-	r.POST("/order/cancel-all", s.cancelAllOrders)
-	r.GET("/order/conditional/detail", s.conditionalOrderDetail)
-	r.GET("/account/transactions", s.accountTransactions)
-	r.GET("/liquidation/history", s.liquidationHistory)
+	s.auth.Route(r, "GET", "/contract/list", ScopeTrade, s.contractList)
+	s.auth.Route(r, "GET", "/contract/detail", ScopeTrade, s.contractDetail)
+	s.auth.Route(r, "GET", "/market/ticker", ScopeTrade, s.marketTicker)
+	s.auth.Route(r, "GET", "/market/trades", ScopeTrade, s.marketTrades)
+	s.auth.Route(r, "GET", "/order/detail", ScopeTrade, s.orderDetail)
+	s.auth.Route(r, "POST", "/order/cancel-all", ScopeTrade, s.cancelAllOrders)
+	s.auth.Route(r, "GET", "/order/conditional/detail", ScopeTrade, s.conditionalOrderDetail)
+	s.auth.Route(r, "GET", "/account/transactions", ScopeTrade, s.accountTransactions)
+	s.auth.Route(r, "GET", "/liquidation/history", ScopeTrade, s.liquidationHistory)
 	return r
 }
 

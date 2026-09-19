@@ -1,6 +1,7 @@
 package config
 
 import (
+	"fmt"
 	"log"
 	"os"
 	"strconv"
@@ -34,6 +35,91 @@ type Config struct {
 	// (逗号分隔，如"BTCUSDT,ETHUSDT")。nil(没设这个环境变量)=负责全部symbol，这是单实例
 	// 部署的默认行为，不需要额外配置。见docs/engine-sharding.md
 	EngineSymbols []string
+
+	// AuthDisabled 关闭接口鉴权，只给本地开发用(PERP_AUTH_DISABLED=true)。默认开启：开启但一个
+	// 密钥都没配置时进程拒绝启动，不会悄悄退化成"没有鉴权"，见docs/auth-design.md
+	AuthDisabled bool
+	// APIKeys 合作方的API密钥，来自PERP_API_KEYS，格式见ParseAPIKeys
+	APIKeys []APIKey
+}
+
+// 一个合作方的API凭证。Secret只有双方知道，永远不随请求发送，用来算请求签名
+type APIKey struct {
+	ID     string
+	Secret string
+	Scopes []string // trade=交易和查询类接口，ops=运营类接口(加钱扣钱、发额度、设投保、喂指数价)
+}
+
+// 合法的权限范围。trade和ops分开授权：合作方业务后端需要的和运营/行情源需要的差别很大，
+// 一把只喂指数价的密钥不应该能下单，一把交易密钥不应该能给账户加钱
+var validScopes = map[string]bool{"trade": true, "ops": true}
+
+// 密钥最短长度：太短的secret扛不住暴力破解HMAC
+const minSecretLen = 16
+
+// 启动时检查鉴权配置，两个进程在config.Load之后立刻调用(在连数据库、恢复订单簿、启动消费者之前)：
+// 默认开启鉴权时必须至少有一把密钥，否则拒绝启动，不能悄悄退化成"没有鉴权"。放在配置层统一检查，
+// 是为了两个进程用同一条规则、同一句报错，也不会等到订单簿恢复、开始消费消息之后才发现配置不对
+func (c Config) ValidateAuth() error {
+	if !c.AuthDisabled && len(c.APIKeys) == 0 {
+		return fmt.Errorf("接口鉴权默认开启，必须通过PERP_API_KEYS配置至少一把密钥(格式 id:secret:trade|ops)；" +
+			"本地开发可以设PERP_AUTH_DISABLED=true显式关闭，见docs/auth-design.md")
+	}
+	return nil
+}
+
+// 解析PERP_API_KEYS：逗号分隔多把密钥，每把是`id:secret:scope|scope`，比如
+// `partner-a:0123456789abcdef0123:trade|ops,feeder:abcdef0123456789abcd:ops`。选这个格式而不是
+// JSON，是因为它放进.env文件和环境变量里不用处理引号转义。id和secret里不能出现`:`、`,`、`|`
+func ParseAPIKeys(raw string) ([]APIKey, error) {
+	raw = strings.TrimSpace(raw)
+	if raw == "" {
+		return nil, nil
+	}
+	seen := make(map[string]bool)
+	var keys []APIKey
+	for _, item := range strings.Split(raw, ",") {
+		item = strings.TrimSpace(item)
+		if item == "" {
+			continue
+		}
+		parts := strings.Split(item, ":")
+		if len(parts) != 3 {
+			return nil, fmt.Errorf("密钥格式不对(应该是 id:secret:scope|scope)，注意不要在id/secret里带冒号或逗号")
+		}
+		id, secret := strings.TrimSpace(parts[0]), strings.TrimSpace(parts[1])
+		if id == "" {
+			return nil, fmt.Errorf("密钥的id不能为空")
+		}
+		if seen[id] {
+			return nil, fmt.Errorf("密钥id重复: %s", id)
+		}
+		seen[id] = true
+		if len(secret) < minSecretLen {
+			return nil, fmt.Errorf("密钥%s的secret太短(至少%d位)", id, minSecretLen)
+		}
+		// 环境变量模板里的占位值(CHANGE_ME...)如果原样带进生产，会让服务用一个写在仓库里、
+		// 谁都看得到的密钥启动。占位值可能被补长过第16位的长度检查，所以单独拒绝
+		if strings.Contains(strings.ToLower(secret), "change_me") {
+			return nil, fmt.Errorf("密钥%s的secret还是模板里的占位值，请换成随机串(openssl rand -hex 24)", id)
+		}
+		var scopes []string
+		for _, sc := range strings.Split(parts[2], "|") {
+			sc = strings.TrimSpace(sc)
+			if sc == "" {
+				continue
+			}
+			if !validScopes[sc] {
+				return nil, fmt.Errorf("密钥%s的权限范围不合法: %s(只能是trade或ops)", id, sc)
+			}
+			scopes = append(scopes, sc)
+		}
+		if len(scopes) == 0 {
+			return nil, fmt.Errorf("密钥%s至少要有一个权限范围", id)
+		}
+		keys = append(keys, APIKey{ID: id, Secret: secret, Scopes: scopes})
+	}
+	return keys, nil
 }
 
 func envOr(key, def string) string {
@@ -58,7 +144,13 @@ func Load(defaultNodeID uint64) Config {
 		nodeID = parsed
 		nodeIDExplicit = true
 	}
+	apiKeys, err := ParseAPIKeys(os.Getenv("PERP_API_KEYS"))
+	if err != nil {
+		log.Fatalf("PERP_API_KEYS不合法: %v", err)
+	}
 	return Config{
+		AuthDisabled:              os.Getenv("PERP_AUTH_DISABLED") == "true",
+		APIKeys:                   apiKeys,
 		MySQLDSN:                  envOr("PERP_MYSQL_DSN", "perpgo:local123@tcp(127.0.0.1:3306)/perpgo?parseTime=true&loc=Local"),
 		RedisAddr:                 envOr("PERP_REDIS_ADDR", "127.0.0.1:6379"),
 		RedisPass:                 envOr("PERP_REDIS_PASS", "local123"),

@@ -14,10 +14,19 @@
 
 ### 鉴权
 
-**当前是占位实现：没有任何鉴权**，所有接口（包括加钱扣钱的`/account/balance`、喂指数价的
-`/index-price`）都靠请求里明文传的`uid`识别账户，任何能访问端口的人都能调用。这只适合内网联调，
-**正式对接前必须补上**，方案见 [auth-design.md](auth-design.md)。`uid`始终是独立参数，
-后续换成鉴权中间件时不需要改任何接口的入参。
+**全部接口都要求带请求签名**（API Key + HMAC-SHA256，交易所通行的做法），只有 `GET /health` 免鉴权。
+每个请求带四个头：
+
+```
+X-Api-Key    密钥标识
+X-Timestamp  毫秒时间戳（与服务器相差不能超过 30 秒）
+X-Nonce      随机串，16~64 位，每个请求必须不同（重试也要换）
+X-Signature  HMAC-SHA256(secret, timestamp\nnonce\nMETHOD\npath\nrawQuery\nsha256hex(body)) 的十六进制小写
+```
+
+签名算法、固定测试向量、Python 和 bash 示例、权限范围、错误码见 [auth-design.md](auth-design.md)；
+`deploy/apisign.sh` 可以直接拿来调用。密钥分两种权限范围：`trade`（交易和查询）和 `ops`（加钱扣钱、发信用额度、
+设投保、喂指数价），越权返回 `forbidden`。`uid` 仍然是独立的请求参数。
 
 ### 请求约定
 
@@ -65,6 +74,11 @@
 | `account_not_found`     | 400  | 这个`uid`的账户还没创建，或者`uid`写错了。先调 `POST /account/create`；`uid`写错时这个错误码正好帮你拦住手误 |
 | `idempotency_conflict`  | 400  | 同一个`requestId`已经用于一笔**参数不同**的请求。是调用方误用（同一个键复用到了另一笔请求），换一个新的`requestId` |
 | `round_mismatch`        | 400  | `POST /account/round/close`指定的`round`大于账户当前轮数                                  |
+| `auth_missing`          | 401  | 缺鉴权请求头，或者 nonce/时间戳格式不对                                                   |
+| `auth_expired`          | 401  | 时间戳不在前后 30 秒内。检查合作方服务器的时钟是否同步（NTP）                             |
+| `auth_invalid_signature`| 401  | 签名不对，或者密钥不存在（两种情况故意返回完全相同的响应）                                |
+| `auth_replayed`         | 401  | 这个 nonce 已经用过。每个请求都要用新的 nonce 和新的时间戳重新签名，包括重试              |
+| `forbidden`             | 403  | 签名通过了，但这把密钥没有这个接口的权限范围（比如 `trade` 密钥调加钱接口）               |
 | `dispatch_failed`       | 500  | 委托已落库，但发往撮合引擎失败。**用同一个`requestId`重试即可补发**，不会重复下单     |
 | `internal_error`        | 500  | 服务端内部错误。可以稍后重试；写接口重试前建议先查一次状态或使用`requestId`           |
 
@@ -713,4 +727,6 @@ GET /order/detail?uid=10001&requestId=order-20260919-0001
 | `user:{uid}`              | **私有**。账户快照：`{account, positions, activeOrders}`，结构分别同`/account/info`、`/position/current`、`/order/current`。这个`uid`的挂单/成交/强平/结束本轮之后自动推送，是**完整快照不是增量** |
 
 WS推送不保证绝对不丢（慢客户端的发送队列满了会丢弃新消息），客户端应该定期用REST接口校准状态。
-私有频道目前同样没有鉴权（明文`uid`），见 [auth-design.md](auth-design.md)。
+`GET /ws` 握手时要带同样的签名请求头（`method=GET`，需要 `trade` 权限），握手失败响应不是 101，响应体里有
+`errCode`；连接建立后订阅频道不再需要额外的签名。私有频道 `user:{uid}` 目前不校验这个 uid 是否属于这把密钥
+（单个合作方不需要，多合作方时要做，见 [auth-design.md](auth-design.md)"还没做"）。

@@ -130,6 +130,13 @@ func (c *Cache) Subscribe(ctx context.Context, channels ...string) *redis.PubSub
 	return c.rdb.Subscribe(ctx, channels...)
 }
 
+// 记录一个一次性的随机串，返回true表示这是第一次出现，false表示已经用过。鉴权用它防重放：
+// 同一个请求在时间窗内被截获后重放，nonce重复就会被拒绝。ttl必须覆盖时间戳的整个有效期，
+// 过期太早会让已经用过的nonce又能被重放
+func (c *Cache) ClaimNonce(ctx context.Context, key string, ttl time.Duration) (bool, error) {
+	return c.rdb.SetNX(ctx, key, "1", ttl).Result()
+}
+
 // 基于SETNX的简单分布式锁原语：key不存在才能设置成功(ok=true)，同时给一个
 // TTL防止持锁方崩溃/异常导致永久死锁。token是调用方生成的随机值，配合ReleaseLock按token
 // 校验一致才删——避免"锁已经过期自动释放、被别人抢到，自己却把别人的锁误删"。上层封装见

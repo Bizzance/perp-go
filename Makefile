@@ -36,17 +36,18 @@ build-race:
 	go build -race -o $(BIN_DIR)/contract-api-race ./cmd/contract-api
 	go build -race -o $(BIN_DIR)/contract-engine-race ./cmd/contract-engine
 
+# 本地开发的run目标显式关闭了鉴权(PERP_AUTH_DISABLED=true)，生产用容器部署、必须配置PERP_API_KEYS
 run-api: build-api
-	./$(BIN_DIR)/contract-api
+	PERP_AUTH_DISABLED=true ./$(BIN_DIR)/contract-api
 
 run-engine: build-engine
-	./$(BIN_DIR)/contract-engine
+	PERP_AUTH_DISABLED=true ./$(BIN_DIR)/contract-engine
 
 run-api-race: build-race
-	./$(BIN_DIR)/contract-api-race
+	PERP_AUTH_DISABLED=true ./$(BIN_DIR)/contract-api-race
 
 run-engine-race: build-race
-	./$(BIN_DIR)/contract-engine-race
+	PERP_AUTH_DISABLED=true ./$(BIN_DIR)/contract-engine-race
 
 clean:
 	rm -rf $(BIN_DIR)

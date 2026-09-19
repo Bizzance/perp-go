@@ -23,6 +23,9 @@ import (
 
 func main() {
 	cfg := config.Load(0) // contract-api默认node id=0，跟contract-engine(默认1)区分开
+	if err := cfg.ValidateAuth(); err != nil {
+		log.Fatal(err)
+	}
 	service.InitNodeID(cfg.NodeID)
 
 	dbConn, err := db.Connect(cfg.MySQLDSN)
@@ -58,7 +61,9 @@ func main() {
 
 	hub := ws.NewHub(rdb)
 
-	srv := api.NewServer(accountSvc, positionSvc, coinRepo, orderRepo, conditionalOrderRepo, tradeRepo, klineRepo, markPriceSvc, fundingSvc, producer, hub, lockSvc, txRepo)
+	auth := api.NewAuth(cfg.AuthDisabled, cfg.APIKeys, rdb)
+
+	srv := api.NewServer(accountSvc, positionSvc, coinRepo, orderRepo, conditionalOrderRepo, tradeRepo, klineRepo, markPriceSvc, fundingSvc, producer, hub, lockSvc, txRepo, auth)
 
 	// 收到SIGTERM/SIGINT(docker stop、滚动发布都会发)先停止接收新连接、等在途请求处理完再退出，
 	// 而不是被直接杀掉——下单请求可能正处在"已冻结保证金、还没落库/发Kafka"这一步。WebSocket

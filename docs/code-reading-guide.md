@@ -24,7 +24,7 @@
 5. **需要深入某个子系统时，查下面"文档-代码对照表"，直接跳到对应的repo/service文件**，
    不用整个`internal/`重新翻一遍。
 6. **最后看 [known-limitations.md](known-limitations.md)**：哪些"看起来像bug"的东西
-   其实是明确的设计取舍（比如全仓不支持逐仓、`0=不限制`的约定、明文uid占位鉴权），
+   其实是明确的设计取舍（比如全仓不支持逐仓、`0=不限制`的约定、`uid`是独立参数而不是从鉴权里取），
    免得测试时把已知的MVP简化当成新发现的问题。
 
 ## 代码分层一览
@@ -206,14 +206,14 @@ group id做fan-out、应用层按symbol过滤。详见 [engine-sharding.md](engi
 | Kafka消息去重             | [message-dedup.md](message-dedup.md)                                   | `internal/mq/mq.go`                                                       |
 | WebSocket推送             | [websocket.md](websocket.md)                                           | `service/push.go`, `internal/ws/`, `internal/pubsub/`                     |
 | HTTP接口清单（对接文档）  | [api.md](api.md)                                                       | `internal/api/router.go`, `internal/api/extra.go`, `internal/api/errors.go`, `internal/api/engine_server.go` |
-| 鉴权方案（设计稿，未实现）| [auth-design.md](auth-design.md)                                       | （无对应代码）                                                            |
+| 接口鉴权(API Key+HMAC)   | [auth-design.md](auth-design.md)                                       | （无对应代码）                                                            |
 | 已知限制/明确排除项       | [known-limitations.md](known-limitations.md)                           | （文档性质，无对应代码）                                                  |
 
 ## 看代码时容易疑惑、但其实是既定设计的几个点
 
-- **鉴权是明文uid参数占位**：任何接口/WS订阅传哪个uid就操作哪个账户，没有token校验。
-  不是漏了鉴权中间件，是MVP阶段的明确约定（`api.md`开头写明），以后统一替换，方案见
-  [auth-design.md](auth-design.md)。
+- **`uid`是独立的请求参数，不是从鉴权里取的**：鉴权（`internal/api/auth.go`）只证明"请求来自哪把密钥、
+  有没有权限"，不告诉我们`uid`是谁。合作方是服务端，终端用户的身份由它自己负责，我们信任它传来的`uid`。
+  所以handler里都是自己解析`uid`再`requireAccount`，不要去找"当前登录用户"。
 - **账户必须先创建，API层不会自动建**：`router.go`里的`requireAccount`/`parseAccountUID`统一校验，
   没创建返回`account_not_found`。但service/repo内部仍有`GetOrCreate`——那是给成交结算、强平这类
   "账户一定存在"的内部流程用的，不要在新的对外接口里用它。

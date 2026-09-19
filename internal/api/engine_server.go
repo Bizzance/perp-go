@@ -20,10 +20,11 @@ type EngineServer struct {
 	coins          *repo.CoinRepo
 	ownsSymbol     func(symbol string) bool        // 见docs/engine-sharding.md，nil或恒真=单实例部署
 	enabledSymbols atomic.Pointer[map[string]bool] // 见RefreshSymbols
+	auth           *Auth
 }
 
-func NewEngineServer(matchingEngine *matching.Engine, coins *repo.CoinRepo, ownsSymbol func(symbol string) bool) *EngineServer {
-	s := &EngineServer{matchingEngine: matchingEngine, coins: coins, ownsSymbol: ownsSymbol}
+func NewEngineServer(matchingEngine *matching.Engine, coins *repo.CoinRepo, ownsSymbol func(symbol string) bool, auth *Auth) *EngineServer {
+	s := &EngineServer{matchingEngine: matchingEngine, coins: coins, ownsSymbol: ownsSymbol, auth: auth}
 	empty := map[string]bool{}
 	s.enabledSymbols.Store(&empty)
 	return s
@@ -49,8 +50,10 @@ func (s *EngineServer) RefreshSymbols(ctx context.Context) {
 
 func (s *EngineServer) Router() *gin.Engine {
 	r := gin.Default()
+	// 深度查询虽然是公开行情，也要求带有效签名：引擎的端口不应该有任何免鉴权的入口(/health除外)
+	r.Use(s.auth.Middleware())
 	r.GET("/health", s.health)
-	r.GET("/depth", s.depth)
+	s.auth.Route(r, "GET", "/depth", ScopeTrade, s.depth)
 	return r
 }
 

@@ -36,6 +36,11 @@ func consumerGroupID(base string, cfg config.Config) string {
 func main() {
 	cfg := config.Load(1) // contract-engine默认node id=1，跟contract-api(默认0)区分开
 	service.InitNodeID(cfg.NodeID)
+	// 鉴权配置不对要在最前面就失败：放到订单簿恢复、消费者启动之后才发现的话，重启策略会让它
+	// 反复"恢复订单簿+消费一批消息+崩溃"
+	if err := cfg.ValidateAuth(); err != nil {
+		log.Fatal(err)
+	}
 
 	// 分片模式下每个实例的consumer group id按NodeID拼(见下面consumerGroupID)，如果运维
 	// 开了PERP_ENGINE_SYMBOLS却忘了给每个实例分别设不同的PERP_NODE_ID，多个实例会用同一个
@@ -216,7 +221,9 @@ func main() {
 		}
 	}()
 
-	engineSrv := api.NewEngineServer(matchingEngine, coinRepo, engineSvc.OwnsSymbol)
+	// 引擎的HTTP端口(深度查询)同样要求鉴权，规则和contract-api一致，见docs/auth-design.md
+	engineAuth := api.NewAuth(cfg.AuthDisabled, cfg.APIKeys, rdb)
+	engineSrv := api.NewEngineServer(matchingEngine, coinRepo, engineSvc.OwnsSymbol, engineAuth)
 	engineSrv.RefreshSymbols(ctx) // 启动时先同步刷一次，不然/depth接口刚起来那段时间缓存是空的、全部请求都会被当成"合约不存在"拒绝
 	go func() {
 		ticker := time.NewTicker(time.Duration(cfg.SymbolCacheRefreshMs) * time.Millisecond)

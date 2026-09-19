@@ -61,6 +61,7 @@ Compose 里通过环境变量 `GOPROXY` 传入同一个参数。
 
 ```
 cp deploy/.env.test.example deploy/.env      # 按需改密码；密码里别用 @ : / 等会破坏 DSN 的字符
+sed -i "s/CHANGE_ME/$(openssl rand -hex 24)/" deploy/.env   # 生成 API 密钥；不换的话进程拒绝启动
 make compose-test-up                         # 等价于 docker compose ... up -d --build
 ```
 
@@ -75,12 +76,15 @@ curl localhost:7002/health
 docker compose --env-file deploy/.env -f deploy/docker-compose.yml -f deploy/docker-compose.deps.yml ps
 ```
 
-业务冒烟（创建账户 → 充值 → 喂指数价 → 下单撮合）：
+业务冒烟（创建账户 → 充值 → 喂指数价 → 下单撮合）。接口要求签名，用 `deploy/apisign.sh`（测试环境模板里的密钥
+`partner-a` 同时带 `trade` 和 `ops`）：
 
 ```
-curl -sX POST localhost:7001/account/create -H 'Content-Type: application/json' -d '{"uid":1001}'
-curl -sX POST localhost:7001/account/balance -H 'Content-Type: application/json' -d '{"uid":1001,"amount":10000,"requestId":"dep-1"}'
-curl -sX POST localhost:7001/index-price -H 'Content-Type: application/json' -d '{"symbol":"BTCUSDT","price":60000}'
+export PERP_API_KEY=partner-a
+export PERP_API_SECRET=$(grep -o 'partner-a:[^:]*' deploy/.env | cut -d: -f2)   # 你上面生成的 secret
+deploy/apisign.sh POST localhost:7001/account/create  '{"uid":1001}'
+deploy/apisign.sh POST localhost:7001/account/balance '{"uid":1001,"amount":10000,"requestId":"dep-1"}'
+deploy/apisign.sh POST localhost:7001/index-price     '{"symbol":"BTCUSDT","price":60000}'
 # 再用另一个 uid 下一买一卖两笔同价限价单，见 api.md
 ```
 
@@ -135,6 +139,8 @@ cp deploy/.env.prod.example deploy/.env      # 把所有 CHANGE_ME 换成真实�
 | `PERP_KAFKA_BROKER`     | `host:9092`                                                                               | `127.0.0.1:9092`              |
 | `PERP_API_ADDR`         | api 监听地址                                                                              | `:7001`                       |
 | `PERP_ENGINE_HTTP_ADDR` | engine 的 HTTP 监听地址                                                                   | `:7002`                       |
+| `PERP_API_KEYS`         | 接口鉴权的密钥，格式 `id:secret:trade\|ops`，多把逗号分隔。**必填**，没配置进程拒绝启动    | 空                            |
+| `PERP_AUTH_DISABLED`    | `true` 关闭鉴权，**只给本地开发用，生产绝不能设**                                         | `false`                       |
 | `PERP_NODE_ID`          | 雪花 ID 的节点号，**每个实例必须不同**                                                    | api=0，engine=1               |
 | `PERP_ENGINE_SYMBOLS`   | engine 分片：本实例负责的 symbol，逗号分隔。留空=负责全部（单实例）                       | 空                            |
 
@@ -153,9 +159,13 @@ make compose-prod-up      # 等价于 docker compose --env-file deploy/.env -f d
 
 ### 5. 安全清单（上线前必须过一遍）
 
-- [ ] **鉴权还没做**（方案见 [auth-design.md](auth-design.md)）。在它落地之前，7001、7002 **只能放内网**，由带鉴权和
-  TLS 的网关转发。Compose 里端口默认只绑 `127.0.0.1`（`BIND_ADDR`），网关和这台机器通网时再改成内网地址，
-  **不要绑 `0.0.0.0` 暴露到公网**
+- [ ] **接口鉴权已开启**：`PERP_API_KEYS` 配置了真实密钥（`openssl rand -hex 24` 生成 secret），
+  **`PERP_AUTH_DISABLED` 没有设成 true**。给不同用途发不同的密钥：合作方业务后端 `trade`（需要充值再加 `ops`），
+  行情/运营来源只给 `ops`。方案和协议见 [auth-design.md](auth-design.md)
+- [ ] 7001、7002 仍然建议只放内网，前面有 TLS 网关。Compose 里端口默认只绑 `127.0.0.1`（`BIND_ADDR`），
+  网关和这台机器通网时再改成内网地址，**不要绑 `0.0.0.0` 直接暴露到公网**
+- [ ] **网关没有改写路径、查询串、请求体**（签名覆盖这三样，改写会让签名对不上）
+- [ ] 限流和 IP 白名单还没做（见 auth-design.md"还没做"），需要的话先在网关层做
 - [ ] MySQL、Redis 密码已经覆盖默认值
 - [ ] MySQL、Redis、Kafka 只对应用所在网络开放，不暴露公网
 - [ ] `deploy/.env` 没有提交到 git
@@ -222,7 +232,7 @@ Compose 会重建有变化的服务。几点说明：
   但不能让它不中断。真要高可用需要按 symbol 分片加热备，是后续的事
 - **Compose 本身不是高可用方案**：单机部署，宿主机宕机就全停。上生产建议至少把数据服务放在托管服务里（本文的做法），
   应用层再评估是否需要多机 + 负载均衡
-- **鉴权和限流没有做**，见 [auth-design.md](auth-design.md)、[known-limitations.md](known-limitations.md)
+- **限流、IP 白名单、多合作方的 uid 归属没有做**，见 [auth-design.md](auth-design.md)"还没做"、[known-limitations.md](known-limitations.md)
 - 健康检查每 10 秒一次，会在访问日志里留下 `GET /health` 的记录，属于正常现象
 
 ## 故障排查
@@ -234,5 +244,7 @@ Compose 会重建有变化的服务。几点说明：
 | engine 一直重启                              | 看 `docker logs`：连不上 MySQL/Redis（检查地址、密码、网络）；`恢复订单簿失败`（数据库异常，进程会主动退出）；分片时没设 `PERP_NODE_ID`       |
 | 下单成功但一直不成交                         | 看 engine 日志和消费者组：`kafka-consumer-groups.sh --describe --group contract-engine`。topic 没预建时消费者需要几秒发现（已自动处理）；engine 没起来则事件在 Kafka 里积压，起来后会补处理 |
 | 订单簿里买卖价格交叉挂着                     | 已修复的缺陷（旧版本恢复订单簿的问题），升级到当前版本即可，见 [order-book-recovery.md](order-book-recovery.md)                               |
+| 所有请求返回 `auth_*` 错误                    | `auth_expired`：调用方服务器时钟偏差超过 30 秒（开 NTP）。`auth_invalid_signature`：签名算法对不上，先用 auth-design.md 里的固定测试向量校验；网关改写了路径/查询串/请求体也会导致这个错误 |
+| 进程启动就退出，日志提示配置密钥              | 鉴权默认开启，必须配置 `PERP_API_KEYS`；secret 还是模板里的 `CHANGE_ME` 占位值也会拒绝启动（防止带着写在仓库里的密钥上线）；本地开发才用 `PERP_AUTH_DISABLED=true`                                                              |
 | 端口被占用                                   | 改 `deploy/.env` 里的 `API_PORT`、`ENGINE_PORT`                                                                                               |
 | MySQL 容器起来了但表不存在                   | `schema.sql` 只在数据卷为空时才自动执行。测试环境 `make compose-test-down` 连卷删掉再起；生产环境手工执行                                     |

@@ -52,3 +52,57 @@ func TestLoad_NodeIDExplicit(t *testing.T) {
 		t.Fatalf("设了PERP_NODE_ID=42时应该用42, 实际%d", cfg.NodeID)
 	}
 }
+
+func TestParseAPIKeys(t *testing.T) {
+	keys, err := ParseAPIKeys("partner-a:0123456789abcdef0123:trade|ops, feeder:abcdef0123456789abcd:ops")
+	if err != nil || len(keys) != 2 {
+		t.Fatalf("合法配置应该解析成功, got %v %v", keys, err)
+	}
+	if keys[0].ID != "partner-a" || len(keys[0].Scopes) != 2 || keys[1].Scopes[0] != "ops" {
+		t.Errorf("解析结果不对: %+v", keys)
+	}
+	if keys, err := ParseAPIKeys("  "); err != nil || keys != nil {
+		t.Errorf("空配置=没有密钥，不是错误, got %v %v", keys, err)
+	}
+	bad := map[string]string{
+		"格式不对":     "onlyid",
+		"缺权限":      "a:0123456789abcdef0123:",
+		"权限非法":     "a:0123456789abcdef0123:admin",
+		"secret太短": "a:short:trade",
+		"id为空":     ":0123456789abcdef0123:trade",
+		"id重复":     "a:0123456789abcdef0123:trade,a:abcdef0123456789abcd:ops",
+	}
+	for name, raw := range bad {
+		if _, err := ParseAPIKeys(raw); err == nil {
+			t.Errorf("%s: 应该报错: %q", name, raw)
+		}
+	}
+}
+
+func TestParseAPIKeys_RejectsTemplatePlaceholders(t *testing.T) {
+	// 模板里的占位值就算补长到16位以上也必须拒绝，否则忘了改的部署会带着一个写在仓库里的密钥启动
+	for _, raw := range []string{
+		"partner-a:CHANGE_ME_SECRET:trade",
+		"partner-a:change_me_change_me_change_me:trade",
+		"partner-a:xxxxCHANGE_MExxxxxxxxxxxx:ops",
+	} {
+		if _, err := ParseAPIKeys(raw); err == nil {
+			t.Errorf("占位密钥应该被拒绝: %q", raw)
+		}
+	}
+	if _, err := ParseAPIKeys("partner-a:9f2c4e6a8b0d1f3a5c7e9b1d3f5a7c9e:trade"); err != nil {
+		t.Errorf("随机密钥应该通过, got %v", err)
+	}
+}
+
+func TestConfigValidateAuth(t *testing.T) {
+	if err := (Config{}).ValidateAuth(); err == nil {
+		t.Error("默认开启鉴权且没有密钥，必须拒绝启动")
+	}
+	if err := (Config{AuthDisabled: true}).ValidateAuth(); err != nil {
+		t.Errorf("显式关闭鉴权(本地开发)应该允许, got %v", err)
+	}
+	if err := (Config{APIKeys: []APIKey{{ID: "a", Secret: "0123456789abcdef", Scopes: []string{"trade"}}}}).ValidateAuth(); err != nil {
+		t.Errorf("有密钥应该通过, got %v", err)
+	}
+}

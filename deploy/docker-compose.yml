@@ -14,6 +14,10 @@ x-common-env: &common-env
   PERP_REDIS_ADDR: ${PERP_REDIS_ADDR:?必须设置PERP_REDIS_ADDR}
   PERP_REDIS_PASS: ${PERP_REDIS_PASS:?必须设置PERP_REDIS_PASS}
   PERP_KAFKA_BROKER: ${PERP_KAFKA_BROKER:?必须设置PERP_KAFKA_BROKER}
+  # 接口鉴权：默认开启，必须配置至少一把密钥，否则进程拒绝启动，见docs/auth-design.md。
+  # PERP_AUTH_DISABLED=true只给本地开发用，生产绝对不能设
+  PERP_API_KEYS: ${PERP_API_KEYS:-}
+  PERP_AUTH_DISABLED: ${PERP_AUTH_DISABLED:-false}
 
 services:
   # 有状态：订单簿在内存里，重启时从MySQL重建。默认单实例，同一个symbol的订单簿只能在

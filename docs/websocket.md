@@ -152,10 +152,10 @@ GET /ws  (contract-api，默认端口:7001)
 }
 ```
 
-私有频道`user:{uid}`延续现有REST接口"明文uid占位鉴权"的既定约定（`docs/api.md`已经
-写明"MVP阶段鉴权用明文uid参数占位"）——订阅时直接给uid，不做token校验，任何人理论上
-都能订阅任何uid的私有频道，后续统一换鉴权中间件时和REST接口一起换，方案见
-[auth-design.md](auth-design.md)（含 WS 握手鉴权和 `user:{uid}` 订阅时的 uid 归属校验）。
+**鉴权**：`GET /ws`握手时要带跟REST接口一样的签名请求头（`method=GET`、`path=/ws`，需要`trade`权限），
+握手失败响应不是101、响应体里有`errCode`，见 [auth-design.md](auth-design.md)。握手通过后订阅任何频道
+不再需要额外签名。私有频道`user:{uid}`目前不校验这个uid是否属于这把密钥——单个合作方不需要，
+以后有多个合作方时要做uid归属校验，见 auth-design.md"还没做"。
 
 不认识的控制消息（`op`既不是`subscribe`也不是`unsubscribe`，或者JSON格式不对）直接
 忽略，不会断开连接——容忍客户端偶尔发错格式。
@@ -184,5 +184,5 @@ Hub的广播循环——一个处理不过来的慢客户端不能拖慢所有�
 影响不大，账户快照丢一条相对麻烦，但客户端本来就该定期用REST接口校准，不能假设WS推送
 绝对不丢。
 
-`upgrader.CheckOrigin`恒返回true，没有做Origin校验——这个系统的鉴权本来就是MVP占位
-（明文uid，不校验token/来源），等换成真实鉴权中间件时WS这边一起换。
+`upgrader.CheckOrigin`恒返回true，没有做Origin校验——鉴权靠握手时的请求签名，不靠Origin（浏览器
+WebSocket API也没法设置签名请求头，这个接口本来就只给服务端客户端用）。
