@@ -1,6 +1,6 @@
 BIN_DIR := bin
 
-.PHONY: fmt vet race-check build build-api build-engine test test-integration test-race build-race run-api run-engine run-api-race run-engine-race clean docker-build compose-test-up compose-test-down compose-prod-up
+.PHONY: fmt vet race-check build build-api build-engine test test-integration test-e2e test-race build-race run-api run-engine run-api-race run-engine-race clean docker-build compose-test-up compose-test-down compose-prod-up
 
 fmt:
 	gofmt -w .
@@ -31,6 +31,11 @@ test:
 #   make test-integration ARGS='-v -run TestEngineFreeze ./internal/service/'
 test-integration:
 	./scripts/test-integration.sh
+
+# 端到端冒烟测试：docker compose拉起整套系统(含Kafka)，通过对外接口和WebSocket验证全链路，
+# 结束自动拆掉。冷启动要2到3分钟，发布前跑，不放进日常测试。E2E_KEEP=1保留环境排查
+test-e2e:
+	./scripts/e2e.sh
 
 # -race只在运行时实际经过的代码路径上抓数据竞争，跑测试用例覆盖不到撮合引擎/风控扫描/资金
 # 费率结算这几个真正有并发的地方(都是go func启动的后台goroutine，没有单测覆盖)，所以另外
