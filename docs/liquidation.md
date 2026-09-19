@@ -35,17 +35,34 @@
    中途行情可能已经移动，用陈旧的价格算保护价没有意义。
 2. **超时兜底直接结算**（`settleTimeoutFallback`）：这一批挂出去`LiquidationOrderTimeoutMs`
    （默认10秒）还没成交完，撤掉这一批剩余的部分，按当前标记价直接结算，不再等真实撮合——
-   注意是"这一批"没成交的量，不是整个仓位剩余的量，两者在分批强平下不再相等。
+   注意是"这一批"没成交的量，不是整个仓位剩余的量，两者在分批强平下不再相等。终态按
+   `min(仓位剩余量, 委托剩余量)`是否覆盖了委托的全部剩余量分别写`Filled`/`Canceled`——
+   完全覆盖才是`Filled`；如果这期间仓位量被别的路径也动过、导致实际吃到的比委托剩余量
+   更少，标`Canceled`（等同于"部分成交之后剩余部分被撤销"），不能标`Filled`，否则
+   `RecoverOrderBook`未来进程重启时会漏查这笔委托（只查`open`/`partially_filled`），
+   跟MARKET单缺对手盘那个终态判断是同一套逻辑，见 [known-limitations.md](known-limitations.md)。
 
 `SubmitOrder`是同步撮合的，一批挂单提交之后如果立刻就被吃满/取消（大部分正常流动性下
 应该如此），不需要傻等满`LiquidationOrderTimeoutMs`才检查，马上进入下一批；只有真的没
 成交完才等超时兜底。全部批次处理完（仓位volume归零）循环正常退出；中途任何一步没法继续
-（缺标记价格/缺分档配置/落库失败）会把状态撤回`normal`，交给下一轮风控扫描重新判断
-——不重试同一批，这些失败原因不是"运气不好"，立刻重试大概率还是失败。
+（缺标记价格/缺分档配置/查`coin.MaxVolume`配置失败/落库失败）会把状态撤回`normal`，
+交给下一轮风控扫描重新判断——不重试同一批，这些失败原因不是"运气不好"，立刻重试大概率
+还是失败。查`coin.MaxVolume`配置这一步专门做成失败关闭（DB查询出错或查到`nil`都当失败
+处理，不能悄悄用未截断的`p.Volume`当这一批的量往下走）——DB不稳定的时候恰好是最不该
+放松"单批不超过`MaxVolume`"这道安全阀的时候，已用真实压测验证过：连续查询失败期间
+每一轮风控扫描都正确中止并留给下一轮重试，不卡死也不绕过限制，见
+[known-limitations.md](known-limitations.md)。
 
 `positions.status`在整个强平流程（从第一批到最后一批）期间都是`LIQUIDATING`，
 `MarkLiquidating`是一次原子guard，保证同一个仓位不会被同一轮/连续几轮扫描重复挂出强平
-流程。
+流程——这个guard能生效的前提是`LIQUIDATING`标记在整个分批流程期间不会被中途清掉。
+早期`ApplyCloseFill`（每一批clip自己的成交结算也走这个函数）无条件把`status`写回
+`normal`，等于每处理完一批就把这个标记自己擦掉，让`MarkLiquidating`的guard重新被满足、
+下一轮风控扫描把同一个仓位第二次标记`LIQUIDATING`、派生出第二个并发的`liquidateInClips`
+协程——已经用真实压测复现过（构造价格驱动亏损始终跑赢单批保证金释放的场景），修复成
+`ApplyCloseFill`只在仓位数量真正归零时才把状态改成`Closed`，其余情况原样保留调用前的
+状态，重新验证过同一仓位只会成功`MarkLiquidating`一次。详见
+[known-limitations.md](known-limitations.md)。
 
 ## 强平结算后的两个分支（`HandleLiquidationSettleAftermath`）
 

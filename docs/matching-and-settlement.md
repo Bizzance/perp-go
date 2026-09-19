@@ -108,6 +108,36 @@
 两个分支之后都会扣手续费（maker/taker两档费率，MVP不区分强平单的清算费率），手续费扣款
 也走"先available后credit"顺序。
 
+## 一笔成交里maker/taker两边独立处理，一方失败不连累另一方
+
+`EngineService.settleOneFill`结算一笔成交时，maker/taker两边各自独立走"`ApplyFill`更新
+委托→`SettleFill`结算资金"这条链路，其中一方出错只记`[ERROR]`日志、`continue`到下一方，
+不会直接`return`。这是刻意的取舍：撮合（`Book.Match`）在内存里已经生效、`trades`表也
+已经落库，这笔成交本身已经真实发生，如果这里因为一方结算失败就直接返回，另一方会连
+尝试的机会都没有，变成"记了一笔成交但只有一边真的结算了"的经济不对称状态，比"两边都
+没结算成功"更难排查、也更难人工补救。跟`funding.go`的`settlePositions`——单个仓位资金
+费率结算失败只记日志、不中断其它仓位的批量结算——是同一个取舍。已用真实注入maker侧
+结算失败验证过：taker侧完全正常成交开仓，maker侧订单原样停留在未结算状态、没有产生
+仓位或脏数据，日志能清楚看到是哪个`orderId`结算失败。
+
+## 并发写保护：`ApplyOpenFill`/`ApplyCloseFill`/`ApplyFill`的CAS重试循环
+
+持仓（`ApplyOpenFill`/`ApplyCloseFill`）和委托（`OrderRepo.ApplyFill`）这几个"读当前
+状态、算新值、写回去"的函数，早期实现是直接用SQL相对表达式写（比如
+`position_margin = position_margin + ?`），两次并发调用可以各自基于旧状态计算、写操作
+互不知道对方的存在，后写的会覆盖先写的、丢掉一次更新。现在改成乐观并发（CAS）重试
+循环：先读一次当前行，在Go里算好全部新值，`UPDATE ... WHERE id=? AND <读到的旧值逐字段
+相等>`——`RowsAffected()`为0说明这行在读和写之间被别的并发调用改过了，重新读最新状态
+再试一次，直到成功。
+
+`ApplyCloseFill`额外有一处关键修复：早期实现每次部分平仓（包括强平分批clip自己的成交
+结算）都无条件把`position.status`写回`normal`，会把强平进行中的`LIQUIDATING`标记悄悄
+清掉，让`MarkLiquidating`的原子guard重新被满足、同一个仓位跑出多个并发强平协程——这是
+一次全量代码review发现并真实压测复现过的最严重问题，详见
+[liquidation.md](liquidation.md)"分批强平"一节和 [known-limitations.md](known-limitations.md)。
+现在`ApplyCloseFill`只在仓位数量真正归零时才把状态改成`Closed`，其余情况原样保留调用前
+读到的状态，不再无条件覆盖。
+
 ## 撮合结果的名义价值不是固定的
 
 一个仓位的名义价值 = `volume × 当前标记价格`，会随行情波动变化，所以杠杆上限判断、维持

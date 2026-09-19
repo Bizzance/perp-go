@@ -3,25 +3,31 @@
 ## 两个进程
 
 ```
-                 ┌──────────────────┐         ┌───────────────────┐
-  HTTP 请求  ───▶ │   contract-api   │──Kafka─▶│  contract-engine  │
-                 │ (Gin, 无状态)     │         │ (内存订单簿, 可分片)  │
+  HTTP 请求  ───▶ ┌──────────────────┐         ┌───────────────────┐
+  WS 连接    ───▶ │   contract-api   │──Kafka─▶│  contract-engine  │
+                 │ (Gin+WS网关,无状态)│         │ (内存订单簿, 可分片)  │
                  └──────────────────┘         └───────────────────┘
-                         │                              │
-                         ├──────────────┬───────────────┤
-                         ▼              ▼               ▼
-                      MySQL          Redis           Kafka
-                 (账户/仓位/委托/    (标记价格/       (下单/撤单事件)
-                  分档配置等)       指数价格/资金费率
-                                    采样累加器)
+                         │      ▲                       │      │
+                         │      └────Redis Pub/Sub───────┘      │
+                         ├──────────────┬───────────────────────┤
+                         ▼              ▼                       ▼
+                      MySQL          Redis                   Kafka
+                 (账户/仓位/委托/    (标记价格/指数价格/       (下单/撤单/
+                  分档配置等)       资金费率采样累加器/         结束本轮事件)
+                                    WS推送pub/sub频道)
 ```
 
-- **contract-api**：对外HTTP服务。校验参数、冻结保证金、把委托落库（`status=NEW`），
-  然后发一条事件到Kafka给engine去真正撮合。查询类接口直接读MySQL，不经过engine。
+- **contract-api**：对外HTTP服务+WS网关。校验参数、冻结保证金、把委托落库（`status=NEW`），
+  然后发一条事件到Kafka给engine去真正撮合。查询类接口直接读MySQL，不经过engine。同时
+  承载`GET /ws`：`internal/ws.Hub`按需订阅`contract-engine`发布到Redis的频道、转发给
+  订阅了对应频道的WS客户端，见 [websocket.md](websocket.md)。
 - **contract-engine**：消费Kafka里的下单/撤单事件，维护每个symbol一个内存订单簿（价格-时间
-  优先），撮合成交后做结算（划保证金、结已实现盈亏、扣手续费），并且跑三个后台定时任务：
+  优先），撮合成交后做结算（划保证金、结已实现盈亏、扣手续费），状态变化时顺手通过
+  `internal/service.PushService`往Redis Pub/Sub发布（深度/成交/K线/标记价格/账户快照），
+  并且跑三个后台定时任务：
     - 风控扫描（`RiskScanOnce`）：判断哪些账户需要强平
     - 资金费率采样+结算（`SampleOnce` / `SettleIfDue`）
+    - 条件单触发扫描（`ConditionalOrderService.ScanOnce`）
     - （撮合本身是事件驱动的，不是定时任务）
 
 contract-api是无状态的，可以直接多开实例。contract-engine的"状态"是内存订单簿——进程
@@ -59,12 +65,14 @@ cmd/
   contract-api/       contract-api 进程入口
   contract-engine/    contract-engine 进程入口
 internal/
-  api/                Gin路由/handler层
-  service/            业务逻辑（账户、持仓、结算、强平、资金费率、保险基金）
+  api/                Gin路由/handler层（含WS升级入口ws_server.go）
+  ws/                 contract-api侧WS网关：Hub(频道订阅路由)+Client(单连接读写)
+  pubsub/             WS推送的Redis channel命名规则，发布端(push.go)/订阅端(ws.Hub)共用
+  service/            业务逻辑（账户、持仓、结算、强平、资金费率、保险基金、WS推送编排）
   repo/                数据访问层，一个repo对应一张表
   matching/           订单簿撮合引擎
   model/              领域模型结构体
-  cache/              Redis封装
+  cache/              Redis封装（含WS推送用的Publish/Subscribe）
   mq/                 Kafka生产者/消费者封装
   config/             环境变量配置加载
   db/                 MySQL连接

@@ -44,6 +44,12 @@ FromCredit}`告诉调用方这笔钱分别从两个来源各拿了多少：
 任何一个持仓缺标记价格，未实现盈亏就按0算（不计入买力）——这是保守方向：算少了买力
 顶多让开仓更容易被拒绝，不会让账户透支。
 
+第3级强制冻结（`FreezeForceIntoNegative`）用的`available`/`credit`基准，是紧邻着这次
+调用之前重新读的最新值，不是复用第2级判断时更早读到的快照——两次读之间账户可能被
+并发改过。这一步同时改成CAS写法：`UPDATE ... WHERE available=? AND credit=?`带上
+读到的旧值做守卫，读到的快照跟真正生效的这次扣减对不上时返回失败，让上层按余额不足
+拒绝，而不是拿一个过期基准悄悄执行扣减。
+
 ## "先available后credit"的扣款顺序
 
 已实现盈亏（`SettlePnl`）、手续费（`DeductFee`）这些"从账户里往外扣钱"的场景，统一走
@@ -103,7 +109,14 @@ equity = available + credit + totalUnrealizedPnl
 3. 对全部仍有持仓的symbol，按当前标记价立即强制平仓—— **不走**
    [liquidation.md](liquidation.md)里那套"挂保护价排队+超时兜底"机制：这是用户/合作方
    主动结束本轮，不是风险触发的强平，没必要走保护价滑点缓冲、也没必要等撮合
-4. 调用`AccountService.CloseRound`清零`credit`、重置`is_insured`、`round`+1
+4. 调用`AccountService.CloseRound`清零`credit`、重置`is_insured`、`round`+1——清零前的
+   `credit`值不是提前单独`SELECT`出来的，是`CloseRoundIfRound`用MySQL会话变量在同一条
+   `UPDATE`里原子捕获后返回（写法跟`FreezeSpillToCredit`一致），再拿这个原子返回值记
+   `TxRoundClose`审计流水。早期实现是先单独读一次`credit`、再执行清零的`UPDATE`，这两步
+   之间如果有并发的`GrantCredit`把`credit`改大，`UPDATE`清零的是并发写入后的真实值，
+   但审计流水记的是清零前更早读到的、偏小的旧值，两者会永久对不上（不影响账户实际余额，
+   只影响审计流水这一个数字）——已用真实并发场景验证过：发放和清零的金额在
+   `member_transactions`里精确对应
 
 上面1-3步只要有任何一笔没成功（撤单失败、强平缺标记价格等），就不会执行第4步——
 `AccountService.CloseRound`的前提是这个uid名下已经没有持仓/挂单/待触发条件单，不满足
