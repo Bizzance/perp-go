@@ -34,6 +34,8 @@ type engineEnv struct {
 	engine      *service.EngineService
 	condSvc     *service.ConditionalOrderService
 	liq         *service.LiquidationService
+	funding     *service.FundingService
+	coins       *repo.CoinRepo
 	fund        *service.InsuranceFundService
 
 	uidBase uint64
@@ -77,6 +79,8 @@ func newEngineEnv(t *testing.T) *engineEnv {
 		settlementSvc, e.markPrice, fundSvc, klineSvc, pushSvc, roundCloseProgressRepo, lockSvc, nil)
 	e.condSvc = service.NewConditionalOrderService(e.conditional, e.orders, e.markPrice, e.engine)
 	// 强平单超时兜底设短一点(200ms)，测试里不用干等
+	e.coins = coinRepo
+	e.funding = service.NewFundingService(rdb, coinRepo, positionRepo, repo.NewFundingRepo(conn), e.accounts, txRepo, e.markPrice)
 	e.liq = service.NewLiquidationService(e.engine, e.orders, positionRepo, positionSvc, e.markPrice, e.accounts,
 		fundSvc, coinRepo, 200)
 	return e
