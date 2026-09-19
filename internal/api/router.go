@@ -21,6 +21,12 @@ import (
 	"perp-go/internal/model"
 )
 
+// 往Kafka发事件的能力，生产里是*mq.Producer。抽成接口是为了测试里换成只记录事件的替身，
+// 不用起Kafka就能验证"发了哪些事件"
+type eventPublisher interface {
+	Publish(ctx context.Context, topic, key string, value any) error
+}
+
 type Server struct {
 	accounts          *service.AccountService
 	positions         *service.PositionService
@@ -31,7 +37,7 @@ type Server struct {
 	klines            *repo.KlineRepo
 	markPrice         *service.MarkPriceService
 	funding           *service.FundingService
-	producer          *mq.Producer
+	producer          eventPublisher
 	hub               *ws.Hub
 	lock              *service.LockService
 	txs               *repo.TxRepo

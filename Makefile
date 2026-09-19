@@ -1,6 +1,6 @@
 BIN_DIR := bin
 
-.PHONY: fmt vet race-check build build-api build-engine test test-race build-race run-api run-engine run-api-race run-engine-race clean docker-build compose-test-up compose-test-down compose-prod-up
+.PHONY: fmt vet race-check build build-api build-engine test test-integration test-race build-race run-api run-engine run-api-race run-engine-race clean docker-build compose-test-up compose-test-down compose-prod-up
 
 fmt:
 	gofmt -w .
@@ -25,6 +25,12 @@ build-engine:
 
 test:
 	go test ./...
+
+# 集成测试：真实的MySQL+Redis(scripts/test-integration.sh拉一次性容器，结束自动删)，测试文件带
+# integration构建标签，所以普通的make test不会跑它们。ARGS可以传给go test，比如
+#   make test-integration ARGS='-v -run TestEngineFreeze ./internal/service/'
+test-integration:
+	./scripts/test-integration.sh
 
 # -race只在运行时实际经过的代码路径上抓数据竞争，跑测试用例覆盖不到撮合引擎/风控扫描/资金
 # 费率结算这几个真正有并发的地方(都是go func启动的后台goroutine，没有单测覆盖)，所以另外

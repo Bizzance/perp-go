@@ -22,6 +22,7 @@ U本位永续合约交易系统，MVP阶段。文档按主题拆分，方便单�
 - [api.md](api.md) —— HTTP接口说明（合作方对接文档：约定、错误码、每个接口的请求/响应）
 - [idempotency.md](idempotency.md) —— 接口幂等性：哪些接口需要、`requestId`/`round`怎么做、业界方案对比
 - [auth-design.md](auth-design.md) —— 接口鉴权：API Key + HMAC 签名协议、权限范围、对接示例
+- [testing.md](testing.md) —— 测试：单元/集成两层怎么跑、隔离方式、夹具、怎么写新的集成测试
 - [known-limitations.md](known-limitations.md) —— 已知限制、明确排除项、下一步计划
 
 这些文档记录的是 **当前代码的实际行为**，不是需求文档或历史演进记录——改代码时如果行为变了，要顺手把对应文档改掉，不要让文档和代码分叉。
