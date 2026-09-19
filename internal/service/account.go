@@ -339,6 +339,18 @@ func (s *AccountService) CloseRound(ctx context.Context, uid, round uint64) (boo
 	return true, nil
 }
 
+// 账户权益(全仓下的保证金余额)：全部属于用户的钱加上浮动盈亏——自由余额、自由信用额度、挂单
+// 冻结的保证金、仓位占用的保证金(含来自信用额度的部分)，再加全部持仓的未实现盈亏。
+// 开仓时保证金从available转进冻结/仓位，钱只是换了个地方放，权益不变，价格不动的话权益只会被手续费
+// 拉低；如果只算available，一开仓权益就凭空少了整笔保证金，满仓的账户开仓瞬间就会被强平。
+// 强平判断和账户视图共用这一个口径。买力(开仓够不够钱)另有口径，见FreezeMargin，用的是自由
+// 余额，不含已经占用的保证金
+func Equity(acc *model.Account, positionMargin, totalUnrealized decimal.Decimal) decimal.Decimal {
+	return acc.Available.Add(acc.Credit).
+		Add(acc.FrozenMargin).Add(acc.FrozenCredit).
+		Add(positionMargin).Add(totalUnrealized)
+}
+
 // 查询接口用：账户原始字段+现算的未实现盈亏/权益
 type AccountView struct {
 	UID                uint64          `json:"uid"`
@@ -349,6 +361,7 @@ type AccountView struct {
 	Available          decimal.Decimal `json:"available"`
 	FrozenMargin       decimal.Decimal `json:"frozenMargin"`
 	FrozenCredit       decimal.Decimal `json:"frozenCredit"`
+	PositionMargin     decimal.Decimal `json:"positionMargin"` // 全部持仓占用的保证金之和
 	TotalUnrealizedPnl decimal.Decimal `json:"totalUnrealizedPnl"`
 	Equity             decimal.Decimal `json:"equity"`
 }
@@ -362,6 +375,10 @@ func (s *AccountService) View(ctx context.Context, uid uint64) (*AccountView, er
 	if err != nil {
 		return nil, err
 	}
+	positionMargin, err := s.positions.TotalPositionMargin(ctx, uid)
+	if err != nil {
+		return nil, err
+	}
 	return &AccountView{
 		UID:                uid,
 		IsInsured:          acc.IsInsured,
@@ -371,7 +388,8 @@ func (s *AccountService) View(ctx context.Context, uid uint64) (*AccountView, er
 		Available:          acc.Available,
 		FrozenMargin:       acc.FrozenMargin,
 		FrozenCredit:       acc.FrozenCredit,
+		PositionMargin:     positionMargin,
 		TotalUnrealizedPnl: total,
-		Equity:             acc.Available.Add(acc.Credit).Add(total),
+		Equity:             Equity(acc, positionMargin, total),
 	}, nil
 }

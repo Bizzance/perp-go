@@ -139,11 +139,14 @@ FromCredit}`告诉调用方这笔钱分别从两个来源各拿了多少：
 `GET /account/info`返回的是现算现填的视图，不是`accounts`表原始字段：
 
 ```
-equity = available + credit + totalUnrealizedPnl
+equity = available + credit + frozenMargin + frozenCredit + positionMargin + totalUnrealizedPnl
 ```
 
 `credit`要算进权益，信用额度才能真正起到"扛住浮亏、推迟强平"的作用——强平联合判断
-（见 [liquidation.md](liquidation.md)）用的也是这个口径。`totalUnrealizedPnl`是这个uid
+（见 [liquidation.md](liquidation.md)）用的也是这个口径。挂单冻结的保证金和仓位占用的保证金也要算进去
+（`positionMargin`是这个uid全部持仓占用的保证金之和，含来自信用额度的部分）：开仓只是把钱从`available`
+挪进冻结/仓位，权益不变，价格不动权益只会被手续费拉低。**买力**（开仓够不够钱，见"冻结保证金的四级路径"）
+是另一个口径，只看自由余额`available`（加`credit`和浮盈），不含已经占用的保证金。`totalUnrealizedPnl`是这个uid
 名下全部持仓当前未实现盈亏之和，跟`FreezeMargin`第三级路径共用同一份计算逻辑。
 
 ## 轮次（round）生命周期

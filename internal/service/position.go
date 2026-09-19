@@ -148,6 +148,27 @@ func (s *PositionService) TotalUnrealizedPnl(ctx context.Context, uid uint64) (d
 	return total, nil
 }
 
+// 全部持仓占用的保证金之和(含来自信用额度的部分)，账户权益要把它算进去：开仓成交时这笔钱已经从
+// available里扣走、转成了仓位保证金，但它仍然是用户的钱，是扛浮亏的垫子，不是已经亏掉的
+func sumPositionMargin(positions []model.Position) decimal.Decimal {
+	total := decimal.Zero
+	for _, p := range positions {
+		if p.Volume.Sign() > 0 {
+			total = total.Add(p.PositionMargin)
+		}
+	}
+	return total
+}
+
+// 这个uid名下全部持仓占用的保证金之和，见sumPositionMargin
+func (s *PositionService) TotalPositionMargin(ctx context.Context, uid uint64) (decimal.Decimal, error) {
+	positions, err := s.positions.FindByUID(ctx, uid)
+	if err != nil {
+		return decimal.Zero, err
+	}
+	return sumPositionMargin(positions), nil
+}
+
 // 这个uid名下全部持仓的维持保证金要求之和，风控强平判断用——
 // 维持保证金按分档公式notional*mmr-maintenanceAmount算，档位由这个仓位当前的名义价值决定。
 // 缺标记价格/分档配置的仓位只跳过它自己这一份贡献(计入0，打ERROR日志)，不能因为一个symbol

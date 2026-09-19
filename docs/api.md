@@ -201,7 +201,7 @@ X-Signature  HMAC-SHA256(secret, timestamp\nnonce\nMETHOD\npath\nrawQuery\nsha25
   "data": {
     "uid": 10001, "isInsured": false, "status": "active", "round": 0,
     "credit": "0", "available": "0", "frozenMargin": "0", "frozenCredit": "0",
-    "totalUnrealizedPnl": "0", "equity": "0",
+    "positionMargin": "0", "totalUnrealizedPnl": "0", "equity": "0",
     "created": true
   }
 }
@@ -238,7 +238,8 @@ X-Signature  HMAC-SHA256(secret, timestamp\nnonce\nMETHOD\npath\nrawQuery\nsha25
     "uid": 990102, "isInsured": false, "status": "active", "round": 0,
     "credit": "0", "available": "1115.6",
     "frozenMargin": "0", "frozenCredit": "0",
-    "totalUnrealizedPnl": "100.0000000005", "equity": "1215.6000000005"
+    "positionMargin": "500",
+    "totalUnrealizedPnl": "100.0000000005", "equity": "1715.6000000005"
   }
 }
 ```
@@ -250,8 +251,9 @@ X-Signature  HMAC-SHA256(secret, timestamp\nnonce\nMETHOD\npath\nrawQuery\nsha25
 | `credit`             | 信用额度余额（保险赔付，只能当保证金，不能转出提现）                                     |
 | `available`          | 可用余额。全仓模式下可能为负（持仓浮盈被当作买力借用时）                                 |
 | `frozenMargin` / `frozenCredit` | 挂单占用的冻结保证金，分别来自`available`/`credit`                            |
+| `positionMargin`     | 全部持仓占用的保证金之和（含来自信用额度的部分）。开仓成交时这笔钱从`available`转进仓位   |
 | `totalUnrealizedPnl` | 全部持仓的未实现盈亏之和                                                                 |
-| `equity`             | 账户权益 = `available + credit + totalUnrealizedPnl`，强平判断用的就是这个口径          |
+| `equity`             | 账户权益 = `available + credit + frozenMargin + frozenCredit + positionMargin + totalUnrealizedPnl`，即全部属于用户的钱加浮动盈亏，强平判断用的就是这个口径。开仓只是把钱从`available`挪进保证金，价格不动权益不变（只被手续费拉低） |
 
 ### `POST /account/credit`
 
