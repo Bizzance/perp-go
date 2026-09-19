@@ -30,7 +30,7 @@ func TestParseEngineSymbols(t *testing.T) {
 	}
 }
 
-// TestLoad_NodeIDExplicit 验证NodeIDExplicit只在真的设了PERP_NODE_ID环境变量时才为true——
+// 验证NodeIDExplicit只在真的设了PERP_NODE_ID环境变量时才为true——
 // engine分片模式下main.go靠这个字段做启动时的fail-fast校验(见docs/engine-sharding.md)，
 // 如果这个字段被错误地标记成true，那道校验就会形同虚设
 func TestLoad_NodeIDExplicit(t *testing.T) {

@@ -52,7 +52,7 @@ func main() {
 
 	hub := ws.NewHub(rdb)
 
-	srv := api.NewServer(accountSvc, positionSvc, coinRepo, orderRepo, conditionalOrderRepo, tradeRepo, klineRepo, markPriceSvc, fundingSvc, producer, hub, lockSvc)
+	srv := api.NewServer(accountSvc, positionSvc, coinRepo, orderRepo, conditionalOrderRepo, tradeRepo, klineRepo, markPriceSvc, fundingSvc, producer, hub, lockSvc, txRepo)
 	log.Printf("contract-api listening on %s", cfg.APIAddr)
 	if err := srv.Router().Run(cfg.APIAddr); err != nil {
 		log.Fatalf("http server error: %v", err)

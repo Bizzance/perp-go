@@ -172,6 +172,6 @@ func (s *FundingService) NextFundingTime(coin model.Coin, now int64) int64 {
 	return fundingBoundary(now, intervalMs) + intervalMs
 }
 
-func (s *FundingService) History(ctx context.Context, symbol string, limit int) ([]model.FundingRateRecord, error) {
-	return s.funding.FindHistory(ctx, symbol, limit)
+func (s *FundingService) History(ctx context.Context, symbol string, limit int, before int64) ([]model.FundingRateRecord, error) {
+	return s.funding.FindHistory(ctx, symbol, limit, before)
 }

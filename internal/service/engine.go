@@ -72,7 +72,7 @@ func NewEngineService(
 	}
 }
 
-// OwnsSymbol 这个engine实例是不是负责撮合这个symbol——单实例部署(ownedSymbols为nil)下
+// 这个engine实例是不是负责撮合这个symbol——单实例部署(ownedSymbols为nil)下
 // 恒为true，分片部署下只有配置在PERP_ENGINE_SYMBOLS里的symbol才返回true。任何会碰
 // e.matchingEngine里某个symbol真实订单簿的操作，在处理前都必须先过这道检查——见
 // docs/engine-sharding.md，误判会导致撤单/强平这类操作在一个从来没有真实挂单的本地
@@ -84,7 +84,7 @@ func (e *EngineService) OwnsSymbol(symbol string) bool {
 	return e.ownedSymbols[symbol]
 }
 
-// RecoverOrderBook 进程启动时重建内存订单簿——订单簿(matching.Book)是纯内存结构，
+// 进程启动时重建内存订单簿——订单簿(matching.Book)是纯内存结构，
 // contract-engine重启会丢失全部挂单排队状态，但委托记录本身已经落库，status还是
 // open/partially_filled就说明这笔委托重启前确实还在排队、剩余量就是RemainingAmount()。
 // 按create_time(+order_id兜底同一毫秒内的相对顺序)升序依次直接Rest回对应symbol的订单簿，
@@ -226,7 +226,7 @@ func (e *EngineService) SubmitOrder(ctx context.Context, order *model.Order, ent
 	return nil
 }
 
-// PublishUserSnapshot/PublishDepth 暴露给LiquidationService/ConditionalOrderService这些
+// /PublishDepth 暴露给LiquidationService/ConditionalOrderService这些
 // 跟EngineService协作、但不直接持有PushService的调用方——推送逻辑还是收在EngineService
 // 内部，不是把push字段整个导出
 func (e *EngineService) PublishUserSnapshot(ctx context.Context, uid uint64) {
@@ -238,14 +238,14 @@ func (e *EngineService) PublishDepth(ctx context.Context, symbol string) {
 	e.push.PublishDepth(ctx, symbol, book.Depth(matching.DefaultDepthLevels))
 }
 
-// UnfreezeMargin 暴露给ConditionalOrderService用——条件单触发后落地成真正委托失败时
+// 暴露给ConditionalOrderService用——条件单触发后落地成真正委托失败时
 // (见conditional_order.go的trigger)要把触发前冻结的保证金退回去，跟cancelConditionalOrder
 // 释放冻结保证金是同一个操作，只是调用方所在的service不直接持有AccountService
 func (e *EngineService) UnfreezeMargin(ctx context.Context, uid uint64, availableAmount, creditAmount decimal.Decimal) error {
 	return e.accounts.UnfreezeMargin(ctx, uid, availableAmount, creditAmount)
 }
 
-// handleSelfCanceled 处理自成交保护(STP)摘掉的maker：book.Match内部已经把它们从订单簿里
+// 处理自成交保护(STP)摘掉的maker：book.Match内部已经把它们从订单簿里
 // 摘掉了，这里只需要按正常撤单的收尾逻辑处理DB状态+退保证金。用RestingOrder.Remaining
 // (book.Match返回的、摘除时刻内存里权威的剩余量)，不用再去DB反查——两者理论上一致，但
 // 直接用内存值更直接。一笔taker可能一次撮合摘掉好几笔自己的挂单(比如大额市价单扫过自己
@@ -373,7 +373,7 @@ func sellUID(f matching.Fill) uint64 {
 	return f.TakerOrder.UID
 }
 
-// HandleLiquidationSettleAftermath 强平结算之后调用(挂单排队正常成交见settleOneFill、超时
+// 强平结算之后调用(挂单排队正常成交见settleOneFill、超时
 // 兜底直接结算见liquidation.go的settleTimeoutFallback，两条路径都会走到这里)。side是刚
 // 被强平的这个仓位的方向，穿仓分支触发ADL时要用来定位"该向哪个方向的持仓者强制减仓"（跟
 // 被强平方向相反——比如多头被强平是因为价格下跌亏钱，跟这次价格下跌方向相反、真正因为
@@ -444,24 +444,31 @@ func (e *EngineService) HandleLiquidationSettleAftermath(ctx context.Context, sy
 	return e.accounts.SettleToCredit(ctx, uid, credit.Neg())
 }
 
-// CloseRound 用户主动结束本轮：先撤掉这个uid全部还在排队的委托(跨所有symbol)，再按各自
+// 用户主动结束本轮：先撤掉这个uid全部还在排队的委托(跨所有symbol)，再按各自
 // symbol当前标记价立即强制平掉全部仓位，最后清算资金状态(credit清零/is_insured复位/round+1)。
 // 这不是风险触发的强平，不走LiquidationService那套挂保护价排队+超时兜底——用户自己要结束
 // 本轮，没必要等撮合，直接按标记价了结最快，也不需要保护价滑点缓冲。
 // 跟CancelOrder/正常下单一样通过Kafka事件从contract-api路由到这里执行——撤单要摘掉
 // contract-engine内存里的订单簿，contract-api那边看不到、摸不到。
-// CloseRound 结束本轮——engine分片部署下(docs/engine-sharding.md)这个函数会在每个分片
+// 结束本轮——engine分片部署下(docs/engine-sharding.md)这个函数会在每个分片
 // 实例上各自独立跑一遍(round.close事件fan-out给所有实例)，每个实例只处理自己拥有的
 // symbol那部分(撤单/撤条件单/强平)，全部symbol都确认处理完之后才由抢到锁的那个实例做
 // 一次性的最终资金结算(清零credit、round+1)。单实例部署(没配PERP_ENGINE_SYMBOLS)下
 // 这套流程完全退化成"自己处理完自己立刻结算"，行为跟分片之前一样，只是多了一次进度表
 // 读写(可以忽略不计的开销)
-func (e *EngineService) CloseRound(ctx context.Context, uid uint64) error {
+func (e *EngineService) CloseRound(ctx context.Context, uid, round uint64) error {
 	account, err := e.accounts.GetOrCreate(ctx, uid)
 	if err != nil {
 		return err
 	}
-	round := account.Round
+	// 事件里带的round是"要结束哪一轮"，跟账户当前的round不一致说明这一轮已经结束过了(合作方
+	// 重试，是Kafka重复投递之外的另一次独立调用)——必须忽略，不能按"当前轮"再结束一次：那样会
+	// 把已经推进到下一轮的账户里新挂的单撤掉、新开的仓强平、新发的信用额度清零。round比账户
+	// 当前的还大是不合法的请求(API层已经拦了)，同样忽略
+	if account.Round != round {
+		log.Printf("[WARN] 结束本轮请求的round=%d跟账户当前round=%d不一致，忽略, uid=%d", round, account.Round, uid)
+		return nil
+	}
 
 	activeOrders, err := e.orders.FindActiveByUID(ctx, uid, "")
 	if err != nil {
@@ -504,7 +511,7 @@ func (e *EngineService) CloseRound(ctx context.Context, uid uint64) error {
 	return e.tryFinalizeCloseRound(ctx, uid, round)
 }
 
-// collectRoundCloseSymbols 结束本轮涉及到的全部symbol并集(活跃挂单+条件单+持仓)，去重
+// 结束本轮涉及到的全部symbol并集(活跃挂单+条件单+持仓)，去重
 func collectRoundCloseSymbols(orders []model.Order, conditional []model.ConditionalOrder, positions []model.Position) []string {
 	seen := make(map[string]bool)
 	var symbols []string
@@ -528,7 +535,7 @@ func collectRoundCloseSymbols(orders []model.Order, conditional []model.Conditio
 	return symbols
 }
 
-// closeRoundForSymbol 结束本轮里属于这一个symbol的部分：撤这个symbol上的挂单+条件单，
+// 结束本轮里属于这一个symbol的部分：撤这个symbol上的挂单+条件单，
 // 强平这个symbol上的仓位。调用前调用方已经确认e.OwnsSymbol(symbol)——只有真正拥有这个
 // symbol订单簿的实例才能安全执行CancelOrder，见docs/engine-sharding.md。返回true表示
 // 这个symbol的部分全部处理成功
@@ -571,7 +578,7 @@ func (e *EngineService) closeRoundForSymbol(ctx context.Context, uid uint64, sym
 	return allDone
 }
 
-// tryFinalizeCloseRound 检查这个(uid,round)涉及到的全部symbol是不是都处理完了，全部
+// 检查这个(uid,round)涉及到的全部symbol是不是都处理完了，全部
 // 完成才做"清零credit+round前进"这个只能发生一次的最终结算。还没全部完成不是错误——
 // 大概率是负责其它symbol的分片实例还没轮到处理这个round.close事件(fan-out消费不保证
 // 同时到达每个实例)，直接返回nil、不打ERROR日志，其它实例做完自己那部分之后会各自
@@ -632,7 +639,7 @@ func (e *EngineService) tryFinalizeCloseRound(ctx context.Context, uid, round ui
 	return err
 }
 
-// forceCloseOnePosition 生成一笔"已成交"的市价平仓单落库(留痕、复用SettleFill结算逻辑)，
+// 生成一笔"已成交"的市价平仓单落库(留痕、复用SettleFill结算逻辑)，
 // 立即按标记价全部结算掉——不进撮合引擎的订单簿，不用等对手盘
 // forceCloseOnePosition closeVolume是要强制平掉的量，调用方保证不超过p.Volume(CloseRound
 // 传p.Volume整笔平掉；ADL(adl.go)按需要筹到的金额反推一个更小的量，只平够用的部分)
@@ -661,7 +668,7 @@ func (e *EngineService) forceCloseOnePosition(ctx context.Context, p model.Posit
 	return e.settlement.SettleFill(ctx, o, closeVolume, mark, false, now)
 }
 
-// CancelOrder 从订单簿摘掉委托、退回剩余冻结保证金、落库改CANCELED
+// 从订单簿摘掉委托、退回剩余冻结保证金、落库改CANCELED
 func (e *EngineService) CancelOrder(ctx context.Context, o *model.Order) error {
 	// 分片部署下这个symbol可能不归这个实例负责——绝不能落到下面的fallback分支(book.Cancel
 	// 在本地空订单簿上找不到、以为"已经不在簿子上了"，误把它当CANCELED落库+退保证金，而
@@ -683,7 +690,7 @@ func (e *EngineService) CancelOrder(ctx context.Context, o *model.Order) error {
 	return e.finalizeOrderCancel(ctx, o, remaining)
 }
 
-// finalizeOrderCancel 统一负责"标记DB为CANCELED+按剩余量释放冻结保证金+推送账户快照"——
+// 统一负责"标记DB为CANCELED+按剩余量释放冻结保证金+推送账户快照"——
 // CancelOrder(正常撤单接口触发)和自成交保护(book.Match内部摘除maker，见SubmitOrder)都要
 // 走到这一步，只是"从订单簿摘除"这一步各自的时机/方式不同(前者显式调book.Cancel，后者
 // book.Match内部已经摘完了)，DB落库+保证金释放+推送的逻辑完全一样，不应该写两份
@@ -698,7 +705,7 @@ func (e *EngineService) finalizeOrderCancel(ctx context.Context, o *model.Order,
 	return nil
 }
 
-// cancelAndReleaseMargin 是finalizeOrderCancel的核心逻辑，单独拆出来是因为SubmitOrder
+// 是finalizeOrderCancel的核心逻辑，单独拆出来是因为SubmitOrder
 // 处理MARKET单缺流动性未成交剩余部分时(见下面)也要用这套"标记CANCELED+按比例释放冻结
 // 保证金"逻辑，但不能再推一次账户快照——SubmitOrder末尾已经有统一的touchedUIDs快照推送，
 // 这里再推会重复
@@ -725,7 +732,7 @@ func (e *EngineService) cancelAndReleaseMargin(ctx context.Context, o *model.Ord
 	return true, nil
 }
 
-// cancelConditionalOrder 撤销一笔还没触发的条件单——跟router.go里contract-api那个撤销
+// 撤销一笔还没触发的条件单——跟router.go里contract-api那个撤销
 // 接口是同一套逻辑(原子标记取消+整笔退回冻结保证金，条件单没有"部分成交"这一说)，这里
 // 单独实现一份是因为CloseRound跑在contract-engine进程里，摸不到contract-api那边的Server，
 // 只能直接调repo/AccountService

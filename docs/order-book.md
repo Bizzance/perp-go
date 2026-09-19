@@ -83,15 +83,18 @@ STP摘掉的maker列表，调用方（`EngineService.SubmitOrder`）要对每一
 
 ```go
 type PriceLevel struct {
-Price  decimal.Decimal
-Volume decimal.Decimal
-Count  int
+	Price  decimal.Decimal `json:"price"`
+	Volume decimal.Decimal `json:"volume"`
+	Count  int             `json:"count"`
 }
 type DepthSnapshot struct {
-Bids []PriceLevel // 价格从高到低
-Asks []PriceLevel // 价格从低到高
+	Bids []PriceLevel `json:"bids"` // 价格从高到低
+	Asks []PriceLevel `json:"asks"` // 价格从低到高
 }
 ```
+
+对外的JSON字段名全部小驼峰（`bids`/`asks`/`price`/`volume`/`count`），跟 [api.md](api.md) 的约定一致，
+WS的`depth`频道推的是同一个结构。
 
 `maxLevels<=0`表示不限（返回全部档位）。
 

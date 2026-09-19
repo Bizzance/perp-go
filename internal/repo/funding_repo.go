@@ -28,8 +28,16 @@ func (r *FundingRepo) Insert(ctx context.Context, rec *model.FundingRateRecord) 
 	return err
 }
 
-func (r *FundingRepo) FindHistory(ctx context.Context, symbol string, limit int) ([]model.FundingRateRecord, error) {
+// 历史结算记录，funding_time倒序。before>0只返回funding_time<before的行——
+// 一个symbol一个结算周期只有一条记录，funding_time在symbol内唯一，可以直接当翻页游标
+func (r *FundingRepo) FindHistory(ctx context.Context, symbol string, limit int, before int64) ([]model.FundingRateRecord, error) {
 	var records []model.FundingRateRecord
+	if before > 0 {
+		err := r.db.SelectContext(ctx, &records,
+			`SELECT * FROM funding_rate_history WHERE symbol = ? AND funding_time < ? ORDER BY funding_time DESC LIMIT ?`,
+			symbol, before, limit)
+		return records, err
+	}
 	err := r.db.SelectContext(ctx, &records,
 		`SELECT * FROM funding_rate_history WHERE symbol = ? ORDER BY funding_time DESC LIMIT ?`, symbol, limit)
 	return records, err

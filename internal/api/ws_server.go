@@ -16,7 +16,7 @@ var upgrader = websocket.Upgrader{
 	CheckOrigin: func(r *http.Request) bool { return true },
 }
 
-// ws升级handler：握手成功后创建一个ws.Client、注册进Hub、阻塞跑读写循环直到连接结束。
+// 升级handler：握手成功后创建一个ws.Client、注册进Hub、阻塞跑读写循环直到连接结束。
 // 订阅协议(subscribe/unsubscribe控制消息、channel命名)见docs/websocket.md
 func (s *Server) ws(c *gin.Context) {
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)

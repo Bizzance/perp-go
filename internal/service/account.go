@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"errors"
+	"strconv"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -12,6 +13,17 @@ import (
 )
 
 var ErrInsufficientMargin = errors.New("可用余额不足，无法冻结保证金")
+
+// 账户不存在。合作方必须先调创建账户接口，其它接口不会替他们悄悄建——否则uid手误写错的
+// 充值会成功地充给一个没人认领的账户
+var ErrAccountNotFound = errors.New("账户不存在，请先创建账户")
+
+var (
+	// ErrInsufficientBalance 合作方扣减账户余额(POST /account/balance负数)时available不够
+	ErrInsufficientBalance = repo.ErrInsufficientBalance
+	// ErrIdempotencyConflict 同一个requestId已经用于一笔参数不同的请求
+	ErrIdempotencyConflict = repo.ErrIdempotencyConflict
+)
 
 type AccountService struct {
 	accounts  *repo.AccountRepo
@@ -23,34 +35,61 @@ func NewAccountService(accounts *repo.AccountRepo, positions *PositionService, t
 	return &AccountService{accounts: accounts, positions: positions, tx: tx}
 }
 
+// 按uid查账户，不存在返回(nil, nil)，不会创建
+func (s *AccountService) Find(ctx context.Context, uid uint64) (*model.Account, error) {
+	return s.accounts.FindByUID(ctx, uid)
+}
+
+// 创建账户，已存在就返回已有账户(created=false)——uid是合作方自己体系里的用户ID，重复创建
+// 天然幂等，超时重试没有风险
+func (s *AccountService) Create(ctx context.Context, uid uint64) (view *AccountView, created bool, err error) {
+	_, created, err = s.accounts.CreateIfAbsent(ctx, uid)
+	if err != nil {
+		return nil, false, err
+	}
+	view, err = s.View(ctx, uid)
+	return view, created, err
+}
+
 func (s *AccountService) GetOrCreate(ctx context.Context, uid uint64) (*model.Account, error) {
 	return s.accounts.GetOrCreate(ctx, uid)
 }
 
-// 合作方资金注入/扣减——amount正数=加钱，负数=扣钱
-// 由调用方(handler)在鉴权中间件补上之前先用明文uid参数占位，见plan文件
-func (s *AccountService) AdjustBalance(ctx context.Context, uid uint64, amount decimal.Decimal) error {
+// 合作方资金注入/扣减——amount正数=加钱，负数=扣钱(扣的时候available必须够)。requestId是
+// 必填的幂等键：同一个uid重复提交同一个requestId只会生效一次，replayed=true表示这次是重放、
+// 什么都没做；同一个requestId带了不同金额返回ErrIdempotencyConflict。
+// 由调用方(handler)在鉴权中间件补上之前先用明文uid参数占位，见docs/auth-design.md
+func (s *AccountService) AdjustBalance(ctx context.Context, uid uint64, amount decimal.Decimal, requestID string) (replayed bool, err error) {
 	if amount.IsZero() {
-		return errors.New("调整金额不能为0")
+		return false, errors.New("调整金额不能为0")
 	}
-	acc, err := s.accounts.GetOrCreate(ctx, uid)
+	acc, err := s.accounts.FindByUID(ctx, uid)
 	if err != nil {
-		return err
+		return false, err
 	}
-	if err := s.accounts.SettleToAvailable(ctx, acc.ID, amount); err != nil {
-		return err
+	if acc == nil {
+		return false, ErrAccountNotFound
 	}
-	return s.tx.Insert(ctx, uid, "USDT", model.TxDeposit, amount, time.Now().UnixMilli())
+	kind := repo.FundOpDeposit
+	if amount.Sign() < 0 {
+		kind = repo.FundOpWithdraw
+	}
+	return s.accounts.ApplyFundOp(ctx, repo.FundOp{
+		AccountID: acc.ID, UID: uid, Kind: kind, Amount: amount.Abs(), TxType: model.TxDeposit,
+		RequestID:   requestID,
+		RequestHash: RequestFingerprint("balance", strconv.FormatUint(uid, 10), amount.String()),
+		Now:         time.Now().UnixMilli(),
+	})
 }
 
-// FreezeResult 冻结成功后告诉调用方这笔钱分别从available/credit各拿了多少，调用方(下单接口)
+// 冻结成功后告诉调用方这笔钱分别从available/credit各拿了多少，调用方(下单接口)
 // 要把这个拆分记到订单的frozen_margin/frozen_credit上，撤单/成交转正时才能精确退回来源
 type FreezeResult struct {
 	FromAvailable decimal.Decimal
 	FromCredit    decimal.Decimal
 }
 
-// FreezeMargin 挂单开仓冻结保证金，四级路径依次尝试：
+// 挂单开仓冻结保证金，四级路径依次尝试：
 //  1. available够 → 全部从available冻结
 //  2. available不够，available+credit够 → 缺口从credit冻结
 //  3. 前两级都不够，available+credit+全部持仓未实现盈亏够 → 币安式"持仓浮盈也能当买力
@@ -125,7 +164,7 @@ func (s *AccountService) FreezeMargin(ctx context.Context, uid uint64, amount de
 	return FreezeResult{}, ErrInsufficientMargin
 }
 
-// UnfreezeMargin 撤单/未成交部分释放冻结的保证金，availableAmount/creditAmount分别是
+// 撤单/未成交部分释放冻结的保证金，availableAmount/creditAmount分别是
 // 这笔委托当初从available/credit冻结的比例，必须分开还
 func (s *AccountService) UnfreezeMargin(ctx context.Context, uid uint64, availableAmount, creditAmount decimal.Decimal) error {
 	account, err := s.accounts.GetOrCreate(ctx, uid)
@@ -142,7 +181,7 @@ func (s *AccountService) UnfreezeMargin(ctx context.Context, uid uint64, availab
 	return nil
 }
 
-// DecreaseFrozenMargin 开仓成交：冻结的保证金转移到仓位记账，availableAmount/creditAmount
+// 开仓成交：冻结的保证金转移到仓位记账，availableAmount/creditAmount
 // 是这笔成交对应释放的两部分——调用方紧接着要分别把这两部分还回available/credit
 // (全仓下position_margin只是记账用的名义值，不需要真的搬钱)
 func (s *AccountService) DecreaseFrozenMargin(ctx context.Context, uid uint64, availableAmount, creditAmount decimal.Decimal) error {
@@ -164,7 +203,7 @@ func (s *AccountService) DecreaseFrozenMargin(ctx context.Context, uid uint64, a
 	return nil
 }
 
-// SettleToAvailable 保证金原样归还到available——只用于明确知道钱该回available的场景
+// 保证金原样归还到available——只用于明确知道钱该回available的场景
 // (比如开仓成交后归还冻结时属于available的那一份)，不要用来结算亏损
 func (s *AccountService) SettleToAvailable(ctx context.Context, uid uint64, amount decimal.Decimal) error {
 	account, err := s.accounts.GetOrCreate(ctx, uid)
@@ -174,7 +213,7 @@ func (s *AccountService) SettleToAvailable(ctx context.Context, uid uint64, amou
 	return s.accounts.SettleToAvailable(ctx, account.ID, amount)
 }
 
-// SettleToCredit 跟SettleToAvailable对称，归还冻结时属于credit的那一份
+// 跟SettleToAvailable对称，归还冻结时属于credit的那一份
 func (s *AccountService) SettleToCredit(ctx context.Context, uid uint64, amount decimal.Decimal) error {
 	account, err := s.accounts.GetOrCreate(ctx, uid)
 	if err != nil {
@@ -183,7 +222,7 @@ func (s *AccountService) SettleToCredit(ctx context.Context, uid uint64, amount 
 	return s.accounts.SettleToCredit(ctx, account.ID, amount)
 }
 
-// SettlePnl 已实现盈亏/强平清算缓冲结算，可正可负：盈利只进available；亏损先扣available、
+// 已实现盈亏/强平清算缓冲结算，可正可负：盈利只进available；亏损先扣available、
 // 扣完了再扣credit——运营发放的信用额度尽量少被真实亏损吃掉，是控制赔付成本的取舍
 func (s *AccountService) SettlePnl(ctx context.Context, uid uint64, amount decimal.Decimal) error {
 	account, err := s.accounts.GetOrCreate(ctx, uid)
@@ -193,7 +232,7 @@ func (s *AccountService) SettlePnl(ctx context.Context, uid uint64, amount decim
 	return s.accounts.SettlePnl(ctx, account.ID, amount)
 }
 
-// DeductFee 扣手续费，跟SettlePnl的亏损分支同样的"先available后credit"顺序
+// 扣手续费，跟SettlePnl的亏损分支同样的"先available后credit"顺序
 func (s *AccountService) DeductFee(ctx context.Context, uid uint64, fee decimal.Decimal) error {
 	if fee.Sign() <= 0 {
 		return nil
@@ -224,31 +263,40 @@ func (s *AccountService) FindFreshCredit(ctx context.Context, uid uint64) (decim
 	return s.accounts.FindFreshCredit(ctx, account.ID)
 }
 
-// GrantCredit 合作方发放/追加信用额度(用户买保险后的赔付)，同一轮内可以多次调用、直接累加
-func (s *AccountService) GrantCredit(ctx context.Context, uid uint64, amount decimal.Decimal) error {
+// 合作方发放/追加信用额度(用户买保险后的赔付)，同一轮内可以多次调用、直接累加。requestId的
+// 语义同AdjustBalance——发额度是累加操作，重试不带幂等键会让信用额度翻倍
+func (s *AccountService) GrantCredit(ctx context.Context, uid uint64, amount decimal.Decimal, requestID string) (replayed bool, err error) {
 	if amount.Sign() <= 0 {
-		return errors.New("发放金额必须大于0")
+		return false, errors.New("发放金额必须大于0")
 	}
-	account, err := s.accounts.GetOrCreate(ctx, uid)
+	account, err := s.accounts.FindByUID(ctx, uid)
 	if err != nil {
-		return err
+		return false, err
 	}
-	if err := s.accounts.GrantCredit(ctx, account.ID, amount); err != nil {
-		return err
+	if account == nil {
+		return false, ErrAccountNotFound
 	}
-	return s.tx.Insert(ctx, uid, "USDT", model.TxCreditGrant, amount, time.Now().UnixMilli())
+	return s.accounts.ApplyFundOp(ctx, repo.FundOp{
+		AccountID: account.ID, UID: uid, Kind: repo.FundOpGrantCredit, Amount: amount, TxType: model.TxCreditGrant,
+		RequestID:   requestID,
+		RequestHash: RequestFingerprint("credit", strconv.FormatUint(uid, 10), amount.String()),
+		Now:         time.Now().UnixMilli(),
+	})
 }
 
-// SetInsured 合作方单独设置这个账户本轮是否投保，跟发放信用额度是两个独立的动作，互不联动
+// 合作方单独设置这个账户本轮是否投保，跟发放信用额度是两个独立的动作，互不联动
 func (s *AccountService) SetInsured(ctx context.Context, uid uint64, insured bool) error {
-	account, err := s.accounts.GetOrCreate(ctx, uid)
+	account, err := s.accounts.FindByUID(ctx, uid)
 	if err != nil {
 		return err
+	}
+	if account == nil {
+		return ErrAccountNotFound
 	}
 	return s.accounts.SetInsured(ctx, account.ID, insured)
 }
 
-// CloseRound 结束本轮的资金收尾：credit清零(没用完的赔付额度不追讨)、is_insured重置、
+// 结束本轮的资金收尾：credit清零(没用完的赔付额度不追讨)、is_insured重置、
 // round+1。调用前必须已经没有持仓/挂单——这里只做资金状态收尾，强平仓位/撤销挂单由
 // 更上层的编排负责(见EngineService.CloseRound)。round是调用方预期的"当前轮次"，只有
 // account当前round还是这个值才会真的执行，返回false表示round已经被别的调用推进过了
@@ -274,7 +322,7 @@ func (s *AccountService) CloseRound(ctx context.Context, uid, round uint64) (boo
 	return true, nil
 }
 
-// AccountView 查询接口用：账户原始字段+现算的未实现盈亏/权益
+// 查询接口用：账户原始字段+现算的未实现盈亏/权益
 type AccountView struct {
 	UID                uint64          `json:"uid"`
 	IsInsured          bool            `json:"isInsured"`

@@ -8,7 +8,7 @@ import (
 	"perp-go/internal/model"
 )
 
-// TestEngineService_OwnsSymbol 验证分片归属判断(docs/engine-sharding.md)：没配置分片时
+// 验证分片归属判断(docs/engine-sharding.md)：没配置分片时
 // (ownedSymbols为nil)恒为true，等同于单实例部署负责全部symbol；配置了分片时只有列在
 // 里面的symbol才算自己的——这个判断是SubmitOrder/CancelOrder/RecoverOrderBook/强平/
 // 条件单触发等一系列"绝不能操作到别的实例订单簿"检查的唯一依据，判断错了后果是数据不一致
@@ -42,7 +42,7 @@ func newTestPosition(symbol string, volume string) model.Position {
 	return model.Position{Symbol: symbol, Volume: decimal.RequireFromString(volume)}
 }
 
-// TestCollectRoundCloseSymbols 验证结束本轮(docs/engine-sharding.md"结束本轮的异步化")
+// 验证结束本轮(docs/engine-sharding.md"结束本轮的异步化")
 // 涉及到的symbol并集算得对：三个来源(挂单/条件单/持仓)都要覆盖到、跨来源的重复symbol
 // 只算一次、volume<=0的"空"持仓不该被当成还有事要处理——这个并集决定了round_close_progress
 // 表要给哪些symbol占坑，漏算一个symbol会导致结束本轮永远等不到那个symbol"done"、永远

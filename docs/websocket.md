@@ -89,11 +89,31 @@ contract-engine发布到`perpgo:ws:depth:BTCUSDT`、Hub却在监听`depth:BTCUSD
 
 ```
 depth:{symbol}          公开，DepthSnapshot（内部实际频道 perpgo:ws:depth:{symbol}）
-trade:{symbol}          公开，Trade
+trade:{symbol}          公开，PublicTrade（不含买卖双方uid/委托id）
 kline:{symbol}:{interval}  公开，Kline（六个周期各自独立的频道）
 markprice:{symbol}      公开，{symbol, price}
 user:{uid}              私有，{account, positions, activeOrders}三合一快照
 ```
+
+## 推送消息的数据结构
+
+推送的 `data` 跟对应 REST 接口的返回结构保持一致，合作方可以复用同一份解析代码：
+
+| 频道         | 结构                                                                                       |
+|--------------|--------------------------------------------------------------------------------------------|
+| `depth`      | 同 `GET /depth`：`{bids: [{price, volume, count}], asks: [...]}`                           |
+| `trade`      | 同 `GET /market/trades` 的单条：`{tradeId, symbol, price, volume, takerSide, createTime}`  |
+| `kline`      | 同 `GET /kline` 的单条                                                                     |
+| `user`       | `{account, positions, activeOrders}`，分别同 `/account/info`、`/position/current`、`/order/current` |
+
+几条约定，跟 REST 一致（见 [api.md](api.md)）：字段名全部小驼峰；金额价格是字符串；雪花ID
+（`tradeId`/`orderId`）是字符串；没有数据时是空数组 `[]` 不是 `null`（`activeOrders`没有挂单时就是`[]`）。
+
+**公开成交频道不能带用户身份。** `trade`频道是任何连接都能订阅的公开频道，早期实现直接把内部的
+`Trade`结构推出去，里面有买卖双方的`uid`和委托id——等于把每笔成交的两个用户身份广播给所有订阅者。
+现在推的是`PublicTrade`（`model.Trade.Public()`转换出来的视图），只有成交价、量、吃单方向
+（`takerSide`，`maker`是买单说明吃单方是卖出），已经验证过订阅方收到的帧里不含任何`uid`字段。
+用户自己的成交明细走私有的 `GET /trade/history`。
 
 ## 订阅协议
 
@@ -134,7 +154,8 @@ GET /ws  (contract-api，默认端口:7001)
 
 私有频道`user:{uid}`延续现有REST接口"明文uid占位鉴权"的既定约定（`docs/api.md`已经
 写明"MVP阶段鉴权用明文uid参数占位"）——订阅时直接给uid，不做token校验，任何人理论上
-都能订阅任何uid的私有频道，后续统一换鉴权中间件时和REST接口一起换，不是这次的范围。
+都能订阅任何uid的私有频道，后续统一换鉴权中间件时和REST接口一起换，方案见
+[auth-design.md](auth-design.md)（含 WS 握手鉴权和 `user:{uid}` 订阅时的 uid 归属校验）。
 
 不认识的控制消息（`op`既不是`subscribe`也不是`unsubscribe`，或者JSON格式不对）直接
 忽略，不会断开连接——容忍客户端偶尔发错格式。

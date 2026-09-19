@@ -178,7 +178,7 @@ func (r *PositionRepo) ApplyCloseFill(
 	}
 }
 
-// UpdateLeverage 修改仓位杠杆：newMargin/newCreditMargin是按新杠杆重新算好的、这个仓位
+// 修改仓位杠杆：newMargin/newCreditMargin是按新杠杆重新算好的、这个仓位
 // 应该占用的保证金(及其来自credit的部分)，覆盖写回——调用方已经按新旧保证金的差额完成了
 // FreezeMargin/UnfreezeMargin，这里只负责把仓位自己的记账字段同步成新值。expectedVolume
 // 是调用方读取仓位时看到的volume，WHERE volume=?是乐观并发保护：调用方(router.go的

@@ -16,7 +16,7 @@
 
 ## 分批强平：单批不超过`coin.MaxVolume`
 
-`queueLiquidation`只负责原子标记`LIQUIDATING`+推送快照，真正的强平动作丢给独立goroutine
+`queueLiquidation`只负责原子标记`liquidating`+推送快照，真正的强平动作丢给独立goroutine
 `liquidateInClips`异步循环处理——一个仓位可能要分好几批才能平完，不能占着风控扫描
 （`RiskScanOnce`）这一次tick的时间。
 
@@ -36,9 +36,9 @@
 2. **超时兜底直接结算**（`settleTimeoutFallback`）：这一批挂出去`LiquidationOrderTimeoutMs`
    （默认10秒）还没成交完，撤掉这一批剩余的部分，按当前标记价直接结算，不再等真实撮合——
    注意是"这一批"没成交的量，不是整个仓位剩余的量，两者在分批强平下不再相等。终态按
-   `min(仓位剩余量, 委托剩余量)`是否覆盖了委托的全部剩余量分别写`Filled`/`Canceled`——
-   完全覆盖才是`Filled`；如果这期间仓位量被别的路径也动过、导致实际吃到的比委托剩余量
-   更少，标`Canceled`（等同于"部分成交之后剩余部分被撤销"），不能标`Filled`，否则
+   `min(仓位剩余量, 委托剩余量)`是否覆盖了委托的全部剩余量分别写`filled`/`canceled`——
+   完全覆盖才是`filled`；如果这期间仓位量被别的路径也动过、导致实际吃到的比委托剩余量
+   更少，标`canceled`（等同于"部分成交之后剩余部分被撤销"），不能标`filled`，否则
    `RecoverOrderBook`未来进程重启时会漏查这笔委托（只查`open`/`partially_filled`），
    跟MARKET单缺对手盘那个终态判断是同一套逻辑，见 [known-limitations.md](known-limitations.md)。
 
@@ -53,14 +53,14 @@
 每一轮风控扫描都正确中止并留给下一轮重试，不卡死也不绕过限制，见
 [known-limitations.md](known-limitations.md)。
 
-`positions.status`在整个强平流程（从第一批到最后一批）期间都是`LIQUIDATING`，
+`positions.status`在整个强平流程（从第一批到最后一批）期间都是`liquidating`，
 `MarkLiquidating`是一次原子guard，保证同一个仓位不会被同一轮/连续几轮扫描重复挂出强平
-流程——这个guard能生效的前提是`LIQUIDATING`标记在整个分批流程期间不会被中途清掉。
+流程——这个guard能生效的前提是`liquidating`标记在整个分批流程期间不会被中途清掉。
 早期`ApplyCloseFill`（每一批clip自己的成交结算也走这个函数）无条件把`status`写回
 `normal`，等于每处理完一批就把这个标记自己擦掉，让`MarkLiquidating`的guard重新被满足、
-下一轮风控扫描把同一个仓位第二次标记`LIQUIDATING`、派生出第二个并发的`liquidateInClips`
+下一轮风控扫描把同一个仓位第二次标记`liquidating`、派生出第二个并发的`liquidateInClips`
 协程——已经用真实压测复现过（构造价格驱动亏损始终跑赢单批保证金释放的场景），修复成
-`ApplyCloseFill`只在仓位数量真正归零时才把状态改成`Closed`，其余情况原样保留调用前的
+`ApplyCloseFill`只在仓位数量真正归零时才把状态改成`closed`，其余情况原样保留调用前的
 状态，重新验证过同一仓位只会成功`MarkLiquidating`一次。详见
 [known-limitations.md](known-limitations.md)。
 

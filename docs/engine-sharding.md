@@ -104,7 +104,9 @@ consumer分摊不同分区"那种负载均衡。
 credit、推进round——"全部完成才清算"这个收尾动作的原子性，天然跨越了分片边界，前面两类
 操作都不需要的 **跨进程协调机制**，只有这里需要。
 
-**流程**（`EngineService.CloseRound`，round.close事件fan-out给每个实例）：
+**流程**（`EngineService.CloseRound`，round.close事件fan-out给每个实例，事件里带要结束的`round`，
+跟账户当前`round`不一致的事件被忽略——分片下这也是安全的：只有全部symbol都`done`才会推进`round`，
+所以任何一个实例处理事件时`round`都还没被推进过）：
 
 1. 每个实例收到事件后，先查这个uid当前 (activeOrders + 活跃条件单 + 持仓)涉及到的全部
    symbol并集，往`round_close_progress`表（`uid, round, symbol, done`）用`INSERT

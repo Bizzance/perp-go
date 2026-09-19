@@ -50,11 +50,11 @@ func NewConsumer(brokers []string, topic, groupID string) *Consumer {
 	}
 }
 
-// GroupID 这个Consumer所属的consumer group id，WithDedup要用它来区分不同实例各自独立的
+// 这个Consumer所属的consumer group id，WithDedup要用它来区分不同实例各自独立的
 // 去重记录(见ProcessedMessageRepo)
 func (c *Consumer) GroupID() string { return c.groupID }
 
-// Message 一条Kafka消息交给handler处理时需要的全部信息，包含Topic/Partition/Offset——
+// 一条Kafka消息交给handler处理时需要的全部信息，包含Topic/Partition/Offset——
 // 这三个字段合起来是这条消息在Kafka里的全局唯一坐标，是WithDedup做消息级去重的依据
 type Message struct {
 	Key       []byte
@@ -87,14 +87,14 @@ func (c *Consumer) Close() error {
 	return c.reader.Close()
 }
 
-// DedupChecker 由调用方提供"这条消息是不是第一次处理"的判断，mq包不关心具体用什么存储
+// 由调用方提供"这条消息是不是第一次处理"的判断，mq包不关心具体用什么存储
 // 实现——真正的实现在internal/repo.ProcessedMessageRepo(按consumer_group+topic+partition+
 // offset落MySQL表)，这里只依赖一个小接口，避免mq包直接依赖DB/repo包
 type DedupChecker interface {
 	TryMark(ctx context.Context, consumerGroup, topic string, partition int, offset int64) (bool, error)
 }
 
-// WithDedup 包一层消息级去重：处理前先标记这条消息在groupID这个consumer group下有没有
+// 包一层消息级去重：处理前先标记这条消息在groupID这个consumer group下有没有
 // 处理过，已经处理过的直接跳过、不重复执行handler，防御Kafka at-least-once语义下的重复
 // 投递被业务逻辑处理第二遍——这是完整的消息级方案，不依赖具体业务字段(比如order_id)，见
 // docs/message-dedup.md。groupID按consumer group分开记去重状态(不是全局共享一份)，是

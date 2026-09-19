@@ -11,7 +11,7 @@ import (
 	"perp-go/internal/repo"
 )
 
-// ConditionalOrderService 条件单(止盈止损/条件开仓)触发扫描，运行在contract-engine里，
+// 条件单(止盈止损/条件开仓)触发扫描，运行在contract-engine里，
 // 跟LiquidationService的风控扫描是同一种定时ticker模式。条件单创建/撤销发生在
 // contract-api（router.go），因为那两步只需要读写MySQL、不需要摸撮合引擎的内存订单簿；
 // 触发后要把条件单转成一笔真正的委托并提交撮合，这一步必须在contract-engine进程内完成
@@ -36,7 +36,7 @@ func NewConditionalOrderService(
 	}
 }
 
-// ScanOnce 扫一遍全部还没触发的条件单，标记价格满足触发条件的就触发。同一个symbol的
+// 扫一遍全部还没触发的条件单，标记价格满足触发条件的就触发。同一个symbol的
 // 标记价格在一次扫描里只读一次、缓存复用，不对每个条件单单独查一次Redis
 func (s *ConditionalOrderService) ScanOnce(ctx context.Context) {
 	pending, err := s.conditionalOrders.FindAllPending(ctx)
@@ -71,7 +71,7 @@ func (s *ConditionalOrderService) ScanOnce(ctx context.Context) {
 	}
 }
 
-// trigger 原子标记触发，把条件单落地成一笔真正的委托、提交撮合——完全复用
+// 原子标记触发，把条件单落地成一笔真正的委托、提交撮合——完全复用
 // LiquidationService.queueLiquidation同样的"落库+SubmitOrder"模式，只是这里触发后是
 // 按条件单自己指定的type/price提交，不是强平那种保护价排队
 func (s *ConditionalOrderService) trigger(ctx context.Context, co model.ConditionalOrder, mark decimal.Decimal) {

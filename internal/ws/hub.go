@@ -9,7 +9,7 @@ import (
 	"perp-go/internal/pubsub"
 )
 
-// Hub 管理"Redis channel -> 订阅了它的本地WS连接集合"，用引用计数做懒订阅：第一个客户端
+// 管理"Redis channel -> 订阅了它的本地WS连接集合"，用引用计数做懒订阅：第一个客户端
 // 订阅某个channel时才真正去Redis SUBSCRIBE，最后一个客户端退订/断开时才UNSUBSCRIBE，不会
 // 一次性订阅全部symbol×interval的组合。contract-api进程里只有一个Hub实例，被全部WS连接
 // 共用，见docs/websocket.md
@@ -109,7 +109,7 @@ func (h *Hub) broadcast(channel string, payload []byte) {
 	}
 }
 
-// startRelay 起一个goroutine SUBSCRIBE这个Redis channel，收到消息就转成一条opBroadcast
+// 起一个goroutine SUBSCRIBE这个Redis channel，收到消息就转成一条opBroadcast
 // 操作丢回h.incoming——这样广播的实际执行(查订阅者列表、写各个客户端的send channel)
 // 也在run这个唯一goroutine里串行完成，不会跟subscribe/unsubscribe操作竞态，也不需要
 // 在Hub结构体上加mutex。channel参数是客户端订阅时用的名字(比如"depth:BTCUSDT")，

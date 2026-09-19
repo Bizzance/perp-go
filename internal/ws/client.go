@@ -16,13 +16,13 @@ const (
 	sendBufferSize = 256                 // 单个连接的待发送消息队列，见Client.trySend满了就丢的策略
 )
 
-// controlMessage 客户端发来的订阅/取消订阅控制消息
+// 客户端发来的订阅/取消订阅控制消息
 type controlMessage struct {
 	Op       string   `json:"op"` // "subscribe" / "unsubscribe"
 	Channels []string `json:"channels"`
 }
 
-// Client 一个WS连接，标准gorilla/websocket读写两个goroutine的模式：读goroutine(readPump)
+// 一个WS连接，标准gorilla/websocket读写两个goroutine的模式：读goroutine(readPump)
 // 处理客户端发来的订阅/取消订阅控制消息、检测断连；写goroutine(writePump)把Hub转发过来的
 // 消息写给客户端，附带定时ping心跳。两个goroutine之间用send这个channel传递待发送消息，
 // 不直接共享*websocket.Conn的写操作(gorilla/websocket不允许并发写同一个连接)
@@ -42,7 +42,7 @@ func NewClient(conn *websocket.Conn, hub *Hub) *Client {
 	}
 }
 
-// trySend 非阻塞投递——发送队列满了说明这个客户端处理不过来(网络慢/客户端卡住)，直接丢弃
+// 非阻塞投递——发送队列满了说明这个客户端处理不过来(网络慢/客户端卡住)，直接丢弃
 // 这条消息，不能阻塞Hub的广播循环让一个慢客户端拖慢所有人。深度/成交这类高频公开频道丢一条
 // 影响不大，下一条很快就来；账户快照丢一条相对麻烦，但这属于网络异常情况，客户端本来就该
 // 自己定期用REST接口(GET /account/info等)校准，不能假设WS推送绝对不丢
@@ -54,7 +54,7 @@ func (c *Client) trySend(msg []byte) {
 	}
 }
 
-// Run 启动这个连接的读写循环，阻塞到连接结束——由HTTP升级handler在处理完握手之后调用，
+// 启动这个连接的读写循环，阻塞到连接结束——由HTTP升级handler在处理完握手之后调用，
 // 通常放在一个新goroutine里跑(读写各自还会再起一个goroutine，这个Run本身只是负责收尾)
 func (c *Client) Run() {
 	go c.writePump()

@@ -36,7 +36,7 @@ var (
 	idNodeSet bool
 )
 
-// InitNodeID 进程启动时必须显式调用一次——不同进程/实例必须配不同的node id
+// 进程启动时必须显式调用一次——不同进程/实例必须配不同的node id
 // (PERP_NODE_ID环境变量，见config.Load)，配重了NextID在理论上可能生成重复ID
 func InitNodeID(nodeID uint64) {
 	if nodeID > maxNodeID {
@@ -48,7 +48,7 @@ func InitNodeID(nodeID uint64) {
 	idMu.Unlock()
 }
 
-// NextID 外层是个重试循环：每次尝试都只在真正计算/写状态的那一小段临界区里持有idMu，
+// 外层是个重试循环：每次尝试都只在真正计算/写状态的那一小段临界区里持有idMu，
 // 需要等待(时钟回拨追赶/序列号用尽等下一毫秒)的时候先把锁放掉再睡，不能睡在锁里面——
 // 睡在锁里面等于让这一个调用方的等待，变成整个进程全部NextID调用方(下单、成交、强平单
 // 等全链路)一起等，那就是自己把"锁"变成了"全局停摆开关"，比单纯的CPU空转更糟
@@ -64,7 +64,7 @@ func NextID() uint64 {
 	}
 }
 
-// tryNextID 尝试生成一个ID，第二个返回值false表示这次没生成成功(时钟还没追上来/这一毫秒
+// 尝试生成一个ID，第二个返回值false表示这次没生成成功(时钟还没追上来/这一毫秒
 // 序号用尽)，调用方要在锁外面睡一下再重试——不能在这个函数内部睡，这个函数全程持锁
 func tryNextID() (uint64, bool) {
 	idMu.Lock()

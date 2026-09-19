@@ -14,13 +14,13 @@ type KlineRepo struct{ db *sqlx.DB }
 
 func NewKlineRepo(db *sqlx.DB) *KlineRepo { return &KlineRepo{db: db} }
 
-// KlineBucket 一笔成交要更新的某个周期的那一根K线：周期+这根K线的开盘时间
+// 一笔成交要更新的某个周期的那一根K线：周期+这根K线的开盘时间
 type KlineBucket struct {
 	Interval model.KlineInterval
 	OpenTime int64
 }
 
-// UpsertBatch 一笔成交同时更新好几个周期(1m/5m/15m/1h/4h/1d)各自对应的K线，一条多行
+// 一笔成交同时更新好几个周期(1m/5m/15m/1h/4h/1d)各自对应的K线，一条多行
 // INSERT ... ON DUPLICATE KEY UPDATE原子完成，不是逐个周期分别发一条UPSERT——每笔成交都要
 // 更新全部周期，逐个发送等于让成交结算的热路径每笔成交多等5次DB往返，多行合并成一条SQL
 // 只需要1次往返。MySQL的多行UPSERT里VALUES(列名)是按每一行各自的待插入值算的，不会跟
@@ -50,7 +50,7 @@ func (r *KlineRepo) UpsertBatch(ctx context.Context, symbol string, buckets []Kl
 	return err
 }
 
-// FindByBuckets 一次性查回buckets里指定的那几根K线(每个周期各自的open_time不一样，不能
+// 一次性查回buckets里指定的那几根K线(每个周期各自的open_time不一样，不能
 // 用简单的open_time IN(...)，要按(interval,open_time)配对匹配)——WS推送K线快照时，
 // UpsertBatch写完之后要把写入后的最新状态读回来推给客户端，用这一条SQL一次查完全部
 // 周期，不是每个周期单独查一次
@@ -75,7 +75,7 @@ func (r *KlineRepo) FindByBuckets(ctx context.Context, symbol string, buckets []
 	return rows, err
 }
 
-// FindRecent 最近limit根K线，按开盘时间升序返回(从旧到新，画图/回放的常见习惯)
+// 最近limit根K线，按开盘时间升序返回(从旧到新，画图/回放的常见习惯)
 func (r *KlineRepo) FindRecent(ctx context.Context, symbol string, interval model.KlineInterval, limit int) ([]model.Kline, error) {
 	var rows []model.Kline
 	err := r.db.SelectContext(ctx, &rows,

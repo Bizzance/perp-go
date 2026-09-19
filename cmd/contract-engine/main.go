@@ -22,7 +22,7 @@ import (
 	"perp-go/internal/service"
 )
 
-// consumerGroupID 未开启分片(PERP_ENGINE_SYMBOLS没配)时沿用原有的固定group id，兼容
+// 未开启分片(PERP_ENGINE_SYMBOLS没配)时沿用原有的固定group id，兼容
 // 现有单实例部署、零迁移成本；开启分片后按NodeID给每个实例分配独立的group id，让每个
 // 实例都能独立拿到topic的完整消息流(fan-out)，不依赖Kafka原生的分区负载均衡，见
 // docs/engine-sharding.md
@@ -155,7 +155,7 @@ func main() {
 		if err := json.Unmarshal(msg.Value, &evt); err != nil {
 			return err
 		}
-		return engineSvc.CloseRound(ctx, evt.UID)
+		return engineSvc.CloseRound(ctx, evt.UID, evt.Round)
 	}))
 
 	go func() {

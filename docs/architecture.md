@@ -17,7 +17,7 @@
                                     WS推送pub/sub频道)
 ```
 
-- **contract-api**：对外HTTP服务+WS网关。校验参数、冻结保证金、把委托落库（`status=NEW`），
+- **contract-api**：对外HTTP服务+WS网关。校验参数、冻结保证金、把委托落库（`status=open`），
   然后发一条事件到Kafka给engine去真正撮合。查询类接口直接读MySQL，不经过engine。同时
   承载`GET /ws`：`internal/ws.Hub`按需订阅`contract-engine`发布到Redis的频道、转发给
   订阅了对应频道的WS客户端，见 [websocket.md](websocket.md)。
@@ -65,7 +65,7 @@ cmd/
   contract-api/       contract-api 进程入口
   contract-engine/    contract-engine 进程入口
 internal/
-  api/                Gin路由/handler层（含WS升级入口ws_server.go）
+  api/                Gin路由/handler层：router.go核心交易接口、extra.go查询/批量接口、errors.go错误码、params.go分页与幂等键校验、ws_server.go WS升级入口
   ws/                 contract-api侧WS网关：Hub(频道订阅路由)+Client(单连接读写)
   pubsub/             WS推送的Redis channel命名规则，发布端(push.go)/订阅端(ws.Hub)共用
   service/            业务逻辑（账户、持仓、结算、强平、资金费率、保险基金、WS推送编排）
@@ -78,20 +78,22 @@ internal/
   db/                 MySQL连接
   events/             Kafka事件结构体
 sql/
-  schema.sql          唯一的建表脚本，见下方"数据库迁移"
+  schema.sql          唯一的建库脚本(纯建表+初始数据)，见下方"数据库"
 ```
 
-## 数据库迁移
+## 数据库
 
-这个项目没有独立的迁移工具，`sql/schema.sql`就是唯一的建表脚本。它被设计成 **对任何状态的
-数据库重复执行都是安全的**：
+`sql/schema.sql`是唯一的建库脚本，里面**只有建表语句和演示用的初始数据**，每张表直接写成最终形态：
+所有列、索引、唯一约束都在`CREATE TABLE`里，不出现任何`ALTER TABLE`、`ADD/DROP/MODIFY COLUMN`、
+`CREATE INDEX`这类修改已有表的语句。
 
-- 新表用`CREATE TABLE IF NOT EXISTS`，对全新库和已经建过的库都天然安全。
-- 给已有表加列/加索引， **不能**用`ALTER TABLE ... ADD COLUMN IF NOT EXISTS`这类语法——
-  这是MariaDB的扩展语法，标准MySQL不支持（实测MySQL 8.4会直接报语法错误）。schema.sql里
-  用`information_schema`查列/索引是否存在、拼出动态SQL再`PREPARE`/`EXECUTE`执行的方式来
-  模拟同样的效果。
-
-改schema时如果要给 **已有表**加字段/加索引，照着`sql/schema.sql`里`coins`表和`positions`表
-后面那几段`SET @sql := ...`的写法抄一份，不要直接把新列写进`CREATE TABLE`语句里就完事——
-那样只对全新库有效，对已经跑起来的环境是no-op。
+- 新表用`CREATE TABLE IF NOT EXISTS`，初始数据用`ON DUPLICATE KEY UPDATE`，所以这个文件可以
+  重复执行、不会报错，也不会让种子数据翻倍。
+- **改表结构就直接改对应的`CREATE TABLE`**，不要在文件里追加`ALTER`。`CREATE TABLE IF NOT EXISTS`对
+  已经存在的表是no-op，所以已经建过库的开发/测试环境不会自动跟上新结构，需要重建库
+  （`DROP DATABASE perpgo`后重新执行`schema.sql`）。项目还没有上线、库里没有需要保留的生产数据，
+  这样最简单，也不会在文件里堆积一串历史迁移逻辑。
+- 验证改动的办法：在一个全新库里执行`schema.sql`，再用`information_schema.COLUMNS`/`STATISTICS`
+  跟期望的结构对比。
+- **上线之后这个做法要换**：有了不能丢的数据就不能靠重建库，到时候需要引入独立的迁移工具
+  （每次结构变更一个带版本号的迁移脚本，如`golang-migrate`），`schema.sql`只保留给全新环境做初始化。

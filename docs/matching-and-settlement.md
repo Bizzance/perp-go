@@ -18,19 +18,27 @@
 
 ## 下单校验链（`POST /order/add`）
 
-按顺序做以下校验（任何一步不通过就直接拒绝，不冻结保证金）：
+`addOrder`按顺序做以下校验（任何一步不通过就直接拒绝，不冻结保证金）：
 
-1. `leverage`基本合法性 + 不超过`maxSaneLeverage`（1000，纯粹是防止`uint32`转换溢出的
-   兜底，不是真正的业务上限）
-2. 合约是否存在、是否启用
-3. LIMIT单：价格是否符合`price_tick`最小变动单位
-4. **价格保护带**（只对开仓单生效）：委托价格不能偏离参考价（标记价格，缺失则退回指数
+1. **账户存在**：没创建过的`uid`返回`account_not_found`，不会自动建账户，见
+   [account-and-margin.md](account-and-margin.md)"账户的创建"
+2. `side`/`action`/`type`枚举合法，`leverage`必须是整数且不超过`maxSaneLeverage`（1000，纯粹是防止
+   `uint32`转换溢出的兜底，不是真正的业务上限）
+3. **幂等预检**：传了`requestId`就先查同一个`uid`下有没有同样`requestId`的委托。有：参数指纹一致就
+   直接返回原来那笔（`duplicate=true`，必要时补发下单事件），不一致返回`idempotency_conflict`，
+   都不再往下走，见 [idempotency.md](idempotency.md)
+4. 合约是否存在、是否启用
+5. LIMIT单：价格是否符合`price_tick`最小变动单位
+6. **价格保护带**（只对开仓单生效）：委托价格不能偏离参考价（标记价格，缺失则退回指数
    价格）超过`price_protection_ratio`，防止胖手指和"吃单价"钻空子——详见下面单独一节
-5. 数量是否满足`min_volume`/`max_volume`/`volume_step`
-6. 开仓单： **保证金分档杠杆校验**，见 [risk-limit-tiers.md](risk-limit-tiers.md)
-7. 开仓单：`FreezeMargin`
+7. 数量是否满足`min_volume`/`max_volume`/`volume_step`
+8. 开仓单： **保证金分档杠杆校验**（`LockService`按`uid+symbol+side`串行化），见
+   [risk-limit-tiers.md](risk-limit-tiers.md)
+9. 开仓单：`FreezeMargin`
 
-全部通过后落库（`status=NEW`），发Kafka事件给engine处理撮合。
+全部通过后落库（`status=open`，带`requestId`和参数指纹），再发Kafka事件给engine处理撮合。
+落库时撞了`(uid, request_id)`唯一索引（并发的重复请求）会把这次刚冻结的保证金退回、按重复请求处理；
+落库成功但发Kafka失败返回`dispatch_failed`，带同一个`requestId`重试会补发，不会重复下单。
 
 ## 价格保护带
 
@@ -131,11 +139,11 @@
 再试一次，直到成功。
 
 `ApplyCloseFill`额外有一处关键修复：早期实现每次部分平仓（包括强平分批clip自己的成交
-结算）都无条件把`position.status`写回`normal`，会把强平进行中的`LIQUIDATING`标记悄悄
+结算）都无条件把`position.status`写回`normal`，会把强平进行中的`liquidating`标记悄悄
 清掉，让`MarkLiquidating`的原子guard重新被满足、同一个仓位跑出多个并发强平协程——这是
 一次全量代码review发现并真实压测复现过的最严重问题，详见
 [liquidation.md](liquidation.md)"分批强平"一节和 [known-limitations.md](known-limitations.md)。
-现在`ApplyCloseFill`只在仓位数量真正归零时才把状态改成`Closed`，其余情况原样保留调用前
+现在`ApplyCloseFill`只在仓位数量真正归零时才把状态改成`closed`，其余情况原样保留调用前
 读到的状态，不再无条件覆盖。
 
 ## 撮合结果的名义价值不是固定的

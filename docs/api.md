@@ -1,88 +1,304 @@
 # HTTP接口
 
-`contract-api`进程对外提供的接口。MVP阶段鉴权用明文`uid`参数占位（不做HMAC/token校验），
-`uid`都是独立传参，方便后续直接换成鉴权中间件注入、不用改业务代码。
+面向合作方（客户端）的对接文档。合作方把本系统当作自己系统里专门负责U本位合约交易的子系统，
+通过下面这些接口开户入金、下单、查询、结束本轮。本文所有响应示例都是从真实运行的服务抓取的。
 
-**约定**：GET查询接口走query string；POST写接口统一用JSON body
-（`Content-Type: application/json`），不用表单编码。
+## 对接须知
 
-统一响应格式：
+### 服务与端口
+
+| 进程              | 默认端口 | 提供什么                                           |
+|-------------------|----------|----------------------------------------------------|
+| `contract-api`    | `:7001`  | 本文全部业务接口 + `GET /ws`（WebSocket推送）      |
+| `contract-engine` | `:7002`  | 仅 `GET /depth`（订单簿只存在这个进程的内存里）    |
+
+### 鉴权
+
+**当前是占位实现：没有任何鉴权**，所有接口（包括加钱扣钱的`/account/balance`、喂指数价的
+`/index-price`）都靠请求里明文传的`uid`识别账户，任何能访问端口的人都能调用。这只适合内网联调，
+**正式对接前必须补上**，方案见 [auth-design.md](auth-design.md)。`uid`始终是独立参数，
+后续换成鉴权中间件时不需要改任何接口的入参。
+
+### 请求约定
+
+- GET 查询接口的参数走 query string；POST 写接口统一用 JSON body，`Content-Type: application/json`
+- `uid`是合作方自己体系里的用户ID（正整数，`uint64`），本系统直接沿用、不另外分配编号。**账户必须先用
+  `POST /account/create`创建**，其它接口遇到没创建过的`uid`一律返回`account_not_found`，不会替你悄悄建
+- 金额、价格、数量这类小数：请求里可以传 JSON 数字（`65000`、`0.1`）也可以传字符串（`"0.1"`），
+  服务端按十进制精确解析，不会经过浮点数
+- 枚举字段全部是**小写**且大小写敏感（`"LONG"`会被拒绝）
+
+### 响应格式
+
+**HTTP 状态码固定返回 200**，成功还是失败看 body 里的 `code`：
+
+```json
+{ "code": 200, "message": "success", "data": { } }
+```
+
+```json
+{ "code": 400, "errCode": "insufficient_margin", "message": "可用余额不足，无法冻结保证金" }
+```
+
+- `code`：粗粒度分类，`200`成功 / `400`请求本身有问题（参数、业务规则）/ `429`同一账户的并发请求正在处理，稍后重试 / `500`服务端内部错误
+- `errCode`：**稳定的机器可读错误码，合作方程序应该按它做分支**。`message`是给人看的中文描述，措辞可能调整，不要匹配它的文本
+- 新增错误码只增不改，已经发布的`errCode`含义不会变
+
+### 错误码
+
+| errCode                 | code | 含义 / 建议处理                                                                           |
+|-------------------------|------|-------------------------------------------------------------------------------------------|
+| `invalid_param`         | 400  | 参数缺失、格式或取值不合法，`message`里有具体是哪个参数。修正请求，不要重试               |
+| `symbol_not_found`      | 400  | 合约不存在或已下架。用 `GET /contract/list` 查可用合约                                    |
+| `order_not_found`       | 400  | 委托/条件单不存在，或不属于这个`uid`                                                      |
+| `order_not_cancelable`  | 400  | 委托已成交完/已撤销，或条件单已触发，不能再撤。不是故障，按最新状态处理即可               |
+| `position_not_found`    | 400  | 这个`uid+symbol+side`没有持仓（改杠杆时）                                                 |
+| `no_mark_price`         | 400  | 这个合约还没有标记价格（从没成交过），市价单/校验杠杆无法进行。先用限价单成交出第一个价格 |
+| `price_out_of_range`    | 400  | 限价单价格偏离参考价超过价格保护带（`priceProtectionRatio`），开仓单才会触发              |
+| `price_tick_invalid`    | 400  | 价格不是最小变动单位（`priceTick`）的整数倍                                               |
+| `volume_out_of_range`   | 400  | 数量低于`minVolume`、超过`maxVolume`或不是`volumeStep`的整数倍                            |
+| `tier_not_configured`   | 400  | 这个合约没有配置保证金分档，暂不允许开仓                                                  |
+| `leverage_exceeds_tier` | 400  | 杠杆超出当前仓位名义价值对应档位的上限，档位见 `GET /contract/detail`                     |
+| `insufficient_margin`   | 400  | 可用余额+信用额度+持仓浮盈不够冻结这笔委托的保证金                                        |
+| `insufficient_balance`  | 400  | `POST /account/balance`扣款时可用余额不足                                                 |
+| `server_busy`           | 429  | 同一个`uid+symbol+side`有并发请求正在处理。短暂等待后重试（带`requestId`重试是安全的）|
+| `account_not_found`     | 400  | 这个`uid`的账户还没创建，或者`uid`写错了。先调 `POST /account/create`；`uid`写错时这个错误码正好帮你拦住手误 |
+| `idempotency_conflict`  | 400  | 同一个`requestId`已经用于一笔**参数不同**的请求。是调用方误用（同一个键复用到了另一笔请求），换一个新的`requestId` |
+| `round_mismatch`        | 400  | `POST /account/round/close`指定的`round`大于账户当前轮数                                  |
+| `dispatch_failed`       | 500  | 委托已落库，但发往撮合引擎失败。**用同一个`requestId`重试即可补发**，不会重复下单     |
+| `internal_error`        | 500  | 服务端内部错误。可以稍后重试；写接口重试前建议先查一次状态或使用`requestId`           |
+
+### 数据类型约定
+
+| 类型       | 约定                                                                                                      |
+|------------|-----------------------------------------------------------------------------------------------------------|
+| 金额/价格/数量 | 响应里一律是**字符串**（`"58666.66666667"`），避免JSON数字的浮点精度问题                              |
+| 时间       | 毫秒级 Unix 时间戳（整数），字段名以`Time`结尾                                                            |
+| 委托/成交ID | **字符串**（`"226887380290764800"`）。这是雪花ID，约 2.2×10¹⁷，超过 JS 的安全整数范围（9×10¹⁵），当数字解析会丢精度 |
+| `uid`      | 整数（合作方自己分配的，本系统只透传）                                                                    |
+| 字段命名   | 全部小驼峰（`avgEntryPrice`）                                                                             |
+| 空列表     | 返回`[]`，不会是`null`                                                                                    |
+| 未知字段   | 合作方解析时应当**忽略**响应里不认识的字段，后续版本可能新增字段                                          |
+
+### 枚举
+
+| 字段        | 取值                                                                                                                           |
+|-------------|--------------------------------------------------------------------------------------------------------------------------------|
+| `side`      | `long` 多 / `short` 空                                                                                                         |
+| `action`    | `open` 开仓 / `close` 平仓                                                                                                     |
+| `type`      | `limit` 限价 / `market` 市价                                                                                                   |
+| 委托`status`| `open` 已挂单未成交 / `partially_filled` 部分成交 / `filled` 全部成交 / `canceled` 已撤销（含部分成交后撤销）/ `rejected`（预留，目前不会出现） |
+| 条件单`status` | `pending` 等待触发 / `triggered` 已触发（已转成一笔真正的委托，同一个`orderId`）/ `canceled` 触发前被撤销                  |
+| 仓位`status`| `normal` / `liquidating` 强平进行中 / `closed`                                                                                 |
+| `triggerDirection` | `gte` 标记价格涨到或超过触发价才触发 / `lte` 跌到或低于触发价才触发                                                     |
+| 资金流水`type` | `deposit` 合作方充值/扣减 / `fee` 手续费 / `realized_pnl` 已实现盈亏 / `funding_fee` 资金费 / `credit_grant` 发放信用额度 / `round_close` 结束本轮回收信用额度 / `liquidation_clear` 强平清算 |
+| K线`interval` | `1m` `5m` `15m` `1h` `4h` `1d`                                                                                              |
+
+### 分页
+
+历史类列表接口（`/order/history`、`/order/conditional/history`、`/trade/history`、
+`/funding/history`、`/account/transactions`、`/liquidation/history`、`/market/trades`）统一：
+
+- `limit`：每页条数，默认100，最大500，超过会被拒绝（不会悄悄截断）
+- `before`：游标，省略=从最新开始；传上一页**最后一条**的 id（`orderId`/`tradeId`/资金流水`id`，`/funding/history`是`fundingTime`），只返回比它更早的记录
+
+结果按 id 倒序（新的在前）。用游标而不是页码，是因为翻页期间有新记录插入时页码会错位、漏行或重复。
+拿到的记录少于`limit`就说明到底了。
+
+### 幂等：`requestId`
+
+网络超时后合作方分不清"到底成功没有"，重试就可能重复下单、重复入账。所以**会改变资金或状态的写接口**
+都用同一个幂等键 `requestId`（字母数字和`_-`，1~64位）：同一个`uid`重复提交同一个`requestId`，
+只会生效一次，后面的返回第一次的结果并带 `"duplicate": true`。建议直接用 UUID。
+
+| 接口                                      | 幂等键        | 必填吗 | 说明                                                             |
+|-------------------------------------------|---------------|--------|------------------------------------------------------------------|
+| `POST /account/balance`（充值/扣款）      | `requestId`   | **必填** | 不带会重复入账/扣款                                            |
+| `POST /account/credit`（发放信用额度）    | `requestId`   | **必填** | 发额度是累加，不带会让额度翻倍                                 |
+| `POST /account/round/close`（结束本轮）   | `round`       | **必填** | 要结束的那一轮，天然幂等键，见该接口说明                       |
+| `POST /order/add`、`/order/conditional/add` | `requestId` | 可选，强烈建议 | 不带也能下单，但超时后无法安全重试                     |
+| 撤单、批量撤单、改杠杆、设投保、喂指数价  | 不需要        | —      | "设为目标值"或天然幂等，重复调用没有副作用                       |
+
+行为约定：
+
+- **参数一致**：返回第一次的结果，带`"duplicate": true`，不会重复扣款/入账/冻结保证金
+- **参数不一致**：返回 `idempotency_conflict`。服务端会存每次请求的参数摘要，同一个`requestId`带了不同金额、
+  价格、方向等就报错，而不是悄悄返回第一次的结果——否则你会误以为第二笔也成功了
+- **并发提交同一个`requestId`**是安全的（数据库唯一索引串行化），只有一个会真正生效
+- **失败不占用`requestId`**：比如扣款余额不足，这个`requestId`没有被消耗，补足余额后可以用同一个`requestId`重试
+- **`requestId`的作用域是"每类资源、每个`uid`"**：订单、条件单、资金流水各自独立。资金类的两个接口共用一个空间，
+  所以用同一个`requestId`先充值再发额度会被判为冲突——用UUID就不用操心这个
+- 也可以用 `GET /order/detail?requestId=` 反查订单，`GET /account/transactions`的每条记录会带上它的`requestId`，方便对账
+
+注意：条件单触发后落地的那笔委托**不继承**`requestId`（条件单自己的幂等键只在条件单表里）。
+
+如果下单返回 `dispatch_failed`（委托已落库但发往撮合引擎失败），带同一个`requestId`重试就会把它补发出去，不会重复下单。
+
+设计细节、为什么这样设计、业界做法对比见 [idempotency.md](idempotency.md)。
+
+### 异步语义（重要）
+
+| 接口                                 | 返回时表示                                       | 怎么知道最终结果                                                        |
+|--------------------------------------|--------------------------------------------------|-------------------------------------------------------------------------|
+| `POST /order/add`                    | 委托已校验、冻结保证金、落库，**已发往撮合引擎** | 撮合是异步的。查 `GET /order/detail`，或订阅 WS `user:{uid}` 频道       |
+| `POST /order/cancel/:orderId`        | 撤单**请求已提交**                               | 查委托状态变成`canceled`，或订阅 WS                                     |
+| `POST /order/cancel-all`             | 撤单请求已提交（返回提交了多少笔）               | 同上；条件单的撤销是同步生效的                                          |
+| `POST /account/round/close`          | 结束本轮**请求已提交**（返回`status: submitted`）| 轮询 `GET /account/info`，`round`加1就说明完成了；订阅 WS 也能收到      |
+| 其它写接口（改杠杆、发额度、加款等） | 已经生效（同步）                                 | —                                                                       |
+
+余额不足、参数错误这类校验失败是**同步**返回的，不用等撮合。
+
+## 典型对接流程
+
+```
+0. 创建账户          POST /account/create       {uid}                  （用户注册时调用，重复调用安全）
+1. 入金              POST /account/balance      {uid, amount, requestId}
+2. （运营）喂指数价  POST /index-price          {symbol, price}        （资金费率结算依赖，见 funding-rate.md）
+3. 查合约规则        GET  /contract/detail      ?symbol=BTCUSDT        （精度/最大杠杆/手续费，客户端下单表单用）
+4. 订阅私有推送      WS   /ws                   subscribe user:{uid}   （挂单/成交/强平后自动收到账户快照）
+5. 下单              POST /order/add            带 requestId
+6. 跟踪委托          GET  /order/detail         或等 WS 推送
+7. 查持仓/权益       GET  /position/current  /  GET /account/info
+8. 平仓/止盈止损      POST /order/add (action=close)  /  POST /order/conditional/add
+9. 本轮结束          POST /account/round/close  {uid, round}           （撤单+强平+信用额度清零+round加1）
+10. 对账              GET /account/transactions  ?uid=...               （资金流水，分页）
+```
+
+用户如果买了保险：`POST /account/insured`置投保状态、`POST /account/credit`发放信用额度
+（信用额度只能当保证金开仓、不能提现），详见 [account-and-margin.md](account-and-margin.md)。
+
+---
+
+## 账户
+
+### `POST /account/create`
+
+创建账户。`uid`是合作方自己体系里的用户ID，直接沿用。**在合作方的用户注册流程里调用**，之后才能充值、下单、查询。
+
+```json
+{ "uid": 10001 }
+```
 
 ```json
 {
-  "code": 200,
-  "message": "success",
+  "code": 200, "message": "success",
   "data": {
-    ...
+    "uid": 10001, "isInsured": false, "round": 0,
+    "credit": "0", "available": "0", "frozenMargin": "0", "frozenCredit": "0",
+    "totalUnrealizedPnl": "0", "equity": "0",
+    "created": true
   }
 }
 ```
 
-失败时`code`是HTTP语义的错误码（400/500等，不是HTTP状态码本身——HTTP状态码固定
-返回200，错误信息在body里的`code`字段），`message`是错误描述。
-
-## 账户
+- **天然幂等**：账户已经存在就原样返回已有账户（`created: false`），不改任何字段，所以超时重试没有风险，不需要`requestId`
+- 并发创建同一个`uid`也是安全的，只有一个请求得到`created: true`
+- 为什么必须先创建：如果其它接口遇到新`uid`就自动建账户，`uid`手误写错的充值会成功地充给一个没人认领的账户，
+  而且只读接口（比如`GET /account/info`）也会往库里塞垃圾账户。要求先创建，写错的`uid`会被`account_not_found`拦住
 
 ### `POST /account/balance`
 
-合作方/运营调整账户可用余额（不是用户提现接口，也不经过任何第三方支付/风控）。
+合作方/运营调整账户可用余额（不是用户提现接口）。`amount`正数=加钱，负数=扣钱，不能为0。
 
 ```json
-{
-  "uid": 10001,
-  "amount": 1000
-}
+{ "uid": 10001, "amount": 1000, "requestId": "dep-20260919-0001" }
 ```
 
-`amount`正数=加钱，负数=扣钱（扣的时候必须有足够`available`）。
+**`requestId`必填**，见上面"幂等"：同一个`requestId`重复提交只入账/扣款一次。扣款时`available`必须够，
+否则返回`insufficient_balance`、什么都不改，而且这个`requestId`不会被占用，补足余额后可以重试。
+
+```json
+{ "code": 200, "message": "success", "data": { "requestId": "dep-20260919-0001" } }
+```
+
+重放时`data`里多一个`"duplicate": true`。同一个`requestId`带了不同金额返回`idempotency_conflict`。
 
 ### `GET /account/info?uid=10001`
 
-返回账户原始字段+现算的未实现盈亏/权益，见 [account-and-margin.md](account-and-margin.md)。
-
-### `POST /account/credit`
-
-合作方发放/追加信用额度（用户买保险后的赔付）。同一轮内可以多次调用、直接累加，不会
-覆盖之前发放的额度。
-
 ```json
 {
-  "uid": 10001,
-  "amount": 1000
+  "code": 200, "message": "success",
+  "data": {
+    "uid": 990102, "isInsured": false, "round": 0,
+    "credit": "0", "available": "1115.6",
+    "frozenMargin": "0", "frozenCredit": "0",
+    "totalUnrealizedPnl": "100.0000000005", "equity": "1215.6000000005"
+  }
 }
 ```
 
-`amount`必须大于0。
+| 字段                 | 说明                                                                                     |
+|----------------------|------------------------------------------------------------------------------------------|
+| `round`              | 当前轮数，`POST /account/round/close`成功后加1                                           |
+| `isInsured`          | 本轮是否投保                                                                             |
+| `credit`             | 信用额度余额（保险赔付，只能当保证金，不能转出提现）                                     |
+| `available`          | 可用余额。全仓模式下可能为负（持仓浮盈被当作买力借用时）                                 |
+| `frozenMargin` / `frozenCredit` | 挂单占用的冻结保证金，分别来自`available`/`credit`                            |
+| `totalUnrealizedPnl` | 全部持仓的未实现盈亏之和                                                                 |
+| `equity`             | 账户权益 = `available + credit + totalUnrealizedPnl`，强平判断用的就是这个口径          |
+
+### `POST /account/credit`
+
+发放/追加信用额度（用户买保险后的赔付）。同一轮内可多次调用，直接累加。`amount`必须大于0。
+
+```json
+{ "uid": 10001, "amount": 1000, "requestId": "credit-20260919-0001" }
+```
+
+**`requestId`必填**：发额度是累加操作，重试不带幂等键会让信用额度翻倍。响应和重放规则同
+`POST /account/balance`。
 
 ### `POST /account/insured`
 
-单独设置这个账户本轮是否投保。跟`POST /account/credit`是两个独立接口，互不联动——
-投保状态不会自动触发发放额度，发放额度也不会自动置投保状态。
+单独设置本轮是否投保，跟发放额度互不联动。
 
 ```json
-{
-  "uid": 10001,
-  "insured": true
-}
+{ "uid": 10001, "insured": true }
 ```
 
 ### `POST /account/round/close`
 
-合作方通知本轮结束：撤销该uid全部挂单、按当前标记价强平全部仓位、`credit`清零
-（没用完的赔付额度不追讨）、`is_insured`重置、`round`+1，细节见
-[account-and-margin.md](account-and-margin.md#轮次round生命周期)。
+通知本轮结束：撤销该`uid`全部挂单和未触发条件单、按当前标记价强平全部仓位、`credit`清零（没用完的
+赔付额度不追讨）、`isInsured`重置、`round`加1，细节见 [account-and-margin.md](account-and-margin.md#轮次round生命周期)。
+
+```json
+{ "uid": 10001, "round": 3 }
+```
+
+**`round`必填**：要结束的那一轮，取值是 `GET /account/info` 返回的`round`（第一轮是`0`）。它同时是这个接口的
+幂等键：结束第3轮只会生效一次。没有它的话，超时重试会在账户已经进入第4轮之后又结束一次，把第4轮刚挂的单撤掉、
+刚开的仓强平、刚发的信用额度清零。
+
+```json
+{ "code": 200, "message": "success", "data": { "round": 3, "status": "submitted" } }
+```
+
+| `status`          | 含义                                                                                   |
+|-------------------|----------------------------------------------------------------------------------------|
+| `submitted`       | 请求已提交，**只表示已受理**，见上面"异步语义"                                         |
+| `already_closed`  | `round`比账户当前轮数小，说明这一轮之前已经结束过了，什么都没做——重试的正常结果        |
+
+`round`比账户当前轮数大返回`round_mismatch`。如果某个合约当时缺标记价格，那个仓位这一轮会强平失败并跳过，
+`round`没有推进，用**同一个`round`**再调用一次即可重试。
+
+### `GET /account/transactions?uid=10001&type=fee&limit=100&before=331`
+
+资金流水，合作方对账用。`type`可选，取值见"枚举"；支持分页。
 
 ```json
 {
-  "uid": 10001
+  "code": 200, "message": "success",
+  "data": [
+    { "id": "335", "uid": 990101, "symbol": "USDT", "amount": "1000", "type": "deposit", "createTime": 1789783870000, "requestId": "dep-20260919-0001" },
+    { "id": "331", "uid": 990101, "symbol": "BTCUSDT", "amount": "-1.45", "type": "fee", "createTime": 1789783875255 },
+    { "id": "330", "uid": 990101, "symbol": "BTCUSDT", "amount": "-33.3333333335", "type": "realized_pnl", "createTime": 1789783875255 }
+  ]
 }
 ```
 
-**注意**：这个接口只是把请求发到Kafka异步路由给`contract-engine`执行（跟撤单接口
-同样的道理——撤销挂单要摸`contract-engine`内存里的订单簿，`contract-api`这边做不到），
-HTTP响应`"结束本轮请求已提交"`只表示请求已受理，不代表撤单/强平/清算已经全部执行完。
-如果某个symbol当时缺标记价格，那个仓位这一轮会强平失败、跳过并记日志告警，需要等价格
-恢复后重新调用一次本接口。
+`amount`正数=入账、负数=出账；`symbol`对跟具体合约无关的流水（充值、发放额度）不是合约名（比如`USDT`）。合作方发起的充值/扣款/发额度会带上当时传的`requestId`，方便跟自己的请求一一对账；系统内部产生的流水（手续费、盈亏等）没有这个字段。
+
+---
 
 ## 委托
 
@@ -90,59 +306,113 @@ HTTP响应`"结束本轮请求已提交"`只表示请求已受理，不代表撤
 
 ```json
 {
-  "uid": 10001,
-  "symbol": "BTCUSDT",
-  "side": "long",
-  "action": "open",
-  "type": "limit",
-  "price": 65000,
-  "amount": 0.1,
-  "leverage": 10,
-  "reduceOnly": false
+  "uid": 10001, "symbol": "BTCUSDT",
+  "side": "long", "action": "open", "type": "limit",
+  "price": 65000, "amount": 0.1, "leverage": 10,
+  "reduceOnly": false, "requestId": "order-20260919-0001"
 }
 ```
 
-字段说明（枚举类字段全部是 **小写**，大小写敏感，`"LONG"`这种大写值会被拒绝）：
+| 字段            | 必填        | 说明                                                                                    |
+|-----------------|-------------|-----------------------------------------------------------------------------------------|
+| `uid`           | 是          |                                                                                         |
+| `symbol`        | 是          | 合约，如`BTCUSDT`                                                                       |
+| `side`          | 是          | `long` / `short`                                                                        |
+| `action`        | 是          | `open` / `close`                                                                        |
+| `type`          | 否          | `limit`（默认）/ `market`                                                               |
+| `price`         | 限价单必填  | 市价单忽略，按标记价格估算                                                              |
+| `amount`        | 二选一      | 标的币数量                                                                              |
+| `marginAmount`  | 二选一      | 用保证金金额反推数量：`amount = marginAmount × leverage / price`。两个都传优先用它      |
+| `leverage`      | 否          | 默认1，**必须是整数**；显式传0或小数会报错。开仓时不能超过当前名义价值对应档位的上限    |
+| `reduceOnly`    | 否          | 默认false，只减仓                                                                       |
+| `requestId` | 否          | 幂等键，见上面"幂等"，强烈建议传                                                        |
 
-| 字段           | 必填        | 说明                                                                   |
-|----------------|-------------|------------------------------------------------------------------------|
-| `side`         | 是          | `long` / `short`，其它值一律拒绝（不会被撮合引擎当成默认方向悄悄放行） |
-| `action`       | 是          | `open` / `close`，其它值一律拒绝                                       |
-| `type`         | 否          | `limit`（默认）/ `market`，其它值一律拒绝（不会被当成market处理）      |
-| `price`        | LIMIT单必填 | MARKET单忽略此字段，按标记价格估算                                     |
-| `amount`       | 二选一      | 标的币数量                                                             |
-| `marginAmount` | 二选一      | 用保证金金额+杠杆反推数量：`amount = marginAmount * leverage / price`  |
-| `leverage`     | 否          | 默认1；**必须是整数**，显式传0或小数都会报错，不会被当成"没传"或被截断 |
-| `reduceOnly`   | 否          | 默认false                                                              |
+成功响应：
 
-`amount`和`marginAmount`必须传一个，两个都传优先用`marginAmount`。`leverage`/
-`marginAmount`/`amount`这三个字段的JSON类型是可选指针——"没传这个字段"和"传了显式的0"
-是两种不同的语义，不能混为一谈，见下方注意事项。
+```json
+{ "code": 200, "message": "success", "data": { "orderId": "226887380290764800", "requestId": "order-20260919-0001" } }
+```
 
-完整的下单校验链见 [matching-and-settlement.md](matching-and-settlement.md)。
+重复提交同一个`requestId`时`data`里多一个`"duplicate": true`，`orderId`是第一次那笔。
+没传`requestId`时响应里没有这个字段。
 
-**注意**：由于contract-api在下单时看不到contract-engine那边订单簿的真实状态，`price`
-字段对于会立刻成交的"吃单"来说，跟真实成交价可能不一致——冻结保证金按保守参考价估算、
-成交后按真实成交价多退少补，账户最终不会吃亏，细节见
-[matching-and-settlement.md](matching-and-settlement.md#冻结保证金的保守估计)。
+**注意**：`price`对会立刻成交的"吃单"来说跟真实成交价可能不一致——冻结保证金按保守参考价估算、成交后按真实成交价
+多退少补，账户最终不会吃亏，见 [matching-and-settlement.md](matching-and-settlement.md#冻结保证金的保守估计)。
 
 ### `POST /order/cancel/:orderId`
 
 ```json
-{
-  "uid": 10001
-}
+{ "uid": 10001 }
 ```
 
-`orderId`是URL路径参数。
+`orderId`是 URL 路径参数。响应`data`是`"撤单请求已提交"`（异步）。已成交完/已撤销的委托返回`order_not_cancelable`。
+
+### `POST /order/cancel-all`
+
+批量撤销这个`uid`的全部挂单。
+
+```json
+{ "uid": 10001, "symbol": "BTCUSDT", "includeConditional": false }
+```
+
+| 字段                 | 说明                                                                                                   |
+|----------------------|--------------------------------------------------------------------------------------------------------|
+| `symbol`             | 可选，省略=全部合约                                                                                    |
+| `includeConditional` | 默认`false`。条件单（止盈止损）通常是用户想一直留着保护仓位的，"撤销全部委托"默认不动它们；传`true`才一起撤 |
+
+```json
+{ "code": 200, "message": "success",
+  "data": { "cancelRequested": 2, "cancelRequestFailed": 0, "conditionalCanceled": 1, "conditionalFailed": 0 } }
+```
+
+`cancelRequested`是**已提交撤单请求**的笔数（异步，不代表都已撤成功）；`conditionalCanceled`是同步已撤销的条件单。
+`*Failed`大于0时重试本接口即可（重复提交撤单请求是安全的）。
 
 ### `GET /order/current?uid=10001&symbol=BTCUSDT`
 
-当前挂单（`open`/`partially_filled`状态），`symbol`可省略查全部。
+当前挂单（`open`/`partially_filled`），`symbol`可省略查全部。
 
-### `GET /order/history?uid=10001`
+```json
+{
+  "code": 200, "message": "success",
+  "data": [
+    {
+      "orderId": "226888243595968512", "uid": 990102, "symbol": "BTCUSDT",
+      "side": "short", "action": "close", "type": "limit",
+      "price": "90000", "amount": "0.01", "tradedAmount": "0", "avgDealPrice": "0",
+      "frozenMargin": "0", "frozenCredit": "0", "leverage": 1,
+      "reduceOnly": true, "liquidation": false, "status": "open",
+      "createTime": 1789783972653, "updateTime": 1789783972653
+    }
+  ]
+}
+```
 
-历史委托，最近100条。
+| 字段                          | 说明                                                                     |
+|-------------------------------|--------------------------------------------------------------------------|
+| `tradedAmount` / `avgDealPrice` | 已成交数量 / 加权平均成交价                                            |
+| `frozenMargin` / `frozenCredit` | 这笔委托占用的冻结保证金（来自可用余额/信用额度），平仓单为0           |
+| `liquidation`                 | `true`表示这是系统发起的强平委托，不是用户下的                           |
+| `requestId`               | 只在下单时传了才有这个字段                                               |
+
+### `GET /order/history?uid=10001&limit=100&before=`
+
+历史委托（含已成交/已撤销/挂单中），结构同上，支持分页。
+
+### `GET /order/detail?uid=10001&orderId=226887380290764800`
+
+按`orderId`或`requestId`（二选一，都传优先`orderId`）查单笔委托，结构同上。不存在或不属于该`uid`返回`order_not_found`。
+
+```
+GET /order/detail?uid=10001&requestId=order-20260919-0001
+```
+
+### `GET /liquidation/history?uid=10001&limit=100&before=`
+
+这个`uid`的强平委托记录（`liquidation=true`的委托），结构同`/order/history`。每笔强平委托的成交价、成交量、
+状态都在里面。分批强平的大仓位会有多笔。
+
+---
 
 ## 条件单（止盈止损/条件开仓）
 
@@ -152,16 +422,11 @@ HTTP响应`"结束本轮请求已提交"`只表示请求已受理，不代表撤
 
 ```json
 {
-  "uid": 10001,
-  "symbol": "BTCUSDT",
-  "side": "long",
-  "action": "close",
-  "triggerPrice": 60000,
-  "triggerDirection": "gte",
-  "type": "market",
-  "amount": 0.1,
-  "leverage": 10,
-  "reduceOnly": true
+  "uid": 10001, "symbol": "BTCUSDT",
+  "side": "long", "action": "close",
+  "triggerPrice": 60000, "triggerDirection": "gte",
+  "type": "market", "amount": 0.1, "leverage": 10,
+  "reduceOnly": true, "requestId": "tp-0001"
 }
 ```
 
@@ -172,161 +437,275 @@ HTTP响应`"结束本轮请求已提交"`只表示请求已受理，不代表撤
 | `triggerPrice`     | 触发价                                                           |
 | `triggerDirection` | `gte`=标记价格涨到/超过触发价才触发，`lte`=跌到/低于触发价才触发 |
 
-`type=limit`时`price`是触发后要执行的委托价格（必填）；`type=market`时不需要传`price`，
-触发后按当时的标记价成交。`action=open`时会在创建时就冻结保证金（分档/杠杆校验同下单
-接口），`action=close`不冻结。返回的id和触发后落地到`orders`表的`orderId`是同一个，
-`GET /order/history`能查到触发后的真实委托记录。
+`type=limit`时`price`是触发后要执行的委托价格（必填）；`type=market`时不传`price`，触发后按当时的标记价成交。
+`action=open`会在**创建时**就冻结保证金（分档/杠杆校验同下单接口），`action=close`不冻结。
+
+响应同`POST /order/add`（`orderId`是字符串，可带`requestId`/`duplicate`）。这个`orderId`和触发后落地到
+委托表的`orderId`是同一个，触发后用`GET /order/detail`能查到那笔真实委托。
 
 ### `POST /order/conditional/cancel/:orderId`
 
 ```json
-{
-  "uid": 10001
-}
+{ "uid": 10001 }
 ```
 
-只能撤销还没触发（`pending`）的条件单；已经触发的要用`POST /order/cancel/:orderId`
-撤销（这时候它已经是一笔真正的委托了）。
+只能撤销还没触发（`pending`）的条件单；已触发的要用`POST /order/cancel/:orderId`撤（这时它已经是真正的委托了）。
+同步生效，冻结的保证金立即退回。
 
 ### `GET /order/conditional/current?uid=10001&symbol=BTCUSDT`
 
-当前还没触发的条件单，`symbol`可省略查全部。
-
-### `GET /order/conditional/history?uid=10001`
-
-条件单历史（含已触发/已撤销），最近100条。
-
-## 持仓
-
-### `GET /position/current?uid=10001`
-
-返回持仓原始字段+现算的标记价/未实现盈亏/回报率/名义价值/预估强平价。
-
-### `POST /position/leverage`
-
-修改一个已有仓位的杠杆，详细设计见 [leverage.md](leverage.md)。
+当前还没触发的条件单，`symbol`可省略。
 
 ```json
 {
-  "uid": 10001,
-  "symbol": "BTCUSDT",
-  "side": "long",
-  "leverage": 10
-}
-```
-
-只对已经有仓位（`volume > 0`）的`uid+symbol+side`生效，没有仓位会被拒绝——这个系统里
-杠杆本来就是下单时的参数，没有"没有仓位时预先声明杠杆"这种场景。修改成功会按新杠杆
-重新计算这个仓位应该占用多少保证金，多退少补，不会额外产生成交/资金费流水。
-
-## 成交
-
-### `GET /trade/history?uid=10001`
-
-历史成交，最近100条。
-
-## K线
-
-详细设计见 [kline.md](kline.md)。
-
-### `GET /kline?symbol=BTCUSDT&interval=1m&limit=200`
-
-`interval`必须是`1m`/`5m`/`15m`/`1h`/`4h`/`1d`之一，`limit`可省略默认200。返回按开盘
-时间升序（从旧到新）：
-
-```json
-{
-  "code": 200,
-  "message": "success",
+  "code": 200, "message": "success",
   "data": [
     {
-      "Symbol": "BTCUSDT",
-      "Interval": "1m",
-      "OpenTime": 1735689600000,
-      "Open": "64800",
-      "High": "64850",
-      "Low": "64790",
-      "Close": "64820",
-      "Volume": "1.25",
-      "TradeCount": 8,
-      "UpdateTime": 1735689659000
+      "orderId": "226888260717117440", "uid": 990102, "symbol": "BTCUSDT",
+      "side": "short", "action": "close",
+      "triggerPrice": "50000", "triggerDirection": "lte",
+      "type": "market", "price": "0", "amount": "0.05", "leverage": 1, "reduceOnly": true,
+      "frozenMargin": "0", "frozenCredit": "0", "status": "pending",
+      "createTime": 1789783976735, "updateTime": 1789783976735
     }
   ]
 }
 ```
 
-## 资金费率
+### `GET /order/conditional/history?uid=10001&limit=100&before=`
 
-### `GET /funding/rate?symbol=BTCUSDT`
+条件单历史（含已触发/已撤销），支持分页。
 
-当前预估费率+下次结算时间。
+### `GET /order/conditional/detail?uid=10001&orderId=` 或 `&requestId=`
 
-### `GET /funding/history?symbol=BTCUSDT`
+查单笔条件单。
 
-历史结算记录，最近100条。
+---
 
-### `POST /index-price`
+## 持仓
 
-外部行情源推送指数价格，见 [funding-rate.md](funding-rate.md)。
+### `GET /position/current?uid=10001`
+
+返回持仓原始字段 + 现算的标记价/未实现盈亏/回报率/名义价值/预估强平价。
 
 ```json
 {
-  "symbol": "BTCUSDT",
-  "price": 64800.5
+  "code": 200, "message": "success",
+  "data": [
+    {
+      "id": 90, "uid": 990102, "symbol": "BTCUSDT", "side": "short",
+      "volume": "0.15", "avgEntryPrice": "58666.66666667",
+      "positionMargin": "880", "creditMargin": "0", "leverage": 10,
+      "status": "normal", "updateTime": 1789783855187,
+      "markPrice": "58000", "unrealizedPnl": "100.0000000005", "roe": "0.1136363636369318",
+      "notionalValue": "8700", "liquidationPrice": "64276.2284196580345286"
+    }
+  ]
 }
 ```
 
-## 订单簿深度（`contract-engine`进程，不是`contract-api`）
+| 字段               | 说明                                                                                                |
+|--------------------|-----------------------------------------------------------------------------------------------------|
+| `positionMargin`   | 这个仓位占用的保证金（记账值）；`creditMargin`是其中来自信用额度的部分                              |
+| `roe`              | 回报率 = 未实现盈亏 / 占用保证金                                                                    |
+| `liquidationPrice` | **仅供展示的估算值**（按单仓公式），全仓下真实强平以整个账户权益 vs 全部仓位维持保证金为准，见 [liquidation.md](liquidation.md) |
+| `status`           | `liquidating`表示正在被强平                                                                         |
 
-订单簿只存在于`contract-engine`进程的内存里，这一个接口不在上面`contract-api`的端口
-（默认`:7001`）上，而是`contract-engine`自己的轻量HTTP服务（默认`:7002`，
-`PERP_ENGINE_HTTP_ADDR`可配），理由见 [order-book.md](order-book.md#为什么深度接口开在contract-engine而不是contract-api)。
+没有持仓返回`[]`。目前**没有已平仓仓位的历史记录**（仓位平掉后同一行会被复用），需要对账请用 `/trade/history` 和 `/account/transactions`。
 
-### `GET /depth?symbol=BTCUSDT&levels=20`
+### `POST /position/leverage`
 
-`levels`可省略，默认20档。返回按价格聚合的深度快照，不含单笔委托的uid/orderID：
+修改一个**已有仓位**的杠杆，详细设计见 [leverage.md](leverage.md)。
+
+```json
+{ "uid": 10001, "symbol": "BTCUSDT", "side": "long", "leverage": 10 }
+```
+
+只对已经有仓位的`uid+symbol+side`生效，没有仓位返回`position_not_found`（杠杆本来是下单时的参数，
+没有"没有仓位时预先声明"的场景）。修改成功会按新杠杆重算占用保证金、多退少补，不产生成交/资金费流水。
+杠杆调低（需要更多保证金）时余额不够返回`insufficient_margin`。
+
+---
+
+## 成交
+
+### `GET /trade/history?uid=10001&limit=100&before=`
+
+这个`uid`参与的历史成交（不论买方卖方），支持分页。
 
 ```json
 {
-  "code": 200,
-  "message": "success",
+  "code": 200, "message": "success",
+  "data": [
+    {
+      "tradeId": "226887750907858944", "symbol": "BTCUSDT",
+      "price": "58000", "volume": "0.05",
+      "buyOrderId": "226887479800627200", "sellOrderId": "226887746545778688",
+      "buyUid": 990101, "sellUid": 990102,
+      "makerOrderId": "226887479800627200", "createTime": 1789783855187
+    }
+  ]
+}
+```
+
+`makerOrderId`等于`buyOrderId`说明买方是挂单方（maker）、卖方是吃单方（taker），反之亦然。
+
+---
+
+## 合约与行情（公开数据，不需要`uid`）
+
+### `GET /contract/list`
+
+全部可交易的合约及交易规则。
+
+### `GET /contract/detail?symbol=BTCUSDT`
+
+单个合约的完整规则，加保证金分档。客户端做下单表单校验、展示最大杠杆都靠这个，不需要写死。
+
+```json
+{
+  "code": 200, "message": "success",
   "data": {
-    "Bids": [
-      {
-        "Price": "64800",
-        "Volume": "1.5",
-        "Count": 3
-      }
-    ],
-    "Asks": [
-      {
-        "Price": "64810",
-        "Volume": "0.8",
-        "Count": 1
-      }
+    "symbol": "BTCUSDT", "baseCoinScale": 3, "priceScale": 1, "enable": true,
+    "makerFee": "0.0002", "takerFee": "0.0005",
+    "priceTick": "0", "volumeStep": "0", "minVolume": "0.001", "maxVolume": "0",
+    "fundingIntervalHours": 8, "fundingRateCap": "0.0075", "priceProtectionRatio": "0.05",
+    "tiers": [
+      { "symbol": "BTCUSDT", "tier": 1, "maxNotional": "50000", "maintenanceMarginRate": "0.004", "maintenanceAmount": "0", "maxLeverage": 125 },
+      { "symbol": "BTCUSDT", "tier": 2, "maxNotional": "250000", "maintenanceMarginRate": "0.005", "maintenanceAmount": "50", "maxLeverage": 100 }
     ]
   }
 }
 ```
 
+| 字段                          | 说明                                                                                          |
+|-------------------------------|-----------------------------------------------------------------------------------------------|
+| `baseCoinScale` / `priceScale`| 数量 / 价格的小数位数                                                                         |
+| `priceTick` / `volumeStep`    | 最小变动价位 / 数量步长。**`0`表示不限制**（本系统里这类配置统一 0=不限）                     |
+| `minVolume` / `maxVolume`     | 单笔最小/最大下单量，`maxVolume`为`0`表示不限                                                 |
+| `makerFee` / `takerFee`       | 手续费率                                                                                      |
+| `fundingIntervalHours`        | 资金费率结算周期（小时）                                                                      |
+| `priceProtectionRatio`        | 价格保护带：开仓限价单价格偏离参考价超过这个比例会被拒绝                                      |
+| `tiers[].maxNotional`         | 本档名义价值上限，`0`表示不限（最后一档）。仓位越大档位越高、允许的杠杆越低                   |
+| `tiers[].maxLeverage`         | 本档最大杠杆                                                                                  |
+
+### `GET /market/ticker?symbol=BTCUSDT`
+
+```json
+{
+  "code": 200, "message": "success",
+  "data": {
+    "symbol": "BTCUSDT", "lastPrice": "58000", "markPrice": "58000", "indexPrice": "60000",
+    "open24h": "56500", "high24h": "59000", "low24h": "56000", "volume24h": "0.6", "change24h": "0.0265486725663717"
+  }
+}
+```
+
+- 没有对应数据的字段是`null`（比如合约从没成交过），**不是0**——0是合法价格，区分不了
+- `lastPrice`是最新一笔成交价；本系统里标记价格就是最新成交价，所以两者通常相等
+- `indexPrice`是外部行情源喂进来的指数价格（`POST /index-price`）
+- **24h统计口径**：最近24根1小时K线聚合（含当前还没走完的这一根），实际时间窗口在23~24小时之间，不是严格滚动的24小时
+- `change24h`是小数比例（`0.0265`=+2.65%）
+
+### `GET /market/trades?symbol=BTCUSDT&limit=100&before=`
+
+公开最新成交，支持分页。**不含买卖双方的uid和委托ID**（不能泄露其它用户的身份）：
+
+```json
+{ "code": 200, "message": "success",
+  "data": [ { "tradeId": "226887750907858944", "symbol": "BTCUSDT", "price": "58000", "volume": "0.05", "takerSide": "sell", "createTime": 1789783855187 } ] }
+```
+
+`takerSide`是吃单方向（`buy`=主动买入），行情展示常用来给成交着色。WS的`trade:{symbol}`频道推送的是同一个结构。
+
+### `GET /kline?symbol=BTCUSDT&interval=1m&limit=200`
+
+详细设计见 [kline.md](kline.md)。`interval`见"枚举"，`limit`默认200。按开盘时间**升序**（从旧到新）：
+
+```json
+{ "code": 200, "message": "success",
+  "data": [ { "symbol": "BTCUSDT", "interval": "1h", "openTime": 1789783200000,
+              "open": "59000", "high": "59000", "low": "58000", "close": "58000",
+              "volume": "0.15", "tradeCount": 2, "updateTime": 1789783855187 } ] }
+```
+
+### `GET /funding/rate?symbol=BTCUSDT`
+
+```json
+{ "code": 200, "message": "success",
+  "data": { "symbol": "BTCUSDT", "estimatedRate": "-0.0075", "nextFundingTime": 1789804800000 } }
+```
+
+当前预估费率 + 下次结算时间。机制见 [funding-rate.md](funding-rate.md)。
+
+### `GET /funding/history?symbol=BTCUSDT&limit=100&before=`
+
+历史结算记录，`fundingTime`倒序；`before`传上一页最后一条的`fundingTime`。
+
+```json
+{ "code": 200, "message": "success",
+  "data": [ { "id": 9, "symbol": "BTCUSDT", "fundingTime": 1789776000000, "rate": "-0.0075",
+              "markPrice": "20000", "indexPrice": "60000", "createTime": 1789776041204 } ] }
+```
+
+### `POST /index-price`（运营接口）
+
+外部行情源推送指数价格，见 [funding-rate.md](funding-rate.md)。**这是运营/行情源调用的接口，不是给终端用户的**，
+正式对接时应该单独授权。
+
+```json
+{ "symbol": "BTCUSDT", "price": 64800.5 }
+```
+
+### `GET /health`
+
+存活探针，返回`{"status":"ok","time":<毫秒时间戳>}`。
+
+---
+
+## 订单簿深度（`contract-engine`进程，不是`contract-api`）
+
+订单簿只存在于`contract-engine`进程的内存里，这个接口在`contract-engine`自己的端口（默认`:7002`，
+`PERP_ENGINE_HTTP_ADDR`可配），理由见 [order-book.md](order-book.md#为什么深度接口开在contract-engine而不是contract-api)。
+分片部署下只有负责这个合约的实例能回答，见 [engine-sharding.md](engine-sharding.md)。
+
+### `GET /depth?symbol=BTCUSDT&levels=20`
+
+`levels`默认20档。按价格聚合，不含单笔委托的uid/orderId：
+
+```json
+{ "code": 200, "message": "success",
+  "data": {
+    "bids": [ { "price": "57500", "volume": "0.05", "count": 1 } ],
+    "asks": []
+  } }
+```
+
+`bids`价格从高到低，`asks`从低到高；`count`是这一档的挂单笔数。
+
+---
+
 ## WebSocket实时推送
 
-详细设计（channel命名、订阅协议、私有频道鉴权占位说明）见 [websocket.md](websocket.md)。
+详细设计（channel命名、订阅协议）见 [websocket.md](websocket.md)。
 
 ### `GET /ws`（`contract-api`，默认`:7001`）
 
 升级成WebSocket连接后发JSON控制消息订阅/取消订阅：
 
 ```json
-{
-  "op": "subscribe",
-  "channels": [
-    "depth:BTCUSDT",
-    "trade:BTCUSDT",
-    "kline:BTCUSDT:1m",
-    "user:10001"
-  ]
-}
+{ "op": "subscribe", "channels": ["depth:BTCUSDT", "trade:BTCUSDT", "kline:BTCUSDT:1m", "markprice:BTCUSDT", "user:10001"] }
 ```
 
-推送消息统一格式：`{"channel": "depth:BTCUSDT", "data": {...}}`。
+推送消息统一格式：`{"channel": "trade:BTCUSDT", "data": {...}}`。
+
+| 频道                      | 内容                                                                                       |
+|---------------------------|--------------------------------------------------------------------------------------------|
+| `depth:{symbol}`          | 深度快照，结构同 `GET /depth`                                                              |
+| `trade:{symbol}`          | 公开成交，结构同 `/market/trades` 的单条（不含uid）                                        |
+| `kline:{symbol}:{interval}` | K线，结构同 `GET /kline` 的单条                                                          |
+| `markprice:{symbol}`      | `{"symbol": "BTCUSDT", "price": "58000"}`                                                  |
+| `user:{uid}`              | **私有**。账户快照：`{account, positions, activeOrders}`，结构分别同`/account/info`、`/position/current`、`/order/current`。这个`uid`的挂单/成交/强平/结束本轮之后自动推送，是**完整快照不是增量** |
+
+WS推送不保证绝对不丢（慢客户端的发送队列满了会丢弃新消息），客户端应该定期用REST接口校准状态。
+私有频道目前同样没有鉴权（明文`uid`），见 [auth-design.md](auth-design.md)。

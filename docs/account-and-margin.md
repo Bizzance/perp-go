@@ -1,5 +1,15 @@
 # 账户与保证金模型
 
+## 账户的创建
+
+账户必须显式创建（`POST /account/create`，`uid`直接沿用合作方自己体系里的用户ID），其它接口遇到没创建过的
+`uid`返回`account_not_found`，不会自动建——否则`uid`手误写错的充值会成功地充给一个没人认领的账户，
+只读接口也会往库里塞垃圾账户。创建天然幂等：`AccountRepo.CreateIfAbsent`用`INSERT IGNORE`，撞了
+`uid`唯一约束就是no-op，并发创建同一个`uid`只有一个得到`created=true`。
+
+内部流程（成交结算、强平、资金费率、WS推送）操作的账户一定已经存在，内部的`GetOrCreate`保留不变；
+面向合作方的入口（API层）一律先校验账户存在。
+
 ## 全仓模式
 
 账户级别共享一个资金池，不做逐仓隔离（逐仓是后续阶段的计划，见
@@ -49,6 +59,18 @@ FromCredit}`告诉调用方这笔钱分别从两个来源各拿了多少：
 并发改过。这一步同时改成CAS写法：`UPDATE ... WHERE available=? AND credit=?`带上
 读到的旧值做守卫，读到的快照跟真正生效的这次扣减对不上时返回失败，让上层按余额不足
 拒绝，而不是拿一个过期基准悄悄执行扣减。
+
+## 合作方调整余额（`POST /account/balance`）
+
+`requestId`必填（幂等键，见 [idempotency.md](idempotency.md)），"写资金流水+改余额"在同一个数据库事务里
+完成（`AccountRepo.ApplyFundOp`）。正数是入账，直接加到`available`；负数是扣款，只在`available >= 扣减额`
+时才扣，用一条`UPDATE ... WHERE available >= ?`原子完成"检查余额+扣减"，不够返回`insufficient_balance`、
+事务回滚（流水一起撤掉，`requestId`不被占用）。事务开头先`SELECT ... FOR UPDATE`锁账户行，同一个账户的资金
+操作串行执行，避免并发的同一个`requestId`在唯一索引上死锁，见 [idempotency.md](idempotency.md)。`POST /account/credit`发额度同理，也是必填`requestId`+同一个事务。
+早期实现负数分支也是无条件的`available = available + ?`，文档写着"扣的时候必须有足够`available`"
+但代码根本没校验，扣款能把余额扣成负数。注意这里只看`available`，不看信用额度和浮盈——这个接口是
+合作方的资金划转（模拟提现），信用额度不能转出，浮盈没有兑现，都不该被这个接口扣走。每次成功的调整
+都会写一条`deposit`类型的资金流水（`GET /account/transactions`可查，带上`requestId`方便对账）。
 
 ## "先available后credit"的扣款顺序
 
@@ -100,7 +122,9 @@ equity = available + credit + totalUnrealizedPnl
 ## 轮次（round）生命周期
 
 交易以"轮"为单位，一轮在client主动调用`POST /account/round/close`结束之前，一直是同一轮
-（`round`字段不变）。结束本轮时（`EngineService.CloseRound`）：
+（`round`字段不变）。调用时必须带上`round`——要结束的那一轮，它同时是幂等键：账户当前已经不在这一轮
+就什么都不做，防止超时重试把下一轮又结束一次，见 [idempotency.md](idempotency.md)。结束本轮时
+（`EngineService.CloseRound`，事件里带`round`，跟账户当前`round`不一致直接忽略）：
 
 1. 撤销这个uid名下全部symbol上还在排队的委托，按正常撤单逻辑释放冻结保证金
 2. 撤销这个uid名下全部还没触发的条件单（止盈止损/条件开仓），按条件单自己的撤销逻辑

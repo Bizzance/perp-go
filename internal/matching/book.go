@@ -16,7 +16,7 @@ const (
 	Sell
 )
 
-// DirectionOf 把(side, action)映射成买/卖方向
+// 把(side, action)映射成买/卖方向
 func DirectionOf(side model.Side, action model.OrderAction) Direction {
 	if (side == model.SideLong && action == model.ActionOpen) || (side == model.SideShort && action == model.ActionClose) {
 		return Buy
@@ -24,7 +24,7 @@ func DirectionOf(side model.Side, action model.OrderAction) Direction {
 	return Sell
 }
 
-// RestingOrder 订单簿里挂着的委托——只存撮合需要的字段，不是完整的DB行，DB落地由调用方
+// 订单簿里挂着的委托——只存撮合需要的字段，不是完整的DB行，DB落地由调用方
 // 单独维护，这里只管"这笔单子还剩多少量、什么时候进来的"
 type RestingOrder struct {
 	OrderID     uint64
@@ -39,7 +39,7 @@ type RestingOrder struct {
 	Liquidation bool
 }
 
-// Fill 一次撮合成交——taker是主动进来吃单的一方(incoming)，maker是原来挂在簿子上被动等到的一方
+// 一次撮合成交——taker是主动进来吃单的一方(incoming)，maker是原来挂在簿子上被动等到的一方
 type Fill struct {
 	Price      decimal.Decimal
 	Volume     decimal.Decimal
@@ -47,7 +47,7 @@ type Fill struct {
 	TakerOrder *RestingOrder
 }
 
-// orderNode 双向链表节点，同时是map查找的目标——O(1)按orderID撤单靠的是map[orderID]*orderNode
+// 双向链表节点，同时是map查找的目标——O(1)按orderID撤单靠的是map[orderID]*orderNode
 // 直接定位到链表节点，从链表摘除是O(1)（有prev/next指针，不用像切片那样整体搬移）
 type orderNode struct {
 	order      *RestingOrder
@@ -55,7 +55,7 @@ type orderNode struct {
 	level      *priceLevel // 直接指回所在价格档位，撤单时不需要再按价格二分查找一次
 }
 
-// priceLevel 一个价格档位：这个价格上排队的全部委托，按时间优先的FIFO双向链表，另外维护
+// 一个价格档位：这个价格上排队的全部委托，按时间优先的FIFO双向链表，另外维护
 // 档位汇总量/笔数，深度查询(Depth)和撮合时判断"这一档还有没有单"都是O(1)读取，不用遍历链表
 type priceLevel struct {
 	price       decimal.Decimal
@@ -64,7 +64,7 @@ type priceLevel struct {
 	count       int
 }
 
-// insertOrdered 按EntryTime把新节点插入到这一档链表里正确的位置——同一档内先到先得，
+// 按EntryTime把新节点插入到这一档链表里正确的位置——同一档内先到先得，
 // EntryTime更小(更早进入撮合引擎)排在前面。EntryTime是调用方在拿到Book锁之前就已经算好的
 // 值(比如Kafka消费者收到消息的纳秒时间戳)，多个goroutine(下单消费者、强平定时扫描、条件单
 // 触发扫描)各自准备好委托、再抢Book的锁——谁先抢到锁(即Rest调用的先后顺序)不等于谁的
@@ -102,7 +102,7 @@ func (pl *priceLevel) insertOrdered(order *RestingOrder) *orderNode {
 	return node
 }
 
-// Book 单个symbol的订单簿：bids/asks各自是按价格排序的档位数组(sort.Search二分定位最优价/
+// 单个symbol的订单簿：bids/asks各自是按价格排序的档位数组(sort.Search二分定位最优价/
 // 插入点)，每个档位内部是按时间先后排队的FIFO双向链表，另外一个map支持O(1)按orderID撤单——
 // 用"档位数组+组内链表"而不是红黑树/跳表，是因为活跃价格档位数量远小于挂单笔数，best
 // price/撮合热路径直接读数组端点是O(1)，档位本身的增删(只在某个价格第一次/最后一次有单时
@@ -121,7 +121,7 @@ func NewBook() *Book {
 	return &Book{byID: make(map[uint64]*orderNode)}
 }
 
-// findLevelIndex 在有序档位数组里二分查找price对应的档位。buy=true表示数组按价格从高到低
+// 在有序档位数组里二分查找price对应的档位。buy=true表示数组按价格从高到低
 // 排序(bids)，false表示从低到高(asks)。没精确找到时返回的索引是"应该插入的位置"，
 // 跟sort.Search的约定一致，插入/查找共用同一个函数
 func findLevelIndex(levels []*priceLevel, price decimal.Decimal, buy bool) (int, bool) {
@@ -148,7 +148,7 @@ func removeLevelAt(levels []*priceLevel, i int) []*priceLevel {
 	return append(levels[:i], levels[i+1:]...)
 }
 
-// getOrCreateLevel 找到(或创建)price对应的档位——找不到就在正确的位置插入一个新档位，
+// 找到(或创建)price对应的档位——找不到就在正确的位置插入一个新档位，
 // 保持数组有序
 func (b *Book) getOrCreateLevel(price decimal.Decimal, buy bool) *priceLevel {
 	levels := b.bids
@@ -169,7 +169,7 @@ func (b *Book) getOrCreateLevel(price decimal.Decimal, buy bool) *priceLevel {
 	return pl
 }
 
-// removeLevelFromIndex 档位空了，从档位数组里摘掉——只在某个价格最后一笔挂单被吃完/撤销
+// 档位空了，从档位数组里摘掉——只在某个价格最后一笔挂单被吃完/撤销
 // 时才会调用，频率远低于订单级别的操作
 func (b *Book) removeLevelFromIndex(pl *priceLevel, buy bool) {
 	levels := b.bids
@@ -188,7 +188,7 @@ func (b *Book) removeLevelFromIndex(pl *priceLevel, buy bool) {
 	}
 }
 
-// unlinkAndMaybeRemoveLevel 纯链表摘除+count--+map删除，档位空了顺带从档位数组里摘掉——
+// 纯链表摘除+count--+map删除，档位空了顺带从档位数组里摘掉——
 // 不碰totalVolume，调用方(applyFill/cancelNode)已经按各自的场景把汇总量减好了
 func (b *Book) unlinkAndMaybeRemoveLevel(node *orderNode, buy bool) {
 	pl := node.level
@@ -209,7 +209,7 @@ func (b *Book) unlinkAndMaybeRemoveLevel(node *orderNode, buy bool) {
 	}
 }
 
-// applyFill 处理一笔成交对某个挂单节点的影响：减少这个节点的剩余量、同步减少所在档位的
+// 处理一笔成交对某个挂单节点的影响：减少这个节点的剩余量、同步减少所在档位的
 // 汇总量；如果这个节点被完全吃掉，顺带从链表/map/档位数组里摘除
 func (b *Book) applyFill(node *orderNode, vol decimal.Decimal, buy bool) {
 	node.order.Remaining = node.order.Remaining.Sub(vol)
@@ -219,14 +219,14 @@ func (b *Book) applyFill(node *orderNode, vol decimal.Decimal, buy bool) {
 	}
 }
 
-// cancelNode 撤销/自成交摘除一个还没被成交动过的节点：把它剩余的全部量从档位汇总里扣掉，
+// 撤销/自成交摘除一个还没被成交动过的节点：把它剩余的全部量从档位汇总里扣掉，
 // 然后摘除——跟applyFill的区别是这里节点的Remaining还没被改动过，要按"全部剩余量"扣
 func (b *Book) cancelNode(node *orderNode, buy bool) {
 	node.level.totalVolume = node.level.totalVolume.Sub(node.order.Remaining)
 	b.unlinkAndMaybeRemoveLevel(node, buy)
 }
 
-// Match 尝试撮合一笔新进来的委托，返回成交列表 + 因为自成交保护被摘掉的maker委托列表。
+// 尝试撮合一笔新进来的委托，返回成交列表 + 因为自成交保护被摘掉的maker委托列表。
 // LIMIT单未完全成交的剩余部分，由调用方决定要不要调Rest挂回簿子；MARKET单剩余量直接由
 // 调用方释放，不挂簿。
 //
@@ -277,7 +277,7 @@ func (b *Book) Match(order *RestingOrder) (fills []Fill, selfCanceled []*Resting
 	return fills, selfCanceled
 }
 
-// Rest 把未完全成交的LIMIT单剩余部分挂进簿子，按价格-时间优先插入到正确位置
+// 把未完全成交的LIMIT单剩余部分挂进簿子，按价格-时间优先插入到正确位置
 // Rest 把未完全成交的LIMIT单剩余部分挂进簿子，按价格-时间优先插入到正确位置。如果这个
 // orderID已经在簿子里(比如上游Kafka消费者在at-least-once语义下重复投递了同一个下单
 // 事件，SubmitOrder被重复调用)，不会插入第二份、静默覆盖map里的旧引用把旧节点变成
@@ -294,7 +294,7 @@ func (b *Book) Rest(order *RestingOrder) bool {
 	return true
 }
 
-// Cancel 从簿子里摘掉一笔委托，返回被摘掉时还剩多少量(调用方要把这部分保证金退回)，
+// 从簿子里摘掉一笔委托，返回被摘掉时还剩多少量(调用方要把这部分保证金退回)，
 // O(1)(map查找定位节点+链表摘除)，档位是否需要从数组里摘除是唯一的O(log m)+O(m)开销
 // (m=档位数)，只在这一档最后一笔单被摘掉时才发生
 func (b *Book) Cancel(orderID uint64) (decimal.Decimal, bool) {
@@ -309,7 +309,7 @@ func (b *Book) Cancel(orderID uint64) (decimal.Decimal, bool) {
 	return remaining, true
 }
 
-// Contains 这个orderID当前是否正挂在簿子上——SubmitOrder用这个防御Kafka at-least-once
+// 这个orderID当前是否正挂在簿子上——SubmitOrder用这个防御Kafka at-least-once
 // 语义下的重复投递：如果一笔下单事件被重复消费、这个orderId已经在挂着，说明上一次投递
 // 已经完整处理过(撮合+挂剩余量)了，不能对它再跑一遍Match，否则一笔仍在簿子上的挂单会
 // 被当成"新的taker"再次尝试撮合，可能吃掉不该被这笔重复事件消耗的对手盘流动性——这不是
@@ -326,20 +326,20 @@ func (b *Book) Contains(orderID uint64) bool {
 // 和WS实时推送(EngineService.SubmitOrder)共用同一个默认值，不要各自硬编码一份
 const DefaultDepthLevels = 20
 
-// PriceLevel 深度快照里聚合后的一档——只暴露价格/总量/笔数，不暴露单笔委托的uid/orderID，
+// 深度快照里聚合后的一档——只暴露价格/总量/笔数，不暴露单笔委托的uid/orderID，
 // 公开的深度数据不该泄露个人挂单归属
 type PriceLevel struct {
-	Price  decimal.Decimal
-	Volume decimal.Decimal // 这一档全部挂单剩余量之和
-	Count  int             // 这一档挂单笔数
+	Price  decimal.Decimal `json:"price"`
+	Volume decimal.Decimal `json:"volume"` // 这一档全部挂单剩余量之和
+	Count  int             `json:"count"`  // 这一档挂单笔数
 }
 
 type DepthSnapshot struct {
-	Bids []PriceLevel // 价格从高到低
-	Asks []PriceLevel // 价格从低到高
+	Bids []PriceLevel `json:"bids"` // 价格从高到低
+	Asks []PriceLevel `json:"asks"` // 价格从低到高
 }
 
-// Depth 按档位聚合的订单簿快照，最多返回每边maxLevels档，<=0表示不限（返回全部档位）
+// 按档位聚合的订单簿快照，最多返回每边maxLevels档，<=0表示不限（返回全部档位）
 func (b *Book) Depth(maxLevels int) DepthSnapshot {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -361,7 +361,7 @@ func snapshotLevels(levels []*priceLevel, maxLevels int) []PriceLevel {
 	return out
 }
 
-// Engine 管理全部symbol各自的Book
+// 管理全部symbol各自的Book
 type Engine struct {
 	mu    sync.Mutex
 	books map[string]*Book

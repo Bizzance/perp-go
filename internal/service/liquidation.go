@@ -115,7 +115,7 @@ func (s *LiquidationService) checkAndLiquidate(ctx context.Context, uid uint64) 
 	return nil
 }
 
-// queueLiquidation 强平入口：原子标记这个仓位进入LIQUIDATING，成功之后把真正的分批挂单
+// 强平入口：原子标记这个仓位进入LIQUIDATING，成功之后把真正的分批挂单
 // 循环丢给一个独立goroutine异步跑(liquidateInClips)——不在风控扫描这个调用路径上等，
 // 一个大仓位分批下来可能要跨越好几个LiquidationOrderTimeoutMs，不能让RiskScanOnce的
 // 一次tick被卡住
@@ -130,7 +130,7 @@ func (s *LiquidationService) queueLiquidation(ctx context.Context, p model.Posit
 	go s.liquidateInClips(context.Background(), p.UID, p.Symbol, p.Side)
 }
 
-// liquidateInClips 大仓位分批强平：单批强平挂单量不超过coin.MaxVolume——这是普通下单本来
+// 大仓位分批强平：单批强平挂单量不超过coin.MaxVolume——这是普通下单本来
 // 就有的单笔最大量限制(router.go的addOrder同样校验)，强平单没理由例外，一次性把一个远超
 // 正常单笔上限的大仓位甩给盘口，对价格冲击太大，也超出这个symbol正常交易时的流动性预期，
 // 见docs/liquidation.md。依次挂出每一批，各自走"挂保护价单→(立刻全部成交/取消就马上进
@@ -166,7 +166,7 @@ func (s *LiquidationService) liquidateInClips(ctx context.Context, uid uint64, s
 	}
 }
 
-// submitLiquidationClip 挂出一批强平单，数量按coin.MaxVolume截断。返回ok=false表示这一批
+// 挂出一批强平单，数量按coin.MaxVolume截断。返回ok=false表示这一批
 // 没能挂出去，调用方(liquidateInClips)应该直接退出整个强平循环
 func (s *LiquidationService) submitLiquidationClip(ctx context.Context, p model.Position) (uint64, bool) {
 	mark, hasMark := s.markPrice.Get(ctx, p.Symbol)
@@ -239,7 +239,7 @@ func (s *LiquidationService) submitLiquidationClip(ctx context.Context, p model.
 	return orderID, true
 }
 
-// settleTimeoutFallback 一批强平单挂出去LiquidationOrderTimeoutMs还没成交完，撤掉这一批
+// 一批强平单挂出去LiquidationOrderTimeoutMs还没成交完，撤掉这一批
 // 剩余的部分，按当前标记价直接结算——注意是"这一批"未成交的量(o.RemainingAmount())，
 // 不是整个仓位剩余的量，分批强平下这两者可能不相等(仓位可能还有别的批次没开始处理)
 func (s *LiquidationService) settleTimeoutFallback(ctx context.Context, orderID uint64) {

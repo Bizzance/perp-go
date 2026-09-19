@@ -1,6 +1,10 @@
--- framework-go 第一期(MVP)表结构，独立新库(建议库名 perpgo)。
--- 账户(含信用额度)、合约配置与保证金分档、委托/条件单/持仓/成交、标记价格、指数价格与
--- 资金费率结算、保险基金。不建：逐仓模式——按项目约定只支持全仓，明确不做。
+-- perp-go 第一期(MVP)表结构，独立新库(建议库名 perpgo)。
+-- 账户(含信用额度)、合约配置与保证金分档、委托/条件单/持仓/成交、K线、资金流水、指数价格与
+-- 资金费率结算、保险基金、Kafka消息去重。不建：逐仓模式——按项目约定只支持全仓，明确不做。
+--
+-- 这个文件只包含建表语句和演示用的初始数据，表结构一律直接写成最终形态，不写任何
+-- ALTER/DROP COLUMN、MODIFY COLUMN、CREATE INDEX这类修改已有表的语句。要改表结构就直接改
+-- 下面对应的CREATE TABLE，已经建过库的环境重建库即可(见docs/architecture.md"数据库"一节)。
 
 CREATE DATABASE IF NOT EXISTS perpgo DEFAULT CHARACTER SET utf8mb4 COLLATE utf8mb4_unicode_ci;
 USE perpgo;
@@ -22,37 +26,8 @@ CREATE TABLE IF NOT EXISTS accounts (
   UNIQUE KEY uk_accounts_uid (uid)
 ) ENGINE=InnoDB;
 
--- 给已经建过表的库补上is_insured/round/credit这几列，理由跟下面coins表那几条ALTER一样：
--- CREATE TABLE IF NOT EXISTS对已存在的accounts表是no-op，不会补上这几个新列
-SET @sql := (SELECT IF(
-  (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'accounts' AND COLUMN_NAME = 'is_insured') = 0,
-  'ALTER TABLE accounts ADD COLUMN is_insured TINYINT(1) NOT NULL DEFAULT 0 COMMENT ''是否投保：0-不投保，1-投保'' AFTER uid',
-  'SELECT 1'
-));
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-
-SET @sql := (SELECT IF(
-  (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'accounts' AND COLUMN_NAME = 'round') = 0,
-  'ALTER TABLE accounts ADD COLUMN round BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT ''轮数'' AFTER is_insured',
-  'SELECT 1'
-));
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-
-SET @sql := (SELECT IF(
-  (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'accounts' AND COLUMN_NAME = 'credit') = 0,
-  'ALTER TABLE accounts ADD COLUMN credit DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT ''信用额度余额，只能用于开仓保证金，不能转出/提现'' AFTER round',
-  'SELECT 1'
-));
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-
-SET @sql := (SELECT IF(
-  (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'accounts' AND COLUMN_NAME = 'frozen_credit') = 0,
-  'ALTER TABLE accounts ADD COLUMN frozen_credit DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT ''挂单冻结保证金(来自credit的部分)，必须单独记账才能精确退回'' AFTER frozen_margin',
-  'SELECT 1'
-));
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-
--- 合约配置：维持保证金率/最大杠杆按名义价值分档，见下面的risk_limit_tiers表
+-- 合约配置：维持保证金率/最大杠杆按名义价值分档，见下面的risk_limit_tiers表。
+-- 带"0=不限制/不校验"注释的列统一用0表示不启用这项限制
 CREATE TABLE IF NOT EXISTS coins (
   symbol                    VARCHAR(32) NOT NULL,
   base_coin_scale           TINYINT UNSIGNED NOT NULL DEFAULT 8 COMMENT '标的币数量精度(小数位数)',
@@ -61,7 +36,7 @@ CREATE TABLE IF NOT EXISTS coins (
   maker_fee                 DECIMAL(8,6) NOT NULL DEFAULT 0.000200,
   taker_fee                 DECIMAL(8,6) NOT NULL DEFAULT 0.000500,
   price_tick                DECIMAL(18,8) NOT NULL DEFAULT 0 COMMENT '价格最小变动单位，0=不校验',
-  volume_step                DECIMAL(18,8) NOT NULL DEFAULT 0 COMMENT '数量步长，0=不校验',
+  volume_step               DECIMAL(18,8) NOT NULL DEFAULT 0 COMMENT '数量步长，0=不校验',
   min_volume                DECIMAL(18,8) NOT NULL DEFAULT 0,
   max_volume                DECIMAL(18,8) NOT NULL DEFAULT 0 COMMENT '0=不限制',
   funding_interval_hours    INT UNSIGNED NOT NULL DEFAULT 8 COMMENT '资金费率结算周期(小时)，对齐到从0点起的整点边界',
@@ -70,48 +45,6 @@ CREATE TABLE IF NOT EXISTS coins (
   created_at                DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (symbol)
 ) ENGINE=InnoDB;
-
--- 这个项目没有独立的迁移工具，schema.sql就是唯一的建表脚本——上面CREATE TABLE IF NOT EXISTS
--- 对已经存在的coins表是no-op，不会补上后续这几次迭代新增/删除的列，直接重跑这个文件在一个
--- 已经建过库的环境上会导致代码里SELECT的列在数据库里不存在。MySQL(不是MariaDB)的ALTER TABLE
--- 不支持ADD/DROP COLUMN IF NOT EXISTS/IF EXISTS这种语法(实测8.4.11直接报语法错误)，用
--- information_schema查列是否存在、拼接成动态SQL再PREPARE/EXECUTE来模拟同样的效果，把coins表
--- 补齐到跟上面CREATE TABLE定义一致，让这个文件对"全新库"和"已经建过表、只是列结构落后"两种
--- 情况都能安全重复执行
-SET @sql := (SELECT IF(
-  (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'coins' AND COLUMN_NAME = 'funding_interval_hours') = 0,
-  'ALTER TABLE coins ADD COLUMN funding_interval_hours INT UNSIGNED NOT NULL DEFAULT 8 COMMENT ''资金费率结算周期(小时)，对齐到从0点起的整点边界''',
-  'SELECT 1'
-));
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-
-SET @sql := (SELECT IF(
-  (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'coins' AND COLUMN_NAME = 'funding_rate_cap') = 0,
-  'ALTER TABLE coins ADD COLUMN funding_rate_cap DECIMAL(10,6) NOT NULL DEFAULT 0.007500 COMMENT ''资金费率上下限，0=不限制''',
-  'SELECT 1'
-));
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-
-SET @sql := (SELECT IF(
-  (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'coins' AND COLUMN_NAME = 'price_protection_ratio') = 0,
-  'ALTER TABLE coins ADD COLUMN price_protection_ratio DECIMAL(8,6) NOT NULL DEFAULT 0.050000 COMMENT ''限价单允许偏离标记/指数价格的最大比例，0=不校验''',
-  'SELECT 1'
-));
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-
-SET @sql := (SELECT IF(
-  (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'coins' AND COLUMN_NAME = 'max_leverage') > 0,
-  'ALTER TABLE coins DROP COLUMN max_leverage',
-  'SELECT 1'
-));
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-
-SET @sql := (SELECT IF(
-  (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'coins' AND COLUMN_NAME = 'maintenance_margin_rate') > 0,
-  'ALTER TABLE coins DROP COLUMN maintenance_margin_rate',
-  'SELECT 1'
-));
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 -- 保证金分档(风险限额)：一个symbol配多档，按tier(1开始)从小到大对应名义价值从低到高。
 -- maintenance_amount是速算扣除数，让跨档位时维持保证金连续，公式=名义价值*maintenance_margin_rate
@@ -129,52 +62,43 @@ CREATE TABLE IF NOT EXISTS risk_limit_tiers (
   UNIQUE KEY uk_risk_limit_tiers_symbol_tier (symbol, tier)
 ) ENGINE=InnoDB;
 
--- 委托单
+-- 委托单。枚举列的取值全部小写，跟对外API的枚举约定一致(见docs/api.md)。
+-- request_id是合作方指定的幂等键，同一uid内唯一；没传就是NULL——MySQL唯一索引允许
+-- 多个NULL，所以没传的委托不受这个唯一约束影响。request_hash是这次请求参数的摘要，
+-- 用来识别"同一个request_id却带了不同参数"的误用
 CREATE TABLE IF NOT EXISTS orders (
-  order_id       BIGINT UNSIGNED NOT NULL COMMENT '雪花ID或类似的分布式唯一ID，应用层生成',
-  uid            BIGINT UNSIGNED NOT NULL,
-  symbol         VARCHAR(32) NOT NULL,
-  side           ENUM('long','short') NOT NULL,
-  action         ENUM('open','close') NOT NULL,
-  type           ENUM('limit','market') NOT NULL,
-  price          DECIMAL(18,8) NOT NULL DEFAULT 0 COMMENT '市价单恒为0',
-  amount         DECIMAL(26,16) NOT NULL COMMENT '标的币数量',
-  traded_amount  DECIMAL(26,16) NOT NULL DEFAULT 0,
-  avg_deal_price DECIMAL(18,8) NOT NULL DEFAULT 0,
-  frozen_margin  DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT '这笔委托占用的冻结保证金(来自available的部分)',
-  frozen_credit  DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT '这笔委托占用的冻结保证金(来自credit的部分)',
-  leverage       INT UNSIGNED NOT NULL,
-  reduce_only    TINYINT(1) NOT NULL DEFAULT 0,
-  liquidation    TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否强平单——结算后要走保险基金穿仓/盈余清算分支',
-  status         ENUM('open','partially_filled','filled','canceled','rejected') NOT NULL DEFAULT 'open',
-  create_time    BIGINT UNSIGNED NOT NULL COMMENT '毫秒时间戳，撮合引擎按这个做时间优先排序',
-  update_time    BIGINT UNSIGNED NOT NULL,
+  order_id        BIGINT UNSIGNED NOT NULL COMMENT '雪花ID或类似的分布式唯一ID，应用层生成',
+  uid             BIGINT UNSIGNED NOT NULL,
+  symbol          VARCHAR(32) NOT NULL,
+  side            ENUM('long','short') NOT NULL,
+  action          ENUM('open','close') NOT NULL,
+  type            ENUM('limit','market') NOT NULL,
+  price           DECIMAL(18,8) NOT NULL DEFAULT 0 COMMENT '市价单恒为0',
+  amount          DECIMAL(26,16) NOT NULL COMMENT '标的币数量',
+  traded_amount   DECIMAL(26,16) NOT NULL DEFAULT 0,
+  avg_deal_price  DECIMAL(18,8) NOT NULL DEFAULT 0,
+  frozen_margin   DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT '这笔委托占用的冻结保证金(来自available的部分)',
+  frozen_credit   DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT '这笔委托占用的冻结保证金(来自credit的部分)',
+  leverage        INT UNSIGNED NOT NULL,
+  reduce_only     TINYINT(1) NOT NULL DEFAULT 0,
+  liquidation     TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否强平单——结算后要走保险基金穿仓/盈余清算分支',
+  status          ENUM('open','partially_filled','filled','canceled','rejected') NOT NULL DEFAULT 'open',
+  create_time     BIGINT UNSIGNED NOT NULL COMMENT '毫秒时间戳，撮合引擎按这个做时间优先排序',
+  update_time     BIGINT UNSIGNED NOT NULL,
+  request_id      VARCHAR(64) NULL COMMENT '合作方指定的幂等键，同一uid内唯一，NULL=没传',
+  request_hash    VARCHAR(64) NULL COMMENT '请求参数摘要，同一个request_id再次提交时用来判断参数是否一致',
   PRIMARY KEY (order_id),
+  UNIQUE KEY uk_orders_uid_request_id (uid, request_id),
   KEY idx_orders_uid (uid),
   KEY idx_orders_symbol_status (symbol, status)
 ) ENGINE=InnoDB;
 
--- 给已经建过表的库把side/action/type/status这几个ENUM列改成小写取值(对齐合作方API的
--- 大小写约定)，同时给status补上rejected这个新状态。MODIFY COLUMN在这里是安全的幂等操作：
--- ENUM在存储层是按位置索引存的，只要新枚举列表里各个取值的先后顺序跟旧的一一对应(这里只是
--- 把每个值原地改成小写、在末尾追加rejected)，已有数据不需要任何转换，读出来的值自动就是
--- 新的小写形式——不是"改列表定义"和"数据"两件事，是同一件事
-ALTER TABLE orders MODIFY COLUMN side ENUM('long','short') NOT NULL;
-ALTER TABLE orders MODIFY COLUMN action ENUM('open','close') NOT NULL;
-ALTER TABLE orders MODIFY COLUMN type ENUM('limit','market') NOT NULL;
-ALTER TABLE orders MODIFY COLUMN status ENUM('open','partially_filled','filled','canceled','rejected') NOT NULL DEFAULT 'open';
-
-SET @sql := (SELECT IF(
-  (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'orders' AND COLUMN_NAME = 'frozen_credit') = 0,
-  'ALTER TABLE orders ADD COLUMN frozen_credit DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT ''这笔委托占用的冻结保证金(来自credit的部分)'' AFTER frozen_margin',
-  'SELECT 1'
-));
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-
 -- 条件单(止盈止损/条件开仓)：创建时不进撮合引擎的订单簿，只是"记着一个触发条件"，
 -- 由contract-engine定时扫描标记价格，触发了才转成一笔真正的委托(落到orders表)按正常流程
 -- 提交撮合。order_id在创建条件单的时候就分配好，触发后落地到orders表也用这同一个id，
--- 客户端不需要另外维护"条件单id"和"委托id"两套编号
+-- 客户端不需要另外维护"条件单id"和"委托id"两套编号。
+-- request_id含义同orders表，唯一索引是这张表自己的(uid, request_id)，触发后落地到
+-- orders表的委托不继承它
 CREATE TABLE IF NOT EXISTS conditional_orders (
   order_id          BIGINT UNSIGNED NOT NULL COMMENT '触发后落地到orders表用同一个id，创建时就分配好',
   uid               BIGINT UNSIGNED NOT NULL,
@@ -193,12 +117,16 @@ CREATE TABLE IF NOT EXISTS conditional_orders (
   status            ENUM('pending','triggered','canceled') NOT NULL DEFAULT 'pending',
   create_time       BIGINT UNSIGNED NOT NULL,
   update_time       BIGINT UNSIGNED NOT NULL,
+  request_id        VARCHAR(64) NULL COMMENT '合作方指定的幂等键，同一uid内唯一，NULL=没传',
+  request_hash      VARCHAR(64) NULL COMMENT '请求参数摘要，同一个request_id再次提交时用来判断参数是否一致',
   PRIMARY KEY (order_id),
+  UNIQUE KEY uk_conditional_orders_uid_request_id (uid, request_id),
   KEY idx_conditional_orders_uid (uid),
   KEY idx_conditional_orders_status (status)
 ) ENGINE=InnoDB;
 
--- 持仓：全仓保证金，一个(uid,symbol,side)一行
+-- 持仓：全仓保证金，一个(uid,symbol,side)一行。idx_positions_symbol供资金费率结算按symbol
+-- 批量查仓位用，uk_positions_uid_symbol_side因为uid在最前面覆盖不到这个查询
 CREATE TABLE IF NOT EXISTS positions (
   id                BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   uid               BIGINT UNSIGNED NOT NULL,
@@ -213,30 +141,9 @@ CREATE TABLE IF NOT EXISTS positions (
   version           INT UNSIGNED NOT NULL DEFAULT 0,
   update_time       BIGINT UNSIGNED NOT NULL,
   PRIMARY KEY (id),
-  UNIQUE KEY uk_positions_uid_symbol_side (uid, symbol, side)
+  UNIQUE KEY uk_positions_uid_symbol_side (uid, symbol, side),
+  KEY idx_positions_symbol (symbol)
 ) ENGINE=InnoDB;
-
--- 同上，把positions的side/status也改成小写取值，理由和安全性说明见orders表那几条MODIFY
-ALTER TABLE positions MODIFY COLUMN side ENUM('long','short') NOT NULL;
-ALTER TABLE positions MODIFY COLUMN status ENUM('normal','liquidating','closed') NOT NULL DEFAULT 'normal';
-
-SET @sql := (SELECT IF(
-  (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'positions' AND COLUMN_NAME = 'credit_margin') = 0,
-  'ALTER TABLE positions ADD COLUMN credit_margin DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT ''position_margin里来自credit的部分，平仓释放时要按这个比例精确退回credit而不是笼统退available'' AFTER position_margin',
-  'SELECT 1'
-));
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-
--- 资金费率结算按symbol批量查仓位用，uk_positions_uid_symbol_side因为uid在最前面覆盖不到
--- 这个查询。MySQL的CREATE INDEX不支持IF NOT EXISTS(实测报语法错误，跟上面coins表ALTER
--- 同样的原因)，用information_schema.STATISTICS查索引是否存在来模拟，对已经建过表的库
--- 能补上这个索引，不能指望CREATE TABLE IF NOT EXISTS生效
-SET @sql := (SELECT IF(
-  (SELECT COUNT(*) FROM information_schema.STATISTICS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'positions' AND INDEX_NAME = 'idx_positions_symbol') = 0,
-  'CREATE INDEX idx_positions_symbol ON positions (symbol)',
-  'SELECT 1'
-));
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
 
 -- 成交记录
 CREATE TABLE IF NOT EXISTS trades (
@@ -273,15 +180,20 @@ CREATE TABLE IF NOT EXISTS klines (
   PRIMARY KEY (symbol, `interval`, open_time)
 ) ENGINE=InnoDB;
 
--- 资金变动流水(注资/手续费/已实现盈亏/强平清算)，纯审计用途，不参与任何计算
+-- 资金变动流水(充值扣减/手续费/已实现盈亏/资金费/信用额度发放/结束本轮回收等)，纯审计用途，
+-- 不参与任何计算。合作方发起的充值/扣减/发放额度带request_id(幂等键)，同一uid内唯一，靠唯一
+-- 索引保证同一个请求只生效一次；系统内部产生的流水(手续费、盈亏等)没有request_id，是NULL
 CREATE TABLE IF NOT EXISTS member_transactions (
   id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   uid          BIGINT UNSIGNED NOT NULL,
   symbol       VARCHAR(32) NOT NULL DEFAULT '',
   amount       DECIMAL(26,16) NOT NULL COMMENT '正数=入账，负数=出账',
-  type         VARCHAR(32) NOT NULL COMMENT 'DEPOSIT/FEE/REALIZED_PNL/LIQUIDATION_CLEAR等，字符串常量见internal/model',
+  type         VARCHAR(32) NOT NULL COMMENT 'deposit/fee/realized_pnl/funding_fee/credit_grant/round_close/liquidation_clear，字符串常量见internal/model',
   create_time  BIGINT UNSIGNED NOT NULL,
+  request_id   VARCHAR(64) NULL COMMENT '合作方指定的幂等键，同一uid内唯一，NULL=系统内部产生的流水',
+  request_hash VARCHAR(64) NULL COMMENT '请求参数摘要，同一个request_id再次提交时用来判断参数是否一致',
   PRIMARY KEY (id),
+  UNIQUE KEY uk_member_transactions_uid_request_id (uid, request_id),
   KEY idx_member_transactions_uid (uid)
 ) ENGINE=InnoDB;
 
@@ -340,35 +252,6 @@ CREATE TABLE IF NOT EXISTS processed_messages (
   KEY idx_processed_messages_create_time (create_time)
 ) ENGINE=InnoDB;
 
--- 老版本的processed_messages表主键是(topic,partition,offset)，没有consumer_group列——
--- 补列+把主键换成新的四元组，让这个文件对"全新库"和"已经建过旧版表"两种情况都能安全重复执行
-SET @sql := (SELECT IF(
-  (SELECT COUNT(*) FROM information_schema.COLUMNS WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'processed_messages' AND COLUMN_NAME = 'consumer_group') = 0,
-  'ALTER TABLE processed_messages ADD COLUMN consumer_group VARCHAR(191) NOT NULL DEFAULT ''''',
-  'SELECT 1'
-));
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-
--- 上面ADD COLUMN只能给一个统一的默认值(空字符串)，不能按topic分别填不同的值——老版本
--- (engine分片之前，见docs/engine-sharding.md)只写死过两个consumer group id：submit/
--- cancel共用"contract-engine"，round-close单独用"contract-engine-round-close"，按topic
--- 能精确反推出这些老记录当初真正属于哪个consumer group。不能让它们留着空字符串：迁移后
--- 如果这个实例的consumer offset被人工回退/重放到迁移前已经处理过的旧offset，查找用的是
--- 真实group id("contract-engine"等)而不是空字符串，会跟老记录对不上、把已经处理过的
--- 消息误判成"从没处理过"再跑一遍。这两条UPDATE本身是幂等的(只动还是空字符串的行)，可以
--- 安全重复执行
-UPDATE processed_messages SET consumer_group = 'contract-engine'
-  WHERE consumer_group = '' AND topic IN ('perpgo.order.submit', 'perpgo.order.cancel');
-UPDATE processed_messages SET consumer_group = 'contract-engine-round-close'
-  WHERE consumer_group = '' AND topic = 'perpgo.round.close';
-
-SET @sql := (SELECT IF(
-  (SELECT COUNT(*) FROM information_schema.KEY_COLUMN_USAGE WHERE TABLE_SCHEMA = DATABASE() AND TABLE_NAME = 'processed_messages' AND CONSTRAINT_NAME = 'PRIMARY' AND COLUMN_NAME = 'consumer_group') = 0,
-  'ALTER TABLE processed_messages DROP PRIMARY KEY, ADD PRIMARY KEY (consumer_group, topic, `partition`, `offset`)',
-  'SELECT 1'
-));
-PREPARE stmt FROM @sql; EXECUTE stmt; DEALLOCATE PREPARE stmt;
-
 -- 结束本轮(CloseRound)在engine分片部署下的跨分片完成度追踪：一个uid结束某一round时涉及到
 -- 的每个symbol各占一行(done=0)，负责这个symbol的分片实例做完自己那部分(撤单+强平)之后
 -- 把done改成1，全部symbol都done了才能做"清零credit+round前进"这个只能发生一次的最终结算——
@@ -392,7 +275,7 @@ ON DUPLICATE KEY UPDATE symbol = symbol;
 
 -- 演示用保证金分档：maintenance_amount(速算扣除数)是按"跨档位维持保证金连续"手工算好的常量，
 -- 不是运行时推导——每一档的值=上一档在其上限名义价值处的维持保证金，减去本档费率在同一个
--- 名义价值下算出来的数值，公式推导见表头注释
+-- 名义价值下算出来的数值，公式推导见risk_limit_tiers表头注释
 INSERT INTO risk_limit_tiers (symbol, tier, max_notional, maintenance_margin_rate, maintenance_amount, max_leverage)
 VALUES
   ('BTCUSDT', 1, 50000,      0.004000, 0,      125),

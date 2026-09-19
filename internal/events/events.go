@@ -35,4 +35,7 @@ type OrderCancelEvent struct {
 // 只能走这条路由过去，不能在contract-api那边直接做
 type RoundCloseEvent struct {
 	UID uint64 `json:"uid"`
+	// Round 要结束的那一轮。引擎处理时账户当前的round不等于它就直接忽略——这是"结束本轮"
+	// 的幂等键：合作方重试同一个round永远安全，不会把已经推进到下一轮的账户又结束一次
+	Round uint64 `json:"round"`
 }

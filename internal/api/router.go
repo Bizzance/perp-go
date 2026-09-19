@@ -3,7 +3,9 @@ package api
 import (
 	"context"
 	"errors"
+	"log"
 	"net/http"
+	"reflect"
 	"strconv"
 	"time"
 
@@ -32,6 +34,7 @@ type Server struct {
 	producer          *mq.Producer
 	hub               *ws.Hub
 	lock              *service.LockService
+	txs               *repo.TxRepo
 }
 
 func NewServer(
@@ -47,6 +50,7 @@ func NewServer(
 	producer *mq.Producer,
 	hub *ws.Hub,
 	lock *service.LockService,
+	txs *repo.TxRepo,
 ) *Server {
 	return &Server{
 		accounts:          accounts,
@@ -61,11 +65,13 @@ func NewServer(
 		producer:          producer,
 		hub:               hub,
 		lock:              lock,
+		txs:               txs,
 	}
 }
 
 func (s *Server) Router() *gin.Engine {
 	r := gin.Default()
+	r.POST("/account/create", s.createAccount)
 	r.POST("/account/balance", s.adjustBalance)
 	r.GET("/account/info", s.accountInfo)
 	r.POST("/account/credit", s.grantCredit)
@@ -87,43 +93,29 @@ func (s *Server) Router() *gin.Engine {
 	r.GET("/kline", s.kline)
 	r.POST("/index-price", s.setIndexPrice)
 	r.GET("/ws", s.ws)
+	r.GET("/health", s.health)
+	r.GET("/contract/list", s.contractList)
+	r.GET("/contract/detail", s.contractDetail)
+	r.GET("/market/ticker", s.marketTicker)
+	r.GET("/market/trades", s.marketTrades)
+	r.GET("/order/detail", s.orderDetail)
+	r.POST("/order/cancel-all", s.cancelAllOrders)
+	r.GET("/order/conditional/detail", s.conditionalOrderDetail)
+	r.GET("/account/transactions", s.accountTransactions)
+	r.GET("/liquidation/history", s.liquidationHistory)
 	return r
 }
 
-func fail(c *gin.Context, code int, msg string) {
-	c.JSON(http.StatusOK, gin.H{"code": code, "message": msg})
-}
-
-// httpError携带这笔请求最终该返回给客户端的code/message，用在LockService.WithLock的闭包
-// 内部——闭包内不能直接调fail()+return，那样只会终止闭包本身、外层handler会继续往下执行
-// (插入订单、发Kafka事件)，等于绕过了刚刚在闭包里失败的校验，必须靠error传出闭包边界
-type httpError struct {
-	code int
-	msg  string
-}
-
-func (e *httpError) Error() string { return e.msg }
-
-// respondLockErr 把WithLock返回的error翻译成对应的HTTP失败响应：httpError按它自带的
-// code/message处理，ErrLockBusy按429处理，其它一律当成500——三个下单相关handler共用
-func respondLockErr(c *gin.Context, err error) {
-	var he *httpError
-	if errors.As(err, &he) {
-		fail(c, he.code, he.msg)
-		return
-	}
-	if errors.Is(err, service.ErrLockBusy) {
-		fail(c, 429, err.Error())
-		return
-	}
-	fail(c, 500, err.Error())
-}
-
+// 统一的成功响应。nil切片会被序列化成JSON的null，而"没有数据"对列表类接口应该是空数组[]，
+// 合作方的解析代码遍历null会出错，所以这里统一把nil切片换成空切片
 func ok(c *gin.Context, data any) {
+	if v := reflect.ValueOf(data); v.IsValid() && v.Kind() == reflect.Slice && v.IsNil() {
+		data = reflect.MakeSlice(v.Type(), 0, 0).Interface()
+	}
 	c.JSON(http.StatusOK, gin.H{"code": 200, "message": "success", "data": data})
 }
 
-// parsePositiveIntQuery 解析一个"必须是正整数、可省略"的query参数，省略时用def——
+// 解析一个"必须是正整数、可省略"的query参数，省略时用def——
 // contract-api的kline接口(limit)、contract-engine的depth接口(levels)都要这个校验规则，
 // 两边共用同一份实现，不要各写一份、以后改校验规则漏改一边
 func parsePositiveIntQuery(c *gin.Context, name string, def int) (int, string) {
@@ -138,7 +130,7 @@ func parsePositiveIntQuery(c *gin.Context, name string, def int) (int, string) {
 	return n, ""
 }
 
-// parseUID 只给GET接口用——这些接口的参数走query string，没有body。写接口(POST)统一用
+// 只给GET接口用——这些接口的参数走query string，没有body。写接口(POST)统一用
 // JSON body + ShouldBindJSON，uid跟着各自的request struct走，不再需要这个helper
 func parseUID(c *gin.Context) (uint64, bool) {
 	uid, err := decimal.NewFromString(c.Query("uid"))
@@ -149,7 +141,23 @@ func parseUID(c *gin.Context) (uint64, bool) {
 	return uint64(uid.IntPart()), true
 }
 
-// bindJSON 全部POST接口统一的JSON body解析入口，失败了直接写400响应——调用方判断返回值
+// 历史类GET接口共用的分页参数(limit + before游标)，参数不合法时已经写好400响应，
+// 调用方判断第三个返回值决定要不要继续
+func pageParams(c *gin.Context) (limit int, before uint64, ok bool) {
+	limit, msg := parseLimit(c)
+	if msg != "" {
+		fail(c, 400, msg)
+		return 0, 0, false
+	}
+	before, msg = parseBefore(c)
+	if msg != "" {
+		fail(c, 400, msg)
+		return 0, 0, false
+	}
+	return limit, before, true
+}
+
+// 全部POST接口统一的JSON body解析入口，失败了直接写400响应——调用方判断返回值
 // 决定要不要continue往下走，不用每个handler自己重复"解析失败就返回400"这几行
 func bindJSON(c *gin.Context, req any) bool {
 	if err := c.ShouldBindJSON(req); err != nil {
@@ -162,6 +170,82 @@ func bindJSON(c *gin.Context, req any) bool {
 type adjustBalanceRequest struct {
 	UID    uint64          `json:"uid" binding:"required"`
 	Amount decimal.Decimal `json:"amount"`
+	// RequestID 必填的幂等键：充值/扣款重试不带幂等键会重复入账或重复扣款
+	RequestID string `json:"requestId"`
+}
+
+// 资金类接口(充值/扣款/发额度)的返回值，duplicate=true表示这个requestId之前已经处理过、
+// 这次什么都没做
+type fundOpResult struct {
+	RequestID string `json:"requestId"`
+	Duplicate bool   `json:"duplicate,omitempty"`
+}
+
+// 资金类接口共用的失败翻译：余额不足、幂等键参数冲突是业务上的正常拒绝(400)，其它是500
+func respondFundOpErr(c *gin.Context, err error) {
+	switch {
+	case errors.Is(err, service.ErrAccountNotFound):
+		failC(c, 400, ErrAccountNotFound, err.Error())
+	case errors.Is(err, service.ErrInsufficientBalance):
+		failC(c, 400, ErrInsufficientBalance, err.Error())
+	case errors.Is(err, service.ErrIdempotencyConflict):
+		failC(c, 400, ErrIdempotencyConflict, err.Error())
+	default:
+		fail(c, 500, err.Error())
+	}
+}
+
+// 校验账户存在：不存在写好account_not_found响应并返回false。合作方必须先创建账户，其它接口
+// 不会替他们悄悄建——否则uid手误写错的充值会成功地充给一个没人认领的账户，只读接口也会往库里
+// 塞垃圾账户
+func (s *Server) requireAccount(c *gin.Context, uid uint64) bool {
+	account, err := s.accounts.Find(c.Request.Context(), uid)
+	if err != nil {
+		fail(c, 500, err.Error())
+		return false
+	}
+	if account == nil {
+		failC(c, 400, ErrAccountNotFound, "账户不存在，请先调用 POST /account/create 创建")
+		return false
+	}
+	return true
+}
+
+// 解析GET接口的uid参数并校验账户存在
+func (s *Server) parseAccountUID(c *gin.Context) (uint64, bool) {
+	uid, ok := parseUID(c)
+	if !ok {
+		return 0, false
+	}
+	if !s.requireAccount(c, uid) {
+		return 0, false
+	}
+	return uid, true
+}
+
+type createAccountRequest struct {
+	UID uint64 `json:"uid" binding:"required"`
+}
+
+// 创建账户的返回值：账户视图加上created标记
+type createAccountResult struct {
+	*service.AccountView
+	Created bool `json:"created"` // true=这次新建的，false=账户之前就存在
+}
+
+// 创建账户。uid是合作方自己体系里的用户ID，直接沿用，重复创建天然幂等(返回已有账户，
+// created=false)，超时重试没有风险
+func (s *Server) createAccount(c *gin.Context) {
+	var req createAccountRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	view, created, err := s.accounts.Create(c.Request.Context(), req.UID)
+	if err != nil {
+		fail(c, 500, err.Error())
+		return
+	}
+	ok(c, createAccountResult{AccountView: view, Created: created})
 }
 
 func (s *Server) adjustBalance(c *gin.Context) {
@@ -169,15 +253,25 @@ func (s *Server) adjustBalance(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
-	if err := s.accounts.AdjustBalance(c.Request.Context(), req.UID, req.Amount); err != nil {
-		fail(c, 500, err.Error())
+	requestID, msg := requireRequestID(req.RequestID)
+	if msg != "" {
+		fail(c, 400, msg)
 		return
 	}
-	ok(c, nil)
+	if req.Amount.IsZero() {
+		fail(c, 400, "amount不能为0")
+		return
+	}
+	replayed, err := s.accounts.AdjustBalance(c.Request.Context(), req.UID, req.Amount, requestID)
+	if err != nil {
+		respondFundOpErr(c, err)
+		return
+	}
+	ok(c, fundOpResult{RequestID: requestID, Duplicate: replayed})
 }
 
 func (s *Server) accountInfo(c *gin.Context) {
-	uid, ok1 := parseUID(c)
+	uid, ok1 := s.parseAccountUID(c)
 	if !ok1 {
 		return
 	}
@@ -192,19 +286,31 @@ func (s *Server) accountInfo(c *gin.Context) {
 type grantCreditRequest struct {
 	UID    uint64          `json:"uid" binding:"required"`
 	Amount decimal.Decimal `json:"amount"`
+	// RequestID 必填的幂等键：发额度是累加操作，重试不带幂等键会让信用额度翻倍
+	RequestID string `json:"requestId"`
 }
 
-// grantCredit 合作方发放/追加信用额度(用户买保险后的赔付)，同一轮内可以多次调用、直接累加
+// 合作方发放/追加信用额度(用户买保险后的赔付)，同一轮内可以多次调用、直接累加
 func (s *Server) grantCredit(c *gin.Context) {
 	var req grantCreditRequest
 	if !bindJSON(c, &req) {
 		return
 	}
-	if err := s.accounts.GrantCredit(c.Request.Context(), req.UID, req.Amount); err != nil {
-		fail(c, 400, err.Error())
+	requestID, msg := requireRequestID(req.RequestID)
+	if msg != "" {
+		fail(c, 400, msg)
 		return
 	}
-	ok(c, nil)
+	if req.Amount.Sign() <= 0 {
+		fail(c, 400, "amount必须大于0")
+		return
+	}
+	replayed, err := s.accounts.GrantCredit(c.Request.Context(), req.UID, req.Amount, requestID)
+	if err != nil {
+		respondFundOpErr(c, err)
+		return
+	}
+	ok(c, fundOpResult{RequestID: requestID, Duplicate: replayed})
 }
 
 type setInsuredRequest struct {
@@ -212,14 +318,14 @@ type setInsuredRequest struct {
 	Insured bool   `json:"insured"`
 }
 
-// setInsured 合作方单独设置这个账户本轮是否投保，跟发放信用额度是两个独立接口，互不联动
+// 合作方单独设置这个账户本轮是否投保，跟发放信用额度是两个独立接口，互不联动
 func (s *Server) setInsured(c *gin.Context) {
 	var req setInsuredRequest
 	if !bindJSON(c, &req) {
 		return
 	}
 	if err := s.accounts.SetInsured(c.Request.Context(), req.UID, req.Insured); err != nil {
-		fail(c, 500, err.Error())
+		respondFundOpErr(c, err)
 		return
 	}
 	ok(c, nil)
@@ -227,27 +333,61 @@ func (s *Server) setInsured(c *gin.Context) {
 
 type closeRoundRequest struct {
 	UID uint64 `json:"uid" binding:"required"`
+	// Round 必填，要结束的那一轮(GET /account/info返回的round)。用指针是因为第一轮的round就是0，
+	// 要区分"没传"和"传了0"。它同时是这个接口的幂等键：结束第N轮只会生效一次
+	Round *uint64 `json:"round"`
 }
 
-// closeRound 合作方通知本轮结束：撤销全部挂单、按标记价强平全部仓位、清算credit这几步都要
+type closeRoundResult struct {
+	Round  uint64 `json:"round"`
+	Status string `json:"status"` // submitted=已提交 / already_closed=这一轮之前已经结束过了，什么都没做
+}
+
+// 合作方通知本轮结束：撤销全部挂单、按标记价强平全部仓位、清算credit这几步都要
 // 摸contract-engine内存里的订单簿/撮合状态，contract-api这边做不了，只能发Kafka事件路由
-// 过去异步执行(跟撤单接口是同样的道理)——这里只做同步返回"请求已提交"
+// 过去异步执行(跟撤单接口是同样的道理)——这里只做同步返回"请求已提交"。
+//
+// 必须指定要结束哪一轮：没有这个参数的话，合作方超时重试会在账户已经进入下一轮之后再结束一次，
+// 把新一轮刚挂的单撤掉、刚开的仓强平、刚发的信用额度清零。round比账户当前的小说明这一轮已经
+// 结束过，直接返回already_closed；比当前的大是不合法的请求
 func (s *Server) closeRound(c *gin.Context) {
 	var req closeRoundRequest
 	if !bindJSON(c, &req) {
 		return
 	}
+	if req.Round == nil {
+		fail(c, 400, "round必填，取值是要结束的那一轮(GET /account/info返回的round)")
+		return
+	}
+	round := *req.Round
+	account, err := s.accounts.Find(c.Request.Context(), req.UID)
+	if err != nil {
+		fail(c, 500, err.Error())
+		return
+	}
+	if account == nil {
+		failC(c, 400, ErrAccountNotFound, "账户不存在，请先调用 POST /account/create 创建")
+		return
+	}
+	if round > account.Round {
+		failC(c, 400, ErrRoundMismatch, "round不能大于账户当前轮数")
+		return
+	}
+	if round < account.Round {
+		ok(c, closeRoundResult{Round: round, Status: "already_closed"})
+		return
+	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
-	evt := events.RoundCloseEvent{UID: req.UID}
+	evt := events.RoundCloseEvent{UID: req.UID, Round: round}
 	if err := s.producer.Publish(ctx, events.TopicRoundClose, strconv.FormatUint(req.UID, 10), evt); err != nil {
 		fail(c, 500, err.Error())
 		return
 	}
-	ok(c, "结束本轮请求已提交")
+	ok(c, closeRoundResult{Round: round, Status: "submitted"})
 }
 
-// validateSideAction side/action任何不认识的值都必须拒绝，不能放过去——matching.DirectionOf
+// side/action任何不认识的值都必须拒绝，不能放过去——matching.DirectionOf
 // 对side/action只特判了(LONG,OPEN)和(SHORT,CLOSE)算买方，其它一律当卖方处理，一个拼错的
 // side/action字符串会被悄悄撮合成方向相反的交易，而不是报错。普通委托(addOrder)和条件单
 // (addConditionalOrder)共用同一套校验规则，避免两边各写一份、以后改一边漏改另一边
@@ -261,7 +401,7 @@ func validateSideAction(side model.Side, action model.OrderAction) string {
 	return ""
 }
 
-// resolveOrderType 空值默认limit，非法值拒绝——普通委托和条件单共用
+// 空值默认limit，非法值拒绝——普通委托和条件单共用
 func resolveOrderType(reqType model.OrderType) (model.OrderType, string) {
 	orderType := reqType
 	if orderType == "" {
@@ -273,7 +413,7 @@ func resolveOrderType(reqType model.OrderType) (model.OrderType, string) {
 	return orderType, ""
 }
 
-// resolveLeverage maxSaneLeverage是不区分开平仓、不查分档配置的兜底上限——只用来挡掉明显
+// maxSaneLeverage是不区分开平仓、不查分档配置的兜底上限——只用来挡掉明显
 // 离谱/会导致uint32(leverage.IntPart())溢出截断成垃圾值的输入。真正按分档算出来的
 // tier.MaxLeverage只在ActionOpen分支里校验，是刻意的：leverage这个字段只有开仓会用来算
 // 需要冻结多少保证金，平仓不创建新仓位/新风险，不需要经过分档校验，而且分档校验依赖
@@ -295,7 +435,7 @@ func resolveLeverage(reqLeverage *decimal.Decimal) (decimal.Decimal, string) {
 	return leverage, ""
 }
 
-// existingOpenNotional 算这个uid在symbol+side方向上"已经占用/即将占用"的名义价值：已成交
+// 算这个uid在symbol+side方向上"已经占用/即将占用"的名义价值：已成交
 // 仓位 + 排队中的普通开仓委托 + 排队中的条件开仓委托(触发后会变成普通开仓委托，同样会真实
 // 占用仓位)。分档杠杆校验必须把这三者都算进去，不然可以用"一部分普通单、一部分条件单"
 // 拆开下，绕开单独统计任何一种委托类型的分档校验——这是对之前那次"排队单不计入分档"漏洞
@@ -358,11 +498,100 @@ type addOrderRequest struct {
 	MarginAmount *decimal.Decimal  `json:"marginAmount"`
 	Amount       *decimal.Decimal  `json:"amount"`
 	ReduceOnly   bool              `json:"reduceOnly"`
+	// RequestID 合作方自己生成的幂等键：同一uid下重复提交同一个值不会产生第二笔委托，
+	// 直接返回第一次那笔的orderId(duplicate=true)，用来安全地重试超时的下单请求
+	RequestID string `json:"requestId"`
+}
+
+// 下单/创建条件单成功的返回值。orderId是字符串(雪花ID超过JS安全整数范围)
+type placeOrderResult struct {
+	OrderID   uint64 `json:"orderId,string"`
+	RequestID string `json:"requestId,omitempty"`
+	Duplicate bool   `json:"duplicate,omitempty"` // true=这个requestId之前已经提交过，返回的是原来那笔
+}
+
+func strPtr(v string) *string {
+	if v == "" {
+		return nil
+	}
+	return &v
+}
+
+func derefStr(p *string) string {
+	if p == nil {
+		return ""
+	}
+	return *p
+}
+
+// 从落库的委托构造发给撮合引擎的下单事件——首次下单和幂等重试补发共用
+func orderSubmitEvent(o *model.Order) events.OrderSubmitEvent {
+	return events.OrderSubmitEvent{
+		OrderID:    o.OrderID,
+		UID:        o.UID,
+		Symbol:     o.Symbol,
+		Side:       string(o.Side),
+		Action:     string(o.Action),
+		Type:       string(o.Type),
+		Price:      o.Price.String(),
+		Amount:     o.Amount.String(),
+		Leverage:   o.Leverage,
+		ReduceOnly: o.ReduceOnly,
+	}
+}
+
+func (s *Server) publishOrderSubmit(o *model.Order) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return s.producer.Publish(ctx, events.TopicOrderSubmit, o.Symbol, orderSubmitEvent(o))
+}
+
+// 同一个uid+requestId已经有一笔委托了：返回原来那笔的orderId。
+// 如果那笔还是刚落库、没被引擎处理过的open状态(TradedAmount=0)，重新发一次下单事件——上一次
+// 请求可能正好卡在"委托已落库、发往Kafka失败"这一步，合作方超时后带同一个requestId重试，
+// 这里就能把它补发出去。补发是安全的：EngineService.SubmitOrder对已终结/已经在订单簿上的
+// 委托会直接跳过，不会二次撮合
+func (s *Server) respondDuplicateOrder(c *gin.Context, existing *model.Order, requestHash string) {
+	if idempotencyConflict(existing.RequestHash, requestHash) {
+		failC(c, 400, ErrIdempotencyConflict, "requestId已经用于一笔参数不同的请求")
+		return
+	}
+	if existing.Status == model.OrderStatusOpen && existing.TradedAmount.IsZero() {
+		if err := s.publishOrderSubmit(existing); err != nil {
+			failC(c, 500, ErrDispatchFailed, "委托已落库但发送到撮合引擎失败: "+err.Error())
+			return
+		}
+	}
+	ok(c, placeOrderResult{OrderID: existing.OrderID, RequestID: derefStr(existing.RequestID), Duplicate: true})
+}
+
+// 同一个uid+requestId已经有一笔条件单了：参数一致就返回原来那笔的orderId，不一致是误用。
+// 条件单没有"落库了但没发出去"的中间状态(创建时只写MySQL，触发由引擎扫描)，所以不需要像
+// 普通委托那样补发
+func (s *Server) respondDuplicateConditional(c *gin.Context, existing *model.ConditionalOrder, requestHash string) {
+	if idempotencyConflict(existing.RequestHash, requestHash) {
+		failC(c, 400, ErrIdempotencyConflict, "requestId已经用于一笔参数不同的请求")
+		return
+	}
+	ok(c, placeOrderResult{OrderID: existing.OrderID, RequestID: derefStr(existing.RequestID), Duplicate: true})
+}
+
+// 落库失败/撞幂等键唯一索引时，把这次请求刚刚冻结的保证金退回去
+func (s *Server) rollbackFreeze(ctx context.Context, uid uint64, fr service.FreezeResult) {
+	if fr.FromAvailable.Sign() <= 0 && fr.FromCredit.Sign() <= 0 {
+		return
+	}
+	if err := s.accounts.UnfreezeMargin(ctx, uid, fr.FromAvailable, fr.FromCredit); err != nil {
+		log.Printf("[ERROR] 回滚冻结保证金失败, uid=%d, available=%s, credit=%s: %v", uid, fr.FromAvailable, fr.FromCredit, err)
+	}
 }
 
 func (s *Server) addOrder(c *gin.Context) {
 	var req addOrderRequest
 	if !bindJSON(c, &req) {
+		return
+	}
+	if !s.requireAccount(c, req.UID) {
 		return
 	}
 	uid := req.UID
@@ -383,10 +612,29 @@ func (s *Server) addOrder(c *gin.Context) {
 		fail(c, 400, msg)
 		return
 	}
+	requestID, msg := normalizeRequestID(req.RequestID)
+	if msg != "" {
+		fail(c, 400, msg)
+		return
+	}
+	requestHash := service.RequestFingerprint("order", strconv.FormatUint(uid, 10), symbol, string(side), string(action),
+		string(orderType), req.Price.String(), decPtrStr(req.Amount), decPtrStr(req.MarginAmount),
+		leverage.String(), strconv.FormatBool(req.ReduceOnly))
+	if requestID != "" {
+		existing, err := s.orders.FindByRequestID(c.Request.Context(), uid, requestID)
+		if err != nil {
+			fail(c, 500, err.Error())
+			return
+		}
+		if existing != nil {
+			s.respondDuplicateOrder(c, existing, requestHash)
+			return
+		}
+	}
 
 	coin, err := s.coins.FindBySymbol(c.Request.Context(), symbol)
 	if err != nil || coin == nil || !coin.Enable {
-		fail(c, 400, "合约不存在或已下架")
+		failC(c, 400, ErrSymbolNotFound, "合约不存在或已下架")
 		return
 	}
 	// 只有MARKET单定价、开仓分档判断(含价格保护带，只对开仓生效)这两处要用标记价格，
@@ -415,7 +663,7 @@ func (s *Server) addOrder(c *gin.Context) {
 			return
 		}
 		if coin.PriceTick.Sign() > 0 && !price.Mod(coin.PriceTick).IsZero() {
-			fail(c, 400, "price不符合最小变动单位")
+			failC(c, 400, ErrPriceTickInvalid, "price不符合最小变动单位")
 			return
 		}
 		// 价格保护带：只对开仓单生效，防止两类问题——①用户瞎填价格导致的胖手指交易 ②故意报
@@ -429,13 +677,13 @@ func (s *Server) addOrder(c *gin.Context) {
 		if action == model.ActionOpen && hasReference && referencePrice.Sign() > 0 && coin.PriceProtectionRatio.Sign() > 0 {
 			deviation := price.Sub(referencePrice).Abs().Div(referencePrice)
 			if deviation.GreaterThan(coin.PriceProtectionRatio) {
-				fail(c, 400, "委托价格偏离参考价过多")
+				failC(c, 400, ErrPriceOutOfRange, "委托价格偏离参考价过多")
 				return
 			}
 		}
 	} else {
 		if !hasMark {
-			fail(c, 400, "该合约暂无标记价格，市价单无法估算数量")
+			failC(c, 400, ErrNoMarkPrice, "该合约暂无标记价格，市价单无法估算数量")
 			return
 		}
 		price = mark
@@ -461,15 +709,15 @@ func (s *Server) addOrder(c *gin.Context) {
 		return
 	}
 	if coin.MinVolume.Sign() > 0 && amount.LessThan(coin.MinVolume) {
-		fail(c, 400, "数量低于该合约最小下单量")
+		failC(c, 400, ErrVolumeOutOfRange, "数量低于该合约最小下单量")
 		return
 	}
 	if coin.MaxVolume.Sign() > 0 && amount.GreaterThan(coin.MaxVolume) {
-		fail(c, 400, "数量超出该合约最大下单量")
+		failC(c, 400, ErrVolumeOutOfRange, "数量超出该合约最大下单量")
 		return
 	}
 	if coin.VolumeStep.Sign() > 0 && !amount.Mod(coin.VolumeStep).IsZero() {
-		fail(c, 400, "数量不符合最小步长")
+		failC(c, 400, ErrVolumeOutOfRange, "数量不符合最小步长")
 		return
 	}
 
@@ -515,10 +763,10 @@ func (s *Server) addOrder(c *gin.Context) {
 				return err
 			}
 			if tier == nil {
-				return &httpError{400, "该合约未配置保证金分档，暂不允许开仓"}
+				return newHTTPError(400, ErrTierNotConfigured, "该合约未配置保证金分档，暂不允许开仓")
 			}
 			if leverage.GreaterThan(decimal.NewFromInt(int64(tier.MaxLeverage))) {
-				return &httpError{400, "杠杆倍数超出当前仓位名义价值对应档位允许的范围"}
+				return newHTTPError(400, ErrLeverageExceedsTier, "杠杆倍数超出当前仓位名义价值对应档位允许的范围")
 			}
 			result, err := s.accounts.FreezeMargin(c.Request.Context(), uid, requiredMargin)
 			if err != nil {
@@ -528,6 +776,15 @@ func (s *Server) addOrder(c *gin.Context) {
 			return nil
 		})
 		if lockErr != nil {
+			// 带requestId的并发重复请求：赢家已经把余额冻结走了，其它请求会在冻结这一步就
+			// 因为余额不足/锁忙失败，走不到后面的唯一索引。这种失败不是"这笔请求本身有问题"，
+			// 而是"这个requestId已经有人在处理了"，重查一次，查到了就按重复请求返回原委托
+			if requestID != "" {
+				if existing, findErr := s.orders.FindByRequestID(c.Request.Context(), uid, requestID); findErr == nil && existing != nil {
+					s.respondDuplicateOrder(c, existing, requestHash)
+					return
+				}
+			}
 			respondLockErr(c, lockErr)
 			return
 		}
@@ -549,35 +806,34 @@ func (s *Server) addOrder(c *gin.Context) {
 		Status:     model.OrderStatusOpen,
 		CreateTime: now,
 		UpdateTime: now,
+
+		RequestID:   strPtr(requestID),
+		RequestHash: hashIfKeyed(requestID, requestHash),
 	}
 	if action == model.ActionOpen {
 		o.FrozenMargin = freezeResult.FromAvailable
 		o.FrozenCredit = freezeResult.FromCredit
 	}
 	if err := s.orders.Insert(c.Request.Context(), o); err != nil {
+		// 撞了(uid, request_id)唯一索引：两个带同一个requestId的请求并发通过了上面的
+		// 预检，另一个先落库了。这笔请求刚冻结的保证金必须退回，再按重复请求处理
+		if requestID != "" && repo.IsDuplicateKey(err) {
+			s.rollbackFreeze(c.Request.Context(), uid, freezeResult)
+			existing, findErr := s.orders.FindByRequestID(c.Request.Context(), uid, requestID)
+			if findErr == nil && existing != nil {
+				s.respondDuplicateOrder(c, existing, requestHash)
+				return
+			}
+		}
 		fail(c, 500, err.Error())
 		return
 	}
 
-	evt := events.OrderSubmitEvent{
-		OrderID:    orderID,
-		UID:        uid,
-		Symbol:     symbol,
-		Side:       string(side),
-		Action:     string(action),
-		Type:       string(orderType),
-		Price:      price.String(),
-		Amount:     amount.String(),
-		Leverage:   o.Leverage,
-		ReduceOnly: o.ReduceOnly,
-	}
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer cancel()
-	if err := s.producer.Publish(ctx, events.TopicOrderSubmit, symbol, evt); err != nil {
-		fail(c, 500, "委托已落库但发送到撮合引擎失败: "+err.Error())
+	if err := s.publishOrderSubmit(o); err != nil {
+		failC(c, 500, ErrDispatchFailed, "委托已落库但发送到撮合引擎失败: "+err.Error())
 		return
 	}
-	ok(c, orderID)
+	ok(c, placeOrderResult{OrderID: orderID, RequestID: requestID})
 }
 
 type cancelOrderRequest struct {
@@ -597,11 +853,11 @@ func (s *Server) cancelOrder(c *gin.Context) {
 	}
 	o, err := s.orders.FindByOrderID(c.Request.Context(), uint64(orderID.IntPart()))
 	if err != nil || o == nil || o.UID != uid {
-		fail(c, 400, "委托单不存在")
+		failC(c, 400, ErrOrderNotFound, "委托单不存在")
 		return
 	}
 	if !model.ActiveOrderStatuses[o.Status] {
-		fail(c, 400, "委托单已完成或已取消")
+		failC(c, 400, ErrOrderNotCancelable, "委托单已完成或已取消")
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
@@ -615,7 +871,7 @@ func (s *Server) cancelOrder(c *gin.Context) {
 }
 
 func (s *Server) orderCurrent(c *gin.Context) {
-	uid, ok1 := parseUID(c)
+	uid, ok1 := s.parseAccountUID(c)
 	if !ok1 {
 		return
 	}
@@ -628,11 +884,15 @@ func (s *Server) orderCurrent(c *gin.Context) {
 }
 
 func (s *Server) orderHistory(c *gin.Context) {
-	uid, ok1 := parseUID(c)
+	uid, ok1 := s.parseAccountUID(c)
 	if !ok1 {
 		return
 	}
-	orders, err := s.orders.FindHistoryByUID(c.Request.Context(), uid, 100)
+	limit, before, ok2 := pageParams(c)
+	if !ok2 {
+		return
+	}
+	orders, err := s.orders.FindHistoryByUID(c.Request.Context(), uid, limit, before)
 	if err != nil {
 		fail(c, 500, err.Error())
 		return
@@ -653,9 +913,10 @@ type addConditionalOrderRequest struct {
 	MarginAmount     *decimal.Decimal       `json:"marginAmount"`
 	Amount           *decimal.Decimal       `json:"amount"`
 	ReduceOnly       bool                   `json:"reduceOnly"`
+	RequestID        string                 `json:"requestId"` // 幂等键，语义同addOrderRequest.RequestID
 }
 
-// addConditionalOrder 创建条件单(止盈止损/条件开仓)：只落库到conditional_orders表，不进
+// 创建条件单(止盈止损/条件开仓)：只落库到conditional_orders表，不进
 // 撮合引擎的订单簿、不发Kafka事件——触发前这笔"委托"只是一个记在数据库里的条件，真正提交
 // 撮合是contract-engine那边的ConditionalOrderService定时扫描标记价格触发之后的事，见
 // docs/conditional-orders.md。校验链尽量复用addOrder的逻辑，两个关键差异：
@@ -666,6 +927,9 @@ type addConditionalOrderRequest struct {
 func (s *Server) addConditionalOrder(c *gin.Context) {
 	var req addConditionalOrderRequest
 	if !bindJSON(c, &req) {
+		return
+	}
+	if !s.requireAccount(c, req.UID) {
 		return
 	}
 	uid := req.UID
@@ -694,14 +958,33 @@ func (s *Server) addConditionalOrder(c *gin.Context) {
 		fail(c, 400, msg)
 		return
 	}
+	requestID, msg := normalizeRequestID(req.RequestID)
+	if msg != "" {
+		fail(c, 400, msg)
+		return
+	}
+	requestHash := service.RequestFingerprint("conditional", strconv.FormatUint(uid, 10), symbol, string(side), string(action),
+		string(orderType), req.TriggerPrice.String(), string(req.TriggerDirection), req.Price.String(),
+		decPtrStr(req.Amount), decPtrStr(req.MarginAmount), leverage.String(), strconv.FormatBool(req.ReduceOnly))
+	if requestID != "" {
+		existing, err := s.conditionalOrders.FindByRequestID(c.Request.Context(), uid, requestID)
+		if err != nil {
+			fail(c, 500, err.Error())
+			return
+		}
+		if existing != nil {
+			s.respondDuplicateConditional(c, existing, requestHash)
+			return
+		}
+	}
 
 	coin, err := s.coins.FindBySymbol(c.Request.Context(), symbol)
 	if err != nil || coin == nil || !coin.Enable {
-		fail(c, 400, "合约不存在或已下架")
+		failC(c, 400, ErrSymbolNotFound, "合约不存在或已下架")
 		return
 	}
 	if coin.PriceTick.Sign() > 0 && !req.TriggerPrice.Mod(coin.PriceTick).IsZero() {
-		fail(c, 400, "triggerPrice不符合最小变动单位")
+		failC(c, 400, ErrPriceTickInvalid, "triggerPrice不符合最小变动单位")
 		return
 	}
 	// referencePrice/hasReference：标记价格优先、缺失退回指数价格，跟addOrder用的是
@@ -722,7 +1005,7 @@ func (s *Server) addConditionalOrder(c *gin.Context) {
 			return
 		}
 		if coin.PriceTick.Sign() > 0 && !price.Mod(coin.PriceTick).IsZero() {
-			fail(c, 400, "price不符合最小变动单位")
+			failC(c, 400, ErrPriceTickInvalid, "price不符合最小变动单位")
 			return
 		}
 	}
@@ -755,15 +1038,15 @@ func (s *Server) addConditionalOrder(c *gin.Context) {
 		return
 	}
 	if coin.MinVolume.Sign() > 0 && amount.LessThan(coin.MinVolume) {
-		fail(c, 400, "数量低于该合约最小下单量")
+		failC(c, 400, ErrVolumeOutOfRange, "数量低于该合约最小下单量")
 		return
 	}
 	if coin.MaxVolume.Sign() > 0 && amount.GreaterThan(coin.MaxVolume) {
-		fail(c, 400, "数量超出该合约最大下单量")
+		failC(c, 400, ErrVolumeOutOfRange, "数量超出该合约最大下单量")
 		return
 	}
 	if coin.VolumeStep.Sign() > 0 && !amount.Mod(coin.VolumeStep).IsZero() {
-		fail(c, 400, "数量不符合最小步长")
+		failC(c, 400, ErrVolumeOutOfRange, "数量不符合最小步长")
 		return
 	}
 
@@ -793,10 +1076,10 @@ func (s *Server) addConditionalOrder(c *gin.Context) {
 				return err
 			}
 			if tier == nil {
-				return &httpError{400, "该合约未配置保证金分档，暂不允许开仓"}
+				return newHTTPError(400, ErrTierNotConfigured, "该合约未配置保证金分档，暂不允许开仓")
 			}
 			if leverage.GreaterThan(decimal.NewFromInt(int64(tier.MaxLeverage))) {
-				return &httpError{400, "杠杆倍数超出当前仓位名义价值对应档位允许的范围"}
+				return newHTTPError(400, ErrLeverageExceedsTier, "杠杆倍数超出当前仓位名义价值对应档位允许的范围")
 			}
 			result, err := s.accounts.FreezeMargin(c.Request.Context(), uid, requiredMargin)
 			if err != nil {
@@ -806,6 +1089,13 @@ func (s *Server) addConditionalOrder(c *gin.Context) {
 			return nil
 		})
 		if lockErr != nil {
+			// 理由同addOrder：并发重复请求在冻结保证金这一步失败，查到已有就按重复请求返回
+			if requestID != "" {
+				if existing, findErr := s.conditionalOrders.FindByRequestID(c.Request.Context(), uid, requestID); findErr == nil && existing != nil {
+					s.respondDuplicateConditional(c, existing, requestHash)
+					return
+				}
+			}
 			respondLockErr(c, lockErr)
 			return
 		}
@@ -829,23 +1119,33 @@ func (s *Server) addConditionalOrder(c *gin.Context) {
 		Status:           model.ConditionalStatusPending,
 		CreateTime:       now,
 		UpdateTime:       now,
+		RequestID:        strPtr(requestID),
+		RequestHash:      hashIfKeyed(requestID, requestHash),
 	}
 	if action == model.ActionOpen {
 		co.FrozenMargin = freezeResult.FromAvailable
 		co.FrozenCredit = freezeResult.FromCredit
 	}
 	if err := s.conditionalOrders.Insert(c.Request.Context(), co); err != nil {
+		if requestID != "" && repo.IsDuplicateKey(err) {
+			s.rollbackFreeze(c.Request.Context(), uid, freezeResult)
+			existing, findErr := s.conditionalOrders.FindByRequestID(c.Request.Context(), uid, requestID)
+			if findErr == nil && existing != nil {
+				s.respondDuplicateConditional(c, existing, requestHash)
+				return
+			}
+		}
 		fail(c, 500, err.Error())
 		return
 	}
-	ok(c, orderID)
+	ok(c, placeOrderResult{OrderID: orderID, RequestID: requestID})
 }
 
 type cancelConditionalOrderRequest struct {
 	UID uint64 `json:"uid" binding:"required"`
 }
 
-// cancelConditionalOrder 撤销一笔还没触发的条件单——全程只碰MySQL，不需要像普通委托撤单
+// 撤销一笔还没触发的条件单——全程只碰MySQL，不需要像普通委托撤单
 // 那样经Kafka路由给contract-engine：条件单触发前从来没进过撮合引擎的内存订单簿，没有
 // 什么可摘的，直接原子标记取消+退回冻结保证金即可，比普通撤单更简单
 func (s *Server) cancelConditionalOrder(c *gin.Context) {
@@ -860,37 +1160,48 @@ func (s *Server) cancelConditionalOrder(c *gin.Context) {
 	}
 	co, err := s.conditionalOrders.FindByOrderID(c.Request.Context(), uint64(orderID.IntPart()))
 	if err != nil || co == nil || co.UID != req.UID {
-		fail(c, 400, "条件单不存在")
+		failC(c, 400, ErrOrderNotFound, "条件单不存在")
 		return
 	}
 	if co.Status != model.ConditionalStatusPending {
-		fail(c, 400, "条件单已触发或已取消")
+		failC(c, 400, ErrOrderNotCancelable, "条件单已触发或已取消")
 		return
 	}
-	ok1, err := s.conditionalOrders.MarkCanceled(c.Request.Context(), co.OrderID, service.NowMillis())
-	if err != nil {
-		fail(c, 500, err.Error())
-		return
-	}
-	if !ok1 {
-		// 撤单请求跟engine那边的触发扫描并发竞争，扫描先一步赢了——这笔条件单已经变成了
-		// 真正的委托，不能再当"条件单撤销"处理，调用方该走普通撤单接口
-		fail(c, 400, "条件单已触发，无法撤销")
-		return
-	}
-	if co.Action == model.ActionOpen && (co.FrozenMargin.Sign() > 0 || co.FrozenCredit.Sign() > 0) {
-		// 条件单从来没有部分成交这一说(触发之前压根没提交撮合)，撤销就是整笔退，不需要
-		// 像普通委托撤单那样按剩余量比例计算
-		if err := s.accounts.UnfreezeMargin(c.Request.Context(), co.UID, co.FrozenMargin, co.FrozenCredit); err != nil {
-			fail(c, 500, err.Error())
+	if err := s.cancelPendingConditional(c.Request.Context(), *co); err != nil {
+		if errors.Is(err, errConditionalNotPending) {
+			// 撤单请求跟engine那边的触发扫描并发竞争，扫描先一步赢了——这笔条件单已经变成了
+			// 真正的委托，不能再当"条件单撤销"处理，调用方该走普通撤单接口
+			failC(c, 400, ErrOrderNotCancelable, "条件单已触发，无法撤销")
 			return
 		}
+		fail(c, 500, err.Error())
+		return
 	}
 	ok(c, "条件单已撤销")
 }
 
+var errConditionalNotPending = errors.New("条件单不是pending状态")
+
+// 原子标记撤销并退回冻结保证金——单笔撤销和批量撤销共用。返回
+// errConditionalNotPending表示条件单已经不是pending(被并发的触发扫描抢先了)
+func (s *Server) cancelPendingConditional(ctx context.Context, co model.ConditionalOrder) error {
+	ok1, err := s.conditionalOrders.MarkCanceled(ctx, co.OrderID, service.NowMillis())
+	if err != nil {
+		return err
+	}
+	if !ok1 {
+		return errConditionalNotPending
+	}
+	if co.Action == model.ActionOpen && (co.FrozenMargin.Sign() > 0 || co.FrozenCredit.Sign() > 0) {
+		// 条件单从来没有部分成交这一说(触发之前压根没提交撮合)，撤销就是整笔退，不需要
+		// 像普通委托撤单那样按剩余量比例计算
+		return s.accounts.UnfreezeMargin(ctx, co.UID, co.FrozenMargin, co.FrozenCredit)
+	}
+	return nil
+}
+
 func (s *Server) conditionalOrderCurrent(c *gin.Context) {
-	uid, ok1 := parseUID(c)
+	uid, ok1 := s.parseAccountUID(c)
 	if !ok1 {
 		return
 	}
@@ -903,11 +1214,15 @@ func (s *Server) conditionalOrderCurrent(c *gin.Context) {
 }
 
 func (s *Server) conditionalOrderHistory(c *gin.Context) {
-	uid, ok1 := parseUID(c)
+	uid, ok1 := s.parseAccountUID(c)
 	if !ok1 {
 		return
 	}
-	orders, err := s.conditionalOrders.FindHistoryByUID(c.Request.Context(), uid, 100)
+	limit, before, ok2 := pageParams(c)
+	if !ok2 {
+		return
+	}
+	orders, err := s.conditionalOrders.FindHistoryByUID(c.Request.Context(), uid, limit, before)
 	if err != nil {
 		fail(c, 500, err.Error())
 		return
@@ -916,7 +1231,7 @@ func (s *Server) conditionalOrderHistory(c *gin.Context) {
 }
 
 func (s *Server) positionCurrent(c *gin.Context) {
-	uid, ok1 := parseUID(c)
+	uid, ok1 := s.parseAccountUID(c)
 	if !ok1 {
 		return
 	}
@@ -935,7 +1250,7 @@ type setLeverageRequest struct {
 	Leverage *decimal.Decimal `json:"leverage"`
 }
 
-// setLeverage 修改一个已有仓位的杠杆——只对已经有仓位的uid+symbol+side生效，这个系统里
+// 修改一个已有仓位的杠杆——只对已经有仓位的uid+symbol+side生效，这个系统里
 // 杠杆本来就是下单时的参数，没有"没有仓位时预先声明杠杆"这种场景，见docs/leverage.md。
 // 按新杠杆重新算这个仓位应该占用多少保证金，多退少补：杠杆调低(需要的保证金变多)从
 // available/credit补冻结差额，钱不够直接拒绝；杠杆调高(需要的保证金变少)按仓位现有的
@@ -945,6 +1260,9 @@ type setLeverageRequest struct {
 func (s *Server) setLeverage(c *gin.Context) {
 	var req setLeverageRequest
 	if !bindJSON(c, &req) {
+		return
+	}
+	if !s.requireAccount(c, req.UID) {
 		return
 	}
 	if req.Side != model.SideLong && req.Side != model.SideShort {
@@ -975,11 +1293,11 @@ func (s *Server) setLeverage(c *gin.Context) {
 			return err
 		}
 		if p == nil || p.Volume.Sign() <= 0 {
-			return &httpError{400, "没有找到这个方向的持仓，不能修改杠杆"}
+			return newHTTPError(400, ErrPositionNotFound, "没有找到这个方向的持仓，不能修改杠杆")
 		}
 		mark, hasMark := s.markPrice.Get(ctx, symbol)
 		if !hasMark {
-			return &httpError{400, "该合约暂无标记价格，无法校验杠杆"}
+			return newHTTPError(400, ErrNoMarkPrice, "该合约暂无标记价格，无法校验杠杆")
 		}
 		notional := p.Volume.Mul(mark)
 		tier, err := s.positions.TierFor(ctx, symbol, notional)
@@ -987,10 +1305,10 @@ func (s *Server) setLeverage(c *gin.Context) {
 			return err
 		}
 		if tier == nil {
-			return &httpError{400, "该合约未配置保证金分档"}
+			return newHTTPError(400, ErrTierNotConfigured, "该合约未配置保证金分档")
 		}
 		if leverage.GreaterThan(decimal.NewFromInt(int64(tier.MaxLeverage))) {
-			return &httpError{400, "杠杆倍数超出当前仓位名义价值对应档位允许的范围"}
+			return newHTTPError(400, ErrLeverageExceedsTier, "杠杆倍数超出当前仓位名义价值对应档位允许的范围")
 		}
 
 		newMargin := notional.Div(leverage)
@@ -1044,7 +1362,7 @@ func (s *Server) setLeverage(c *gin.Context) {
 		if !ok {
 			// 理论上不该发生(外层已经用同一把锁序列化了同一个uid+symbol+side的并发请求)，
 			// 防御性处理：仓位在读取之后到写入之前发生了变化
-			return &httpError{500, "仓位状态发生变化，请重试"}
+			return newHTTPError(500, ErrInternal, "仓位状态发生变化，请重试")
 		}
 		return nil
 	})
@@ -1060,11 +1378,15 @@ func (s *Server) setLeverage(c *gin.Context) {
 }
 
 func (s *Server) tradeHistory(c *gin.Context) {
-	uid, ok1 := parseUID(c)
+	uid, ok1 := s.parseAccountUID(c)
 	if !ok1 {
 		return
 	}
-	trades, err := s.trades.FindByUID(c.Request.Context(), uid, 100)
+	limit, before, ok2 := pageParams(c)
+	if !ok2 {
+		return
+	}
+	trades, err := s.trades.FindByUID(c.Request.Context(), uid, limit, before)
 	if err != nil {
 		fail(c, 500, err.Error())
 		return
@@ -1076,7 +1398,7 @@ func (s *Server) fundingRate(c *gin.Context) {
 	symbol := c.Query("symbol")
 	coin, err := s.coins.FindBySymbol(c.Request.Context(), symbol)
 	if err != nil || coin == nil {
-		fail(c, 400, "合约不存在")
+		failC(c, 400, ErrSymbolNotFound, "合约不存在")
 		return
 	}
 	now := service.NowMillis()
@@ -1098,7 +1420,7 @@ func (s *Server) kline(c *gin.Context) {
 	symbol := c.Query("symbol")
 	coin, err := s.coins.FindBySymbol(c.Request.Context(), symbol)
 	if err != nil || coin == nil {
-		fail(c, 400, "合约不存在")
+		failC(c, 400, ErrSymbolNotFound, "合约不存在")
 		return
 	}
 	interval := model.KlineInterval(c.Query("interval"))
@@ -1121,7 +1443,11 @@ func (s *Server) kline(c *gin.Context) {
 
 func (s *Server) fundingHistory(c *gin.Context) {
 	symbol := c.Query("symbol")
-	records, err := s.funding.History(c.Request.Context(), symbol, 100)
+	limit, before, ok2 := pageParams(c)
+	if !ok2 {
+		return
+	}
+	records, err := s.funding.History(c.Request.Context(), symbol, limit, int64(before))
 	if err != nil {
 		fail(c, 500, err.Error())
 		return

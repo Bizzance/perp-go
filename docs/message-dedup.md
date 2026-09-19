@@ -71,6 +71,10 @@ CREATE TABLE IF NOT EXISTS processed_messages (
 变量既传给`mq.NewConsumer`订阅，也传给`mq.WithDedup`去重——两处必须用同一个值，不然
 去重记录的key就跟这个Consumer实际订阅的group对不上，不需要三处各自实现一遍去重逻辑。
 
+注意消息级去重只管"**同一条Kafka消息**被重复投递"（按offset判断）。合作方**自己再调一次接口**产生的是一条
+全新的消息，它管不到——这类重复要靠接口自己的幂等键：下单/条件单/资金操作的`requestId`、结束本轮的`round`
+（事件`RoundCloseEvent`里带着`Round`，引擎处理时跟账户当前轮数不一致就忽略），见 [idempotency.md](idempotency.md)。
+
 **去重层本身故障时的取舍**：`TryMark`如果失败（比如MySQL抖动），`WithDedup`选择继续
 执行业务handler，只记一条`[WARN]`日志，不阻塞消息处理——去重是锦上添花的正确性加固，
 不能变成"MySQL稍微抖一下、全部消息就卡住不处理"的新单点故障。这意味着去重层故障期间

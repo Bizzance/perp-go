@@ -1,0 +1,366 @@
+package api
+
+import (
+	"context"
+	"strconv"
+	"time"
+
+	"github.com/gin-gonic/gin"
+	"github.com/shopspring/decimal"
+
+	"perp-go/internal/events"
+	"perp-go/internal/model"
+)
+
+// 这个文件是合作方对接需要的"查询类/批量类"接口：合约信息、行情、单笔委托查询、批量撤单、
+// 资金流水、强平记录。核心交易链路(下单/撤单/条件单/杠杆)在router.go
+
+func (s *Server) health(c *gin.Context) {
+	ok(c, gin.H{"status": "ok", "time": time.Now().UnixMilli()})
+}
+
+// ---------- 合约信息 ----------
+
+func (s *Server) contractList(c *gin.Context) {
+	coins, err := s.coins.FindAllEnabled(c.Request.Context())
+	if err != nil {
+		fail(c, 500, err.Error())
+		return
+	}
+	ok(c, coins)
+}
+
+// 单个合约的完整交易规则：价格/数量精度与步长、单笔限额、手续费率、资金费率
+// 参数，加上保证金分档(最大杠杆随仓位名义价值分档)——客户端做下单表单校验、展示杠杆上限
+// 都靠这个，不需要写死
+type contractDetail struct {
+	model.Coin
+	Tiers []model.RiskLimitTier `json:"tiers"`
+}
+
+func (s *Server) contractDetail(c *gin.Context) {
+	symbol := c.Query("symbol")
+	coin, err := s.coins.FindBySymbol(c.Request.Context(), symbol)
+	if err != nil {
+		fail(c, 500, err.Error())
+		return
+	}
+	if coin == nil || !coin.Enable {
+		failC(c, 400, ErrSymbolNotFound, "合约不存在或已下架")
+		return
+	}
+	tiers, err := s.positions.Tiers(c.Request.Context(), symbol)
+	if err != nil {
+		fail(c, 500, err.Error())
+		return
+	}
+	if tiers == nil {
+		tiers = []model.RiskLimitTier{}
+	}
+	ok(c, contractDetail{Coin: *coin, Tiers: tiers})
+}
+
+// ---------- 公开行情 ----------
+
+// 没有对应数据的字段是null(比如这个合约还从没成交过)，不返回0——0是一个合法的价格
+// 取值，客户端没法区分"价格是0"和"没有价格"
+type ticker struct {
+	Symbol     string           `json:"symbol"`
+	LastPrice  *decimal.Decimal `json:"lastPrice"`
+	MarkPrice  *decimal.Decimal `json:"markPrice"`
+	IndexPrice *decimal.Decimal `json:"indexPrice"`
+	Open24h    *decimal.Decimal `json:"open24h"`
+	High24h    *decimal.Decimal `json:"high24h"`
+	Low24h     *decimal.Decimal `json:"low24h"`
+	Volume24h  decimal.Decimal  `json:"volume24h"`
+	Change24h  *decimal.Decimal `json:"change24h"` // (lastPrice-open24h)/open24h
+}
+
+// 行情摘要。24h统计口径：最近24根1小时K线聚合(含当前还没走完的这一根)，所以实际
+// 覆盖的时间窗口在23~24小时之间，不是严格的滚动24小时——换来的是不用扫成交明细表，查询成本
+// 恒定；这段时间内没有成交的小时没有K线，不影响聚合结果
+func (s *Server) marketTicker(c *gin.Context) {
+	ctx := c.Request.Context()
+	symbol := c.Query("symbol")
+	coin, err := s.coins.FindBySymbol(ctx, symbol)
+	if err != nil {
+		fail(c, 500, err.Error())
+		return
+	}
+	if coin == nil || !coin.Enable {
+		failC(c, 400, ErrSymbolNotFound, "合约不存在或已下架")
+		return
+	}
+	t := ticker{Symbol: symbol}
+	if mark, has := s.markPrice.Get(ctx, symbol); has {
+		t.MarkPrice = &mark
+	}
+	if idx, has := s.markPrice.GetIndexPrice(ctx, symbol); has {
+		t.IndexPrice = &idx
+	}
+	latest, err := s.trades.FindBySymbol(ctx, symbol, 1, 0)
+	if err != nil {
+		fail(c, 500, err.Error())
+		return
+	}
+	if len(latest) > 0 {
+		t.LastPrice = &latest[0].Price
+	}
+	klines, err := s.klines.FindRecent(ctx, symbol, model.Kline1h, 24)
+	if err != nil {
+		fail(c, 500, err.Error())
+		return
+	}
+	if len(klines) > 0 { // FindRecent按开盘时间升序返回
+		open := klines[0].Open
+		high, low := klines[0].High, klines[0].Low
+		for _, k := range klines {
+			high = decimal.Max(high, k.High)
+			low = decimal.Min(low, k.Low)
+			t.Volume24h = t.Volume24h.Add(k.Volume)
+		}
+		t.Open24h, t.High24h, t.Low24h = &open, &high, &low
+		if t.LastPrice != nil && open.Sign() > 0 {
+			change := t.LastPrice.Sub(open).Div(open)
+			t.Change24h = &change
+		}
+	}
+	ok(c, t)
+}
+
+// 公开最新成交(不含买卖双方uid/委托id)，trade_id倒序，支持limit+before翻页
+func (s *Server) marketTrades(c *gin.Context) {
+	symbol := c.Query("symbol")
+	coin, err := s.coins.FindBySymbol(c.Request.Context(), symbol)
+	if err != nil {
+		fail(c, 500, err.Error())
+		return
+	}
+	if coin == nil || !coin.Enable {
+		failC(c, 400, ErrSymbolNotFound, "合约不存在或已下架")
+		return
+	}
+	limit, before, ok2 := pageParams(c)
+	if !ok2 {
+		return
+	}
+	trades, err := s.trades.FindBySymbol(c.Request.Context(), symbol, limit, before)
+	if err != nil {
+		fail(c, 500, err.Error())
+		return
+	}
+	out := make([]model.PublicTrade, 0, len(trades))
+	for i := range trades {
+		out = append(out, trades[i].Public())
+	}
+	ok(c, out)
+}
+
+// ---------- 单笔委托查询 ----------
+
+// 单笔查询的定位参数：orderId和requestId二选一，都传优先orderId
+func parseOrderRef(c *gin.Context) (orderID uint64, requestID string, valid bool) {
+	if v := c.Query("orderId"); v != "" {
+		n, err := strconv.ParseUint(v, 10, 64)
+		if err != nil || n == 0 {
+			fail(c, 400, "orderId参数不合法")
+			return 0, "", false
+		}
+		return n, "", true
+	}
+	cid, msg := normalizeRequestID(c.Query("requestId"))
+	if msg != "" {
+		fail(c, 400, msg)
+		return 0, "", false
+	}
+	if cid == "" {
+		fail(c, 400, "orderId和requestId必须传一个")
+		return 0, "", false
+	}
+	return 0, cid, true
+}
+
+func (s *Server) orderDetail(c *gin.Context) {
+	uid, ok1 := s.parseAccountUID(c)
+	if !ok1 {
+		return
+	}
+	orderID, requestID, valid := parseOrderRef(c)
+	if !valid {
+		return
+	}
+	var o *model.Order
+	var err error
+	if orderID > 0 {
+		o, err = s.orders.FindByOrderID(c.Request.Context(), orderID)
+	} else {
+		o, err = s.orders.FindByRequestID(c.Request.Context(), uid, requestID)
+	}
+	if err != nil {
+		fail(c, 500, err.Error())
+		return
+	}
+	if o == nil || o.UID != uid {
+		failC(c, 400, ErrOrderNotFound, "委托单不存在")
+		return
+	}
+	ok(c, o)
+}
+
+func (s *Server) conditionalOrderDetail(c *gin.Context) {
+	uid, ok1 := s.parseAccountUID(c)
+	if !ok1 {
+		return
+	}
+	orderID, requestID, valid := parseOrderRef(c)
+	if !valid {
+		return
+	}
+	var co *model.ConditionalOrder
+	var err error
+	if orderID > 0 {
+		co, err = s.conditionalOrders.FindByOrderID(c.Request.Context(), orderID)
+	} else {
+		co, err = s.conditionalOrders.FindByRequestID(c.Request.Context(), uid, requestID)
+	}
+	if err != nil {
+		fail(c, 500, err.Error())
+		return
+	}
+	if co == nil || co.UID != uid {
+		failC(c, 400, ErrOrderNotFound, "条件单不存在")
+		return
+	}
+	ok(c, co)
+}
+
+// ---------- 批量撤单 ----------
+
+type cancelAllRequest struct {
+	UID    uint64 `json:"uid" binding:"required"`
+	Symbol string `json:"symbol"` // 省略=这个uid名下全部合约
+	// IncludeConditional true=同时撤销还没触发的条件单。默认false：条件单(止盈止损)通常是
+	// 用户希望一直留着保护仓位的，"撤销全部委托"不应该悄悄把它们也撤了
+	IncludeConditional bool `json:"includeConditional"`
+}
+
+type cancelAllResult struct {
+	CancelRequested     int `json:"cancelRequested"`     // 已提交撤单请求的普通委托笔数(异步，撤单是否生效看委托状态)
+	CancelRequestFailed int `json:"cancelRequestFailed"` // 提交撤单请求失败的笔数(可以重试本接口)
+	ConditionalCanceled int `json:"conditionalCanceled"` // 已经撤销的条件单笔数(同步生效)
+	ConditionalFailed   int `json:"conditionalFailed"`   // 条件单撤销失败的笔数(含被并发触发抢先的)
+}
+
+// 批量撤销这个uid(可选限定symbol)的全部挂单。普通委托的撤单要摸engine内存里
+// 的订单簿，跟单笔撤单接口一样只能给每笔发一条Kafka撤单事件、异步执行，这里同步返回的
+// 是"已提交多少笔撤单请求"，不代表已经撤成功；条件单只碰MySQL、同步生效。部分失败不回滚
+// 已经提交的，调用方按返回的failed计数重试即可(重复提交撤单请求是安全的，engine侧对已经
+// 终结的委托会直接跳过)
+func (s *Server) cancelAllOrders(c *gin.Context) {
+	var req cancelAllRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if !s.requireAccount(c, req.UID) {
+		return
+	}
+	ctx := c.Request.Context()
+	if req.Symbol != "" {
+		coin, err := s.coins.FindBySymbol(ctx, req.Symbol)
+		if err != nil {
+			fail(c, 500, err.Error())
+			return
+		}
+		if coin == nil {
+			failC(c, 400, ErrSymbolNotFound, "合约不存在")
+			return
+		}
+	}
+	orders, err := s.orders.FindActiveByUID(ctx, req.UID, req.Symbol)
+	if err != nil {
+		fail(c, 500, err.Error())
+		return
+	}
+	var result cancelAllResult
+	for _, o := range orders {
+		if err := s.publishCancel(o.OrderID, o.UID, o.Symbol); err != nil {
+			result.CancelRequestFailed++
+			continue
+		}
+		result.CancelRequested++
+	}
+	if req.IncludeConditional {
+		pending, err := s.conditionalOrders.FindActiveByUID(ctx, req.UID, req.Symbol)
+		if err != nil {
+			fail(c, 500, err.Error())
+			return
+		}
+		for _, co := range pending {
+			if err := s.cancelPendingConditional(ctx, co); err != nil {
+				result.ConditionalFailed++
+				continue
+			}
+			result.ConditionalCanceled++
+		}
+	}
+	ok(c, result)
+}
+
+func (s *Server) publishCancel(orderID, uid uint64, symbol string) error {
+	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancel()
+	return s.producer.Publish(ctx, events.TopicOrderCancel, symbol, events.OrderCancelEvent{OrderID: orderID, UID: uid, Symbol: symbol})
+}
+
+// ---------- 资金流水 / 强平记录 ----------
+
+var validTxTypes = map[string]bool{
+	model.TxDeposit: true, model.TxFee: true, model.TxRealizedPnl: true, model.TxLiquidationClear: true,
+	model.TxFundingFee: true, model.TxCreditGrant: true, model.TxRoundClose: true,
+}
+
+// 资金流水(充值/扣减、手续费、已实现盈亏、资金费、信用额度发放、结束本轮
+// 回收等)，id倒序，type可选过滤。合作方对账用
+func (s *Server) accountTransactions(c *gin.Context) {
+	uid, ok1 := s.parseAccountUID(c)
+	if !ok1 {
+		return
+	}
+	txType := c.Query("type")
+	if txType != "" && !validTxTypes[txType] {
+		fail(c, 400, "type参数不合法")
+		return
+	}
+	limit, before, ok2 := pageParams(c)
+	if !ok2 {
+		return
+	}
+	txs, err := s.txs.FindByUID(c.Request.Context(), uid, txType, limit, before)
+	if err != nil {
+		fail(c, 500, err.Error())
+		return
+	}
+	if txs == nil {
+		txs = []model.Transaction{}
+	}
+	ok(c, txs)
+}
+
+// 这个uid的强平委托记录(orders表里liquidation=1的行)，orderId倒序。
+// 每笔强平委托的成交价、成交量、状态都在里面，翻页规则同order/history
+func (s *Server) liquidationHistory(c *gin.Context) {
+	uid, ok1 := s.parseAccountUID(c)
+	if !ok1 {
+		return
+	}
+	limit, before, ok2 := pageParams(c)
+	if !ok2 {
+		return
+	}
+	orders, err := s.orders.FindLiquidationsByUID(c.Request.Context(), uid, limit, before)
+	if err != nil {
+		fail(c, 500, err.Error())
+		return
+	}
+	ok(c, orders)
+}

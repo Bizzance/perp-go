@@ -43,7 +43,7 @@ func envOr(key, def string) string {
 	return def
 }
 
-// Load defaultNodeID是这个进程类型没设PERP_NODE_ID环境变量时用的默认node id——单实例
+// defaultNodeID是这个进程类型没设PERP_NODE_ID环境变量时用的默认node id——单实例
 // 部署时contract-api/contract-engine各自传一个固定值(见各自main.go)，不需要额外配置就能
 // 保证两边不撞。要横向扩展(同一进程类型跑多个实例)必须显式设PERP_NODE_ID区分，不能指望
 // 默认值——多个实例传同一个defaultNodeID会导致NextID理论上生成重复ID

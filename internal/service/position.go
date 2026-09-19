@@ -60,11 +60,16 @@ func (s *PositionService) TierFor(ctx context.Context, symbol string, notional d
 	return nil, nil
 }
 
+// 这个symbol配置的全部保证金分档(按tier升序)，合约信息查询接口用
+func (s *PositionService) Tiers(ctx context.Context, symbol string) ([]model.RiskLimitTier, error) {
+	return s.riskLimits.FindBySymbol(ctx, symbol)
+}
+
 func (s *PositionService) FindByUID(ctx context.Context, uid uint64) ([]model.Position, error) {
 	return s.positions.FindByUID(ctx, uid)
 }
 
-// PositionView 查询接口/WS账户快照共用的展示视图：持仓原始字段+现算的标记价/未实现盈亏/
+// 查询接口/WS账户快照共用的展示视图：持仓原始字段+现算的标记价/未实现盈亏/
 // 回报率/名义价值/预估强平价。之前REST的GET /position/current和WS的私有账户快照
 // (PushService.PublishUserSnapshot)各自独立算了一遍这些计算字段，WS那份漏掉了全部计算
 // 字段，只推裸的model.Position——两处对同一个资源的"完整视图"定义不一致，容易让依赖WS
@@ -78,7 +83,7 @@ type PositionView struct {
 	LiquidationPrice decimal.Decimal `json:"liquidationPrice"`
 }
 
-// Views 这个uid名下全部持仓的展示视图
+// 这个uid名下全部持仓的展示视图
 func (s *PositionService) Views(ctx context.Context, uid uint64) ([]PositionView, error) {
 	positions, err := s.positions.FindByUID(ctx, uid)
 	if err != nil {
@@ -108,13 +113,13 @@ func (s *PositionService) Find(ctx context.Context, uid uint64, symbol string, s
 	return s.positions.Find(ctx, uid, symbol, side)
 }
 
-// FindOpenBySymbol 这个symbol下全部还有仓位的记录，不分uid——ADL(见adl.go)挑选反向最
+// 这个symbol下全部还有仓位的记录，不分uid——ADL(见adl.go)挑选反向最
 // 赚钱的仓位强制减仓时用来找候选池
 func (s *PositionService) FindOpenBySymbol(ctx context.Context, symbol string) ([]model.Position, error) {
 	return s.positions.FindOpenBySymbol(ctx, symbol)
 }
 
-// UpdateLeverage 见repo.PositionRepo.UpdateLeverage——独立杠杆设置接口(docs/leverage.md)
+// 见repo.PositionRepo.UpdateLeverage——独立杠杆设置接口(docs/leverage.md)
 // 修改完保证金冻结之后，用这个把仓位自己的记账字段(保证金/杠杆)同步成新值
 func (s *PositionService) UpdateLeverage(ctx context.Context, id uint64, newMargin, newCreditMargin decimal.Decimal, newLeverage uint32, expectedVolume decimal.Decimal, updateTime int64) (bool, error) {
 	return s.positions.UpdateLeverage(ctx, id, newMargin, newCreditMargin, newLeverage, expectedVolume, updateTime)

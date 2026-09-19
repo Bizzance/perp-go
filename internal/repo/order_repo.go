@@ -18,9 +18,9 @@ func NewOrderRepo(db *sqlx.DB) *OrderRepo { return &OrderRepo{db: db} }
 func (r *OrderRepo) Insert(ctx context.Context, o *model.Order) error {
 	_, err := r.db.NamedExecContext(ctx, `INSERT INTO orders
 		(order_id, uid, symbol, side, action, type, price, amount, traded_amount, avg_deal_price,
-		 frozen_margin, frozen_credit, leverage, reduce_only, liquidation, status, create_time, update_time)
+		 frozen_margin, frozen_credit, leverage, reduce_only, liquidation, status, create_time, update_time, request_id, request_hash)
 		VALUES (:order_id, :uid, :symbol, :side, :action, :type, :price, :amount, :traded_amount, :avg_deal_price,
-		 :frozen_margin, :frozen_credit, :leverage, :reduce_only, :liquidation, :status, :create_time, :update_time)`, o)
+		 :frozen_margin, :frozen_credit, :leverage, :reduce_only, :liquidation, :status, :create_time, :update_time, :request_id, :request_hash)`, o)
 	return err
 }
 
@@ -33,7 +33,7 @@ func (r *OrderRepo) FindByOrderID(ctx context.Context, orderID uint64) (*model.O
 	return &o, err
 }
 
-// FindByOrderIDs 批量按order_id查询——自成交保护一次撮合可能摘掉好几笔自己的挂单，
+// 批量按order_id查询——自成交保护一次撮合可能摘掉好几笔自己的挂单，
 // 批量查一次比每笔单独查一次(N次DB往返)更快，见EngineService.SubmitOrder
 func (r *OrderRepo) FindByOrderIDs(ctx context.Context, orderIDs []uint64) ([]model.Order, error) {
 	if len(orderIDs) == 0 {
@@ -61,7 +61,7 @@ func (r *OrderRepo) FindActiveByUID(ctx context.Context, uid uint64, symbol stri
 	return orders, err
 }
 
-// FindActiveLimitOrders 查全部还在排队的LIMIT委托(open/partially_filled)，按create_time
+// 查全部还在排队的LIMIT委托(open/partially_filled)，按create_time
 // 升序返回，order_id做二级排序——order_id是雪花算法生成、时间单调递增，在create_time
 // (毫秒精度)不够细分同一毫秒内的相对先后时兜底提供更细的顺序。contract-engine启动时靠
 // 这个重建内存订单簿(订单簿是纯内存结构，进程重启会丢)，见docs/order-book-recovery.md。
@@ -75,9 +75,40 @@ func (r *OrderRepo) FindActiveLimitOrders(ctx context.Context) ([]model.Order, e
 	return orders, err
 }
 
-func (r *OrderRepo) FindHistoryByUID(ctx context.Context, uid uint64, limit int) ([]model.Order, error) {
+// 按合作方指定的幂等键查这个uid名下的委托，没有返回(nil, nil)
+func (r *OrderRepo) FindByRequestID(ctx context.Context, uid uint64, requestID string) (*model.Order, error) {
+	var o model.Order
+	err := r.db.GetContext(ctx, &o, `SELECT * FROM orders WHERE uid = ? AND request_id = ?`, uid, requestID)
+	if errors.Is(err, sql.ErrNoRows) {
+		return nil, nil
+	}
+	return &o, err
+}
+
+// 历史委托，order_id倒序(新的在前)。before>0时只返回order_id<before的行，
+// 客户端拿上一页最后一条的orderId当下一页的before即可翻页，不用offset——offset翻到深页
+// 要扫描并丢弃前面全部的行，而且翻页期间有新委托插进来会让offset错位、漏行或重复行
+func (r *OrderRepo) FindHistoryByUID(ctx context.Context, uid uint64, limit int, before uint64) ([]model.Order, error) {
 	var orders []model.Order
+	if before > 0 {
+		err := r.db.SelectContext(ctx, &orders,
+			`SELECT * FROM orders WHERE uid = ? AND order_id < ? ORDER BY order_id DESC LIMIT ?`, uid, before, limit)
+		return orders, err
+	}
 	err := r.db.SelectContext(ctx, &orders, `SELECT * FROM orders WHERE uid = ? ORDER BY order_id DESC LIMIT ?`, uid, limit)
+	return orders, err
+}
+
+// 这个uid名下的强平委托(liquidation=1)，翻页规则同FindHistoryByUID
+func (r *OrderRepo) FindLiquidationsByUID(ctx context.Context, uid uint64, limit int, before uint64) ([]model.Order, error) {
+	var orders []model.Order
+	if before > 0 {
+		err := r.db.SelectContext(ctx, &orders,
+			`SELECT * FROM orders WHERE uid = ? AND liquidation = 1 AND order_id < ? ORDER BY order_id DESC LIMIT ?`, uid, before, limit)
+		return orders, err
+	}
+	err := r.db.SelectContext(ctx, &orders,
+		`SELECT * FROM orders WHERE uid = ? AND liquidation = 1 ORDER BY order_id DESC LIMIT ?`, uid, limit)
 	return orders, err
 }
 

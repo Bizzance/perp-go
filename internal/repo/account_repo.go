@@ -41,6 +41,22 @@ func (r *AccountRepo) GetOrCreate(ctx context.Context, uid uint64) (*model.Accou
 	return r.FindByUID(ctx, uid)
 }
 
+// 创建账户，已经存在就直接返回已有的那一行(不改任何字段)。created表示这次是不是真的新建了：
+// INSERT IGNORE撞了uid唯一约束时受影响行数是0，并发下多个请求同时创建同一个uid，只有一个
+// 会得到created=true
+func (r *AccountRepo) CreateIfAbsent(ctx context.Context, uid uint64) (acc *model.Account, created bool, err error) {
+	res, err := r.db.ExecContext(ctx, `INSERT IGNORE INTO accounts (uid, available, frozen_margin) VALUES (?, 0, 0)`, uid)
+	if err != nil {
+		return nil, false, err
+	}
+	n, err := res.RowsAffected()
+	if err != nil {
+		return nil, false, err
+	}
+	acc, err = r.FindByUID(ctx, uid)
+	return acc, n > 0, err
+}
+
 func (r *AccountRepo) FindFreshAvailable(ctx context.Context, id uint64) (decimal.Decimal, error) {
 	var v decimal.Decimal
 	err := r.db.GetContext(ctx, &v, `SELECT available FROM accounts WHERE id = ?`, id)
@@ -53,7 +69,7 @@ func (r *AccountRepo) FindFreshCredit(ctx context.Context, id uint64) (decimal.D
 	return v, err
 }
 
-// FreezeFromAvailable 快路径：available单独够用，整笔从available划到frozenMargin，不动credit
+// 快路径：available单独够用，整笔从available划到frozenMargin，不动credit
 func (r *AccountRepo) FreezeFromAvailable(ctx context.Context, id uint64, amount decimal.Decimal) (bool, error) {
 	res, err := r.db.ExecContext(ctx,
 		`UPDATE accounts SET available = available - ?, frozen_margin = frozen_margin + ? WHERE id = ? AND available >= ?`,
@@ -61,7 +77,7 @@ func (r *AccountRepo) FreezeFromAvailable(ctx context.Context, id uint64, amount
 	return affected(res, err)
 }
 
-// FreezeSpillToCredit available单独不够、但available+credit够时的中间路径：available里
+// available单独不够、但available+credit够时的中间路径：available里
 // "属于自己的正数部分"全部冻结完，缺口从credit冻结(frozen_credit记账)。用GREATEST(available,0)
 // 而不是裸的available，是因为这个方法可能在available已经因为FreezeForceIntoNegative变负
 // 之后被调用——这种情况下available没有"正数部分"可以贡献，全部缺口应该整笔从credit冻结，
@@ -111,7 +127,7 @@ func (r *AccountRepo) FreezeSpillToCredit(ctx context.Context, id uint64, amount
 	return fromAvailable, fromCredit, true, nil
 }
 
-// FreezeForceIntoNegative available+credit都不够、但账户权益(含持仓浮盈)够覆盖时的
+// available+credit都不够、但账户权益(含持仓浮盈)够覆盖时的
 // 最后一条路径：币安式"持仓浮盈也能当买力开新仓"——没有WHERE守卫，调用方已经在service层用
 // 未实现盈亏验证过权益足够，这里只是把"允许借用浮盈"这个决定落地，available可能因此变负，
 // 全仓模式下这是合法状态(强平穿仓/保险基金垫付走的就是这套)。不动credit：浮盈是不确定、
@@ -134,7 +150,7 @@ func (r *AccountRepo) FreezeForceIntoNegative(ctx context.Context, id uint64, am
 	return affected(res, err)
 }
 
-// UnfreezeMargin 撤单/未成交部分释放冻结的保证金——availableAmount/creditAmount分别对应
+// 撤单/未成交部分释放冻结的保证金——availableAmount/creditAmount分别对应
 // 这笔委托当初从available/credit冻结的比例，必须分开还，不能笼统还到available，否则等于
 // 让信用额度经过"冻结再撤单"这个渠道被洗成可提现的available
 func (r *AccountRepo) UnfreezeMargin(ctx context.Context, id uint64, availableAmount, creditAmount decimal.Decimal) (bool, error) {
@@ -149,7 +165,7 @@ func (r *AccountRepo) UnfreezeMargin(ctx context.Context, id uint64, availableAm
 	return affected(res, err)
 }
 
-// DecreaseFrozenMargin 开仓成交：冻结的保证金转移到仓位(只扣frozen_margin/frozen_credit，
+// 开仓成交：冻结的保证金转移到仓位(只扣frozen_margin/frozen_credit，
 // 全仓下不是真锁定的钱)。availableAmount/creditAmount是这笔成交对应释放的两部分冻结额度，
 // 转正之后这两部分该退回available还是credit，由调用方紧接着分别调SettleToAvailable/
 // SettleToCredit处理——这里只负责解冻记账，不负责钱最终去哪
@@ -161,7 +177,7 @@ func (r *AccountRepo) DecreaseFrozenMargin(ctx context.Context, id uint64, avail
 	return affected(res, err)
 }
 
-// SettleToAvailable 保证金原样归还——amount可正可负，无守卫(全仓下available允许暂时为负，
+// 保证金原样归还——amount可正可负，无守卫(全仓下available允许暂时为负，
 // 这是已经接受的合法状态，不是bug)。只用于"退回原来冻结available的那部分"这种明确知道
 // 钱该回available的场景，不要用来结算亏损——亏损要走SettlePnl，走先available后credit的顺序
 func (r *AccountRepo) SettleToAvailable(ctx context.Context, id uint64, amount decimal.Decimal) error {
@@ -169,13 +185,13 @@ func (r *AccountRepo) SettleToAvailable(ctx context.Context, id uint64, amount d
 	return err
 }
 
-// SettleToCredit 退回原来冻结credit的那部分，跟SettleToAvailable对称
+// 退回原来冻结credit的那部分，跟SettleToAvailable对称
 func (r *AccountRepo) SettleToCredit(ctx context.Context, id uint64, amount decimal.Decimal) error {
 	_, err := r.db.ExecContext(ctx, `UPDATE accounts SET credit = credit + ? WHERE id = ?`, amount, id)
 	return err
 }
 
-// SettlePnl 已实现盈亏/强平清算缓冲结算：盈利(amount>=0)直接进available，不动credit——赚的
+// 已实现盈亏/强平清算缓冲结算：盈利(amount>=0)直接进available，不动credit——赚的
 // 是新钱，没有变现风险。亏损(amount<0)走"先扣available、available里属于自己的正数部分耗尽了
 // 再扣credit、credit也耗尽了才让available继续变负"的顺序——让运营发放的信用额度尽量少被
 // 真实亏损吃掉，用户自己的钱优先兜底，这是运营侧控制赔付成本的取舍，不是"保护用户"的取舍。
@@ -187,7 +203,7 @@ func (r *AccountRepo) SettlePnl(ctx context.Context, id uint64, amount decimal.D
 	return r.deductWithCreditFallback(ctx, id, amount.Neg())
 }
 
-// DeductFee 手续费扣款：这笔手续费对应的成交已经真实发生，不能因为差一点钱扣不出来就不扣，
+// 手续费扣款：这笔手续费对应的成交已经真实发生，不能因为差一点钱扣不出来就不扣，
 // 走跟SettlePnl亏损分支同样的"先available后credit"顺序，credit也不够时allowed继续让
 // available变负
 func (r *AccountRepo) DeductFee(ctx context.Context, id uint64, fee decimal.Decimal) error {
@@ -197,7 +213,7 @@ func (r *AccountRepo) DeductFee(ctx context.Context, id uint64, fee decimal.Deci
 	return r.deductWithCreditFallback(ctx, id, fee)
 }
 
-// deductWithCreditFallback 从这个账户扣掉loss(正数)，"先available后credit"：
+// 从这个账户扣掉loss(正数)，"先available后credit"：
 // absorbedByCredit = min(credit, max(loss - max(available,0), 0))——available里"属于自己的
 // 正数部分"(已经是负数就没有可用的部分)覆盖不了的缺口，先问credit要，credit给不了的剩余部分
 // 由available兜底(可能变得更负)。这里必须用JOIN一份子查询快照(snap)来引用"更新前"的
@@ -217,19 +233,13 @@ func (r *AccountRepo) deductWithCreditFallback(ctx context.Context, id uint64, l
 	return err
 }
 
-// GrantCredit 合作方发放/追加信用额度，直接累加——同一轮内允许多次调用
-func (r *AccountRepo) GrantCredit(ctx context.Context, id uint64, amount decimal.Decimal) error {
-	_, err := r.db.ExecContext(ctx, `UPDATE accounts SET credit = credit + ? WHERE id = ?`, amount, id)
-	return err
-}
-
-// SetInsured 合作方单独设置这个账户本轮是否投保，跟发放信用额度是两个独立的动作
+// 合作方单独设置这个账户本轮是否投保，跟发放信用额度是两个独立的动作
 func (r *AccountRepo) SetInsured(ctx context.Context, id uint64, insured bool) error {
 	_, err := r.db.ExecContext(ctx, `UPDATE accounts SET is_insured = ? WHERE id = ?`, insured, id)
 	return err
 }
 
-// CloseRoundIfRound 结束本轮：credit清零(没用完的赔付额度不追讨，也不留到下一轮)、
+// 结束本轮：credit清零(没用完的赔付额度不追讨，也不留到下一轮)、
 // is_insured重置、round+1，为下一轮做准备。调用前调用方要保证这个uid名下已经没有持仓/
 // 挂单(强平/撤单已经在更上层完成)，这里只做资金状态的收尾。多一个"当前round必须等于
 // round参数"的原子条件(WHERE id=? AND round=?)——engine分片部署下，多个实例可能各自
@@ -281,4 +291,122 @@ func affected(res sql.Result, err error) (bool, error) {
 	}
 	n, err := res.RowsAffected()
 	return n > 0, err
+}
+
+type FundOpKind int
+
+const (
+	FundOpDeposit     FundOpKind = iota // 增加可用余额
+	FundOpWithdraw                      // 扣减可用余额，余额不够就失败
+	FundOpGrantCredit                   // 增加信用额度
+)
+
+// 合作方发起的一笔资金操作(充值/扣减/发放信用额度)
+type FundOp struct {
+	AccountID   uint64
+	UID         uint64
+	Kind        FundOpKind
+	Amount      decimal.Decimal // 恒为正数，方向由Kind决定
+	TxType      string          // 记进资金流水的类型，见model.Tx*常量
+	RequestID   string          // 幂等键，同一uid内唯一
+	RequestHash string          // 请求参数摘要，同一个RequestID再次提交时用来判断参数是否一致
+	Now         int64
+}
+
+// 在一个事务里完成"占位幂等键(写流水)+改余额"，返回replayed=true表示这个requestId之前已经
+// 成功处理过、这次什么都没做。两步必须在同一个事务里：先落流水再改余额，中间崩溃会让流水
+// 记了钱却没动(重试还会被当成重复请求吞掉，钱永远补不上)；先改余额再落流水，中间崩溃
+// 重试会再改一次余额(重复入账)。放进同一个事务，要么都生效要么都不生效
+//
+// 并发的同一个requestId靠(uid, request_id)唯一索引串行化：后到的INSERT会一直等到先到的
+// 事务提交或回滚，提交了就撞唯一索引、按重放处理，回滚了(比如余额不足)就自己接着往下执行
+func (r *AccountRepo) ApplyFundOp(ctx context.Context, op FundOp) (replayed bool, err error) {
+	// 几个请求带着同一个requestId并发提交、而先到的那个又因为余额不足回滚时，后面几个会同时拿到
+	// 唯一索引冲突上的共享锁、再一起尝试升级成排他锁，InnoDB会判定死锁并回滚其中一个。受害者
+	// 整个事务重试即可(重试时先到的已经回滚干净，或者已经提交、按重放处理)，不能把这个内部
+	// 细节当成500抛给合作方
+	const maxAttempts = 3
+	for attempt := 1; ; attempt++ {
+		replayed, err = r.applyFundOpOnce(ctx, op)
+		if err != nil && IsDeadlock(err) && attempt < maxAttempts {
+			continue
+		}
+		return replayed, err
+	}
+}
+
+func (r *AccountRepo) applyFundOpOnce(ctx context.Context, op FundOp) (replayed bool, err error) {
+	tx, err := r.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return false, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	// 先锁住这个账户行，让同一个账户的资金操作串行执行。不加这一步，并发的同一个requestId
+	// 会在(uid, request_id)唯一索引上互相等待，先到的回滚(比如余额不足)时后面几个会同时
+	// 拿到共享锁再一起升级成排他锁，InnoDB判定死锁、随机回滚几个。资金操作本来就低频，串行
+	// 的代价可以忽略；后面的重试只是兜底
+	var lockedID uint64
+	if err := tx.GetContext(ctx, &lockedID, `SELECT id FROM accounts WHERE id = ? FOR UPDATE`, op.AccountID); err != nil {
+		return false, err
+	}
+
+	ledgerAmount := op.Amount
+	if op.Kind == FundOpWithdraw {
+		ledgerAmount = op.Amount.Neg()
+	}
+	_, err = tx.ExecContext(ctx,
+		`INSERT INTO member_transactions (uid, symbol, amount, type, create_time, request_id, request_hash)
+		 VALUES (?, 'USDT', ?, ?, ?, ?, ?)`,
+		op.UID, ledgerAmount, op.TxType, op.Now, op.RequestID, op.RequestHash)
+	if err != nil {
+		if !IsDuplicateKey(err) {
+			return false, err
+		}
+		// 撞了唯一索引：这个requestId之前已经成功处理过。参数一致按重放返回，不一致是误用
+		_ = tx.Rollback()
+		committed = true
+		var storedHash *string
+		if err := r.db.GetContext(ctx, &storedHash,
+			`SELECT request_hash FROM member_transactions WHERE uid = ? AND request_id = ?`, op.UID, op.RequestID); err != nil {
+			return false, err
+		}
+		if storedHash != nil && *storedHash != op.RequestHash {
+			return false, ErrIdempotencyConflict
+		}
+		return true, nil
+	}
+
+	var res sql.Result
+	switch op.Kind {
+	case FundOpDeposit:
+		res, err = tx.ExecContext(ctx, `UPDATE accounts SET available = available + ? WHERE id = ?`, op.Amount, op.AccountID)
+	case FundOpWithdraw:
+		res, err = tx.ExecContext(ctx,
+			`UPDATE accounts SET available = available - ? WHERE id = ? AND available >= ?`, op.Amount, op.AccountID, op.Amount)
+	case FundOpGrantCredit:
+		res, err = tx.ExecContext(ctx, `UPDATE accounts SET credit = credit + ? WHERE id = ?`, op.Amount, op.AccountID)
+	default:
+		return false, errors.New("未知的资金操作类型")
+	}
+	if err != nil {
+		return false, err
+	}
+	if n, err := res.RowsAffected(); err != nil {
+		return false, err
+	} else if n == 0 {
+		// 只有扣减的WHERE available >= ?会走到这里(充值/发额度按id更新一定命中)，回滚掉刚才
+		// 写的流水，这个requestId没有被占用，补足余额后可以用同一个requestId重试
+		return false, ErrInsufficientBalance
+	}
+	if err := tx.Commit(); err != nil {
+		return false, err
+	}
+	committed = true
+	return false, nil
 }
