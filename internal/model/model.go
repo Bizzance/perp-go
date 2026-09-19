@@ -94,6 +94,16 @@ type Transaction struct {
 	RequestID *string `db:"request_id" json:"requestId,omitempty"`
 }
 
+// 账户状态。frozen是"禁止新增风险，不禁止降低风险"：不能开仓、创建条件开仓单、
+// 改杠杆，但仍然可以平仓、撤单、查询、结束本轮，运营的资金操作(充值/扣款/发额度)和系统自己的
+// 强平、ADL、资金费、成交结算也不受影响，见docs/account-and-margin.md
+type AccountStatus string
+
+const (
+	AccountStatusActive AccountStatus = "active"
+	AccountStatusFrozen AccountStatus = "frozen"
+)
+
 type Account struct {
 	ID           uint64          `db:"id" json:"-"`
 	UID          uint64          `db:"uid" json:"uid"`
@@ -104,6 +114,9 @@ type Account struct {
 	FrozenMargin decimal.Decimal `db:"frozen_margin" json:"frozenMargin"` // 挂单冻结保证金(来自available的部分)
 	FrozenCredit decimal.Decimal `db:"frozen_credit" json:"frozenCredit"` // 挂单冻结保证金(来自credit的部分)
 	Version      uint32          `db:"version" json:"-"`
+	Status       AccountStatus   `db:"status" json:"status"`
+	StatusReason string          `db:"status_reason" json:"-"`
+	StatusTime   int64           `db:"status_time" json:"-"`
 }
 
 type Coin struct {

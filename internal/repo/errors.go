@@ -22,6 +22,8 @@ func IsDeadlock(err error) bool {
 }
 
 var (
+	// 账户不存在
+	ErrAccountNotFound = errors.New("账户不存在，请先创建账户")
 	// 合作方扣减余额时可用余额不足
 	ErrInsufficientBalance = errors.New("可用余额不足，无法扣减")
 	// 同一个requestId已经用于一笔参数不同的请求

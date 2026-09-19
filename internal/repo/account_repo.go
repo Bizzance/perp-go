@@ -18,7 +18,8 @@ func NewAccountRepo(db *sqlx.DB) *AccountRepo { return &AccountRepo{db: db} }
 func (r *AccountRepo) FindByUID(ctx context.Context, uid uint64) (*model.Account, error) {
 	var a model.Account
 	err := r.db.GetContext(ctx, &a,
-		`SELECT id, uid, is_insured, round, credit, available, frozen_margin, frozen_credit, version
+		`SELECT id, uid, is_insured, round, credit, available, frozen_margin, frozen_credit, version,
+		        status, status_reason, status_time
 		 FROM accounts WHERE uid = ?`, uid)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -409,4 +410,55 @@ func (r *AccountRepo) applyFundOpOnce(ctx context.Context, op FundOp) (replayed 
 	}
 	committed = true
 	return false, nil
+}
+
+// 只查账户状态，撮合热路径上每笔开仓委托都要查一次，比FindByUID少读大部分列。账户不存在返回空串
+func (r *AccountRepo) FindStatus(ctx context.Context, uid uint64) (model.AccountStatus, error) {
+	var status model.AccountStatus
+	err := r.db.GetContext(ctx, &status, `SELECT status FROM accounts WHERE uid = ?`, uid)
+	if errors.Is(err, sql.ErrNoRows) {
+		return "", nil
+	}
+	return status, err
+}
+
+// 设置账户状态并记一行变更历史，在一个事务里完成。返回变更前的状态和这次有没有真的变化：
+// 已经是目标状态就什么都不改、不记历史(设为目标值，天然幂等)，changed=false。事务里先
+// SELECT ... FOR UPDATE锁住账户行，让同一个账户的并发状态变更串行，"读当前状态"和"写新状态"
+// 之间不会被另一个变更插进来
+func (r *AccountRepo) SetStatus(ctx context.Context, uid uint64, to model.AccountStatus, reason, operator string, now int64) (from model.AccountStatus, changed bool, err error) {
+	tx, err := r.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return "", false, err
+	}
+	committed := false
+	defer func() {
+		if !committed {
+			_ = tx.Rollback()
+		}
+	}()
+
+	if err := tx.GetContext(ctx, &from, `SELECT status FROM accounts WHERE uid = ? FOR UPDATE`, uid); err != nil {
+		if errors.Is(err, sql.ErrNoRows) {
+			return "", false, ErrAccountNotFound
+		}
+		return "", false, err
+	}
+	if from == to {
+		return from, false, nil
+	}
+	if _, err := tx.ExecContext(ctx,
+		`UPDATE accounts SET status = ?, status_reason = ?, status_time = ? WHERE uid = ?`, to, reason, now, uid); err != nil {
+		return "", false, err
+	}
+	if _, err := tx.ExecContext(ctx,
+		`INSERT INTO account_status_history (uid, from_status, to_status, reason, operator, create_time)
+		 VALUES (?, ?, ?, ?, ?, ?)`, uid, from, to, reason, operator, now); err != nil {
+		return "", false, err
+	}
+	if err := tx.Commit(); err != nil {
+		return "", false, err
+	}
+	committed = true
+	return from, true, nil
 }

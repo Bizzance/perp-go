@@ -26,7 +26,7 @@ X-Signature  HMAC-SHA256(secret, timestamp\nnonce\nMETHOD\npath\nrawQuery\nsha25
 
 签名算法、固定测试向量、Python 和 bash 示例、权限范围、错误码见 [auth-design.md](auth-design.md)；
 `deploy/apisign.sh` 可以直接拿来调用。密钥分两种权限范围：`trade`（交易和查询）和 `ops`（加钱扣钱、发信用额度、
-设投保、喂指数价），越权返回 `forbidden`。`uid` 仍然是独立的请求参数。
+设投保、冻结/解冻账户、喂指数价），越权返回 `forbidden`。`uid` 仍然是独立的请求参数。
 
 ### 请求约定
 
@@ -74,6 +74,7 @@ X-Signature  HMAC-SHA256(secret, timestamp\nnonce\nMETHOD\npath\nrawQuery\nsha25
 | `account_not_found`     | 400  | 这个`uid`的账户还没创建，或者`uid`写错了。先调 `POST /account/create`；`uid`写错时这个错误码正好帮你拦住手误 |
 | `idempotency_conflict`  | 400  | 同一个`requestId`已经用于一笔**参数不同**的请求。是调用方误用（同一个键复用到了另一笔请求），换一个新的`requestId` |
 | `round_mismatch`        | 400  | `POST /account/round/close`指定的`round`大于账户当前轮数                                  |
+| `account_frozen`        | 400  | 账户已被冻结，不能开仓、创建条件开仓单、修改杠杆（平仓、撤单、查询仍可用），见`POST /account/status` |
 | `auth_missing`          | 401  | 缺鉴权请求头，或者 nonce/时间戳格式不对                                                   |
 | `auth_expired`          | 401  | 时间戳不在前后 30 秒内。检查合作方服务器的时钟是否同步（NTP）                             |
 | `auth_invalid_signature`| 401  | 签名不对，或者密钥不存在（两种情况故意返回完全相同的响应）                                |
@@ -158,6 +159,7 @@ X-Signature  HMAC-SHA256(secret, timestamp\nnonce\nMETHOD\npath\nrawQuery\nsha25
 | `POST /order/cancel/:orderId`        | 撤单**请求已提交**                               | 查委托状态变成`canceled`，或订阅 WS                                     |
 | `POST /order/cancel-all`             | 撤单请求已提交（返回提交了多少笔）               | 同上；条件单的撤销是同步生效的                                          |
 | `POST /account/round/close`          | 结束本轮**请求已提交**（返回`status: submitted`）| 轮询 `GET /account/info`，`round`加1就说明完成了；订阅 WS 也能收到      |
+| `POST /account/status`（冻结时）     | 状态已经改成功（同步），存量开仓委托的撤单**请求已提交** | 同`cancel-all`：委托状态变成`canceled`；条件开仓单的撤销是同步生效的 |
 | 其它写接口（改杠杆、发额度、加款等） | 已经生效（同步）                                 | —                                                                       |
 
 余额不足、参数错误这类校验失败是**同步**返回的，不用等撮合。
@@ -197,7 +199,7 @@ X-Signature  HMAC-SHA256(secret, timestamp\nnonce\nMETHOD\npath\nrawQuery\nsha25
 {
   "code": 200, "message": "success",
   "data": {
-    "uid": 10001, "isInsured": false, "round": 0,
+    "uid": 10001, "isInsured": false, "status": "active", "round": 0,
     "credit": "0", "available": "0", "frozenMargin": "0", "frozenCredit": "0",
     "totalUnrealizedPnl": "0", "equity": "0",
     "created": true
@@ -233,7 +235,7 @@ X-Signature  HMAC-SHA256(secret, timestamp\nnonce\nMETHOD\npath\nrawQuery\nsha25
 {
   "code": 200, "message": "success",
   "data": {
-    "uid": 990102, "isInsured": false, "round": 0,
+    "uid": 990102, "isInsured": false, "status": "active", "round": 0,
     "credit": "0", "available": "1115.6",
     "frozenMargin": "0", "frozenCredit": "0",
     "totalUnrealizedPnl": "100.0000000005", "equity": "1215.6000000005"
@@ -269,6 +271,40 @@ X-Signature  HMAC-SHA256(secret, timestamp\nnonce\nMETHOD\npath\nrawQuery\nsha25
 ```json
 { "uid": 10001, "insured": true }
 ```
+
+### `POST /account/status`（运营接口）
+
+冻结/解冻账户，`ops`权限。冻结是"禁止新增风险，不禁止降低风险"（跟挂单"冻结保证金"是两回事）：
+
+| 冻结后                                                                 | 行为                                       |
+|------------------------------------------------------------------------|--------------------------------------------|
+| 开仓委托、创建条件开仓单、`POST /position/leverage`                    | 拒绝，返回`account_frozen`                 |
+| 平仓委托、撤单、批量撤单、结束本轮、全部查询、WebSocket                | 照常可用                                   |
+| 运营的加钱扣钱、发信用额度、设投保                                     | 照常可用                                   |
+| 强平、ADL、资金费、成交结算等系统自己的动作                            | 照常执行（冻结不能让账户躲过强平）         |
+
+```json
+{ "uid": 10001, "status": "frozen", "reason": "风控：异常交易" }
+```
+
+`status`取值`active` / `frozen`，`reason`选填，最长255字节，会和操作的密钥id、时间一起记入变更历史表
+`account_status_history`。
+
+```json
+{ "code": 200, "message": "success", "data": {
+    "uid": 10001, "status": "frozen", "changed": true,
+    "cancelRequested": 1, "cancelRequestFailed": 0, "conditionalCanceled": 1, "conditionalFailed": 0 } }
+```
+
+- **天然幂等**：设为目标值，已经是这个状态就什么都不改（`changed: false`），不需要`requestId`
+- **冻结时顺带清理存量的开仓类挂单**：普通开仓委托给每笔发一条撤单请求（异步，含义同`POST /order/cancel-all`的
+  `cancelRequested`）、条件开仓单直接撤销（同步）；平仓委托、平仓类止盈止损条件单和强平委托保留。撤单会退回挂单占用的保证金
+- **清理每次冻结请求都会执行**，不管这次有没有改变状态：`cancelRequestFailed`或`conditionalFailed`非0时，带同样的参数
+  重试即可补完。清理本身出错时返回500，但状态已经改成功了，重试即可
+- 冻结前已经落库、还在排队等撮合的开仓委托，以及冻结后刚好被触发的条件开仓单，撮合前会被引擎再检查一次，已冻结就直接撤销
+  退款，不会成交
+- 冻结前已经成功的下单，带同一个`requestId`重试仍然返回原结果（`duplicate: true`），不会因为账户被冻结变成`account_frozen`
+- `GET /account/info`和WebSocket私有频道的账户快照里有`status`字段
 
 ### `POST /account/round/close`
 

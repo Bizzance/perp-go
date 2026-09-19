@@ -36,6 +36,7 @@ const (
 	ErrAccountNotFound      = "account_not_found"      // 账户不存在，先调 POST /account/create 创建
 	ErrIdempotencyConflict  = "idempotency_conflict"   // 同一个requestId已经用于一笔参数不同的请求
 	ErrRoundMismatch        = "round_mismatch"         // 结束本轮指定的round大于账户当前轮数
+	ErrAccountFrozen        = "account_frozen"         // 账户已冻结，不允许开仓/创建条件开仓单/修改杠杆
 	ErrInternal             = "internal_error"         // 服务端内部错误
 )
 

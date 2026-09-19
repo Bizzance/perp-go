@@ -83,6 +83,7 @@ func (s *Server) Router() *gin.Engine {
 	s.auth.Route(r, "GET", "/account/info", ScopeTrade, s.accountInfo)
 	s.auth.Route(r, "POST", "/account/credit", ScopeOps, s.grantCredit)
 	s.auth.Route(r, "POST", "/account/insured", ScopeOps, s.setInsured)
+	s.auth.Route(r, "POST", "/account/status", ScopeOps, s.setAccountStatus)
 	s.auth.Route(r, "POST", "/account/round/close", ScopeTrade, s.closeRound)
 	s.auth.Route(r, "POST", "/order/add", ScopeTrade, s.addOrder)
 	s.auth.Route(r, "POST", "/order/cancel/:orderId", ScopeTrade, s.cancelOrder)
@@ -206,15 +207,29 @@ func respondFundOpErr(c *gin.Context, err error) {
 // 不会替他们悄悄建——否则uid手误写错的充值会成功地充给一个没人认领的账户，只读接口也会往库里
 // 塞垃圾账户
 func (s *Server) requireAccount(c *gin.Context, uid uint64) bool {
+	return s.loadAccount(c, uid) != nil
+}
+
+// 校验账户存在并把账户返回，需要看账户状态(冻结)的接口用；失败时已经写好响应，返回nil
+func (s *Server) loadAccount(c *gin.Context, uid uint64) *model.Account {
 	account, err := s.accounts.Find(c.Request.Context(), uid)
 	if err != nil {
 		fail(c, 500, err.Error())
-		return false
+		return nil
 	}
 	if account == nil {
 		failC(c, 400, ErrAccountNotFound, "账户不存在，请先调用 POST /account/create 创建")
+		return nil
+	}
+	return account
+}
+
+// 账户被冻结时拒绝新增风险的操作(开仓、条件开仓、改杠杆)：写好account_frozen响应并返回true
+func rejectIfFrozen(c *gin.Context, account *model.Account) bool {
+	if account.Status != model.AccountStatusFrozen {
 		return false
 	}
+	failC(c, 400, ErrAccountFrozen, "账户已冻结，不能开仓、创建条件开仓单或修改杠杆；平仓、撤单、查询仍可用")
 	return true
 }
 
@@ -598,7 +613,8 @@ func (s *Server) addOrder(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
-	if !s.requireAccount(c, req.UID) {
+	account := s.loadAccount(c, req.UID)
+	if account == nil {
 		return
 	}
 	uid := req.UID
@@ -637,6 +653,10 @@ func (s *Server) addOrder(c *gin.Context) {
 			s.respondDuplicateOrder(c, existing, requestHash)
 			return
 		}
+	}
+	// 冻结检查放在幂等重放之后：冻结前已经成功的下单，带同一个requestId重试仍然返回原结果
+	if action == model.ActionOpen && rejectIfFrozen(c, account) {
+		return
 	}
 
 	coin, err := s.coins.FindBySymbol(c.Request.Context(), symbol)
@@ -936,7 +956,8 @@ func (s *Server) addConditionalOrder(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
-	if !s.requireAccount(c, req.UID) {
+	account := s.loadAccount(c, req.UID)
+	if account == nil {
 		return
 	}
 	uid := req.UID
@@ -983,6 +1004,9 @@ func (s *Server) addConditionalOrder(c *gin.Context) {
 			s.respondDuplicateConditional(c, existing, requestHash)
 			return
 		}
+	}
+	if action == model.ActionOpen && rejectIfFrozen(c, account) {
+		return
 	}
 
 	coin, err := s.coins.FindBySymbol(c.Request.Context(), symbol)
@@ -1145,6 +1169,23 @@ func (s *Server) addConditionalOrder(c *gin.Context) {
 		fail(c, 500, err.Error())
 		return
 	}
+	// 落库后再看一眼账户状态：冻结接口的清理可能刚好在这笔落库之前扫完，这笔条件开仓单就漏在
+	// 清理之外了。引擎侧触发时也会兜底撤掉，但那要等到触发，这段时间保证金一直被占着、单子一直显示
+	// 待触发，这里直接撤销、返回account_frozen更干净
+	if action == model.ActionOpen {
+		frozen, err := s.accounts.IsFrozen(c.Request.Context(), uid)
+		if err != nil {
+			fail(c, 500, err.Error())
+			return
+		}
+		if frozen {
+			if err := s.cancelPendingConditional(c.Request.Context(), *co); err != nil {
+				log.Printf("[ERROR] 冻结竞态下撤销刚创建的条件开仓单失败, orderId=%d: %v", co.OrderID, err)
+			}
+			failC(c, 400, ErrAccountFrozen, "账户已冻结，不能创建条件开仓单")
+			return
+		}
+	}
 	ok(c, placeOrderResult{OrderID: orderID, RequestID: requestID})
 }
 
@@ -1269,7 +1310,12 @@ func (s *Server) setLeverage(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
-	if !s.requireAccount(c, req.UID) {
+	account := s.loadAccount(c, req.UID)
+	if account == nil {
+		return
+	}
+	// 降杠杆要补冻结保证金，等于变相新增风险，冻结账户一律不让改
+	if rejectIfFrozen(c, account) {
 		return
 	}
 	if req.Side != model.SideLong && req.Side != model.SideShort {

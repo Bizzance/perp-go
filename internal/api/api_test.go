@@ -9,6 +9,7 @@ import (
 	"github.com/gin-gonic/gin"
 	"github.com/shopspring/decimal"
 
+	"perp-go/internal/model"
 	"perp-go/internal/service"
 )
 
@@ -224,5 +225,54 @@ func TestCreateAccountResultJSON_FlattensAccountViewAndCreatedFlag(t *testing.T)
 		if _, ok := m[k]; !ok {
 			t.Errorf("账户视图的字段%s应该被展开到同一层, got %s", k, b)
 		}
+	}
+}
+
+func TestRejectIfFrozen(t *testing.T) {
+	c, w := newCtx("")
+	if rejectIfFrozen(c, &model.Account{Status: model.AccountStatusActive}) {
+		t.Fatal("active账户不应该被拒绝")
+	}
+	if w.Body.Len() != 0 {
+		t.Fatalf("active账户不应该写响应: %s", w.Body.String())
+	}
+
+	c, w = newCtx("")
+	if !rejectIfFrozen(c, &model.Account{Status: model.AccountStatusFrozen}) {
+		t.Fatal("frozen账户应该被拒绝")
+	}
+	m := body(t, w)
+	if m["errCode"] != "account_frozen" || m["code"].(float64) != 400 {
+		t.Fatalf("冻结拒绝响应不对: %v", m)
+	}
+}
+
+func TestAccountViewJSON_IncludesStatus(t *testing.T) {
+	v := &service.AccountView{UID: 10001, Status: string(model.AccountStatusFrozen)}
+	b, err := json.Marshal(v)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !contains(string(b), `"status":"frozen"`) {
+		t.Fatalf("账户信息缺少status: %s", b)
+	}
+}
+
+func TestSetAccountStatusResultJSON(t *testing.T) {
+	b, err := json.Marshal(setAccountStatusResult{UID: 10001, Status: model.AccountStatusFrozen, Changed: true, CancelRequested: 2})
+	if err != nil {
+		t.Fatal(err)
+	}
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	for _, k := range []string{"uid", "status", "changed", "cancelRequested", "cancelRequestFailed", "conditionalCanceled", "conditionalFailed"} {
+		if _, ok := m[k]; !ok {
+			t.Fatalf("冻结结果缺少字段%s: %s", k, b)
+		}
+	}
+	if m["status"] != "frozen" || m["changed"] != true {
+		t.Fatalf("字段取值不对: %s", b)
 	}
 }

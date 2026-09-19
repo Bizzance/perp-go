@@ -134,7 +134,7 @@ def call(method, url, key, secret, body=b""):
 | 范围    | 接口                                                                                                   |
 |---------|--------------------------------------------------------------------------------------------------------|
 | `trade` | 创建账户、下单、撤单、批量撤单、条件单、改杠杆、结束本轮、全部查询类接口、公开行情、WebSocket、引擎的 `/depth` |
-| `ops`   | `POST /account/balance`（加钱扣钱）、`POST /account/credit`（发额度）、`POST /account/insured`、`POST /index-price` |
+| `ops`   | `POST /account/balance`（加钱扣钱）、`POST /account/credit`（发额度）、`POST /account/insured`、`POST /account/status`（冻结/解冻）、`POST /index-price` |
 
 **建议给不同用途的调用方发不同的密钥**：合作方业务后端用 `trade`（需要充值就再加 `ops`），行情/运营来源只给 `ops`。
 一把只用来喂指数价的密钥不应该能下单，一把交易密钥也不应该能给账户加钱。`/index-price` 尤其要单独授权：它直接决定

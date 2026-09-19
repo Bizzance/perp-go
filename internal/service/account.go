@@ -16,7 +16,7 @@ var ErrInsufficientMargin = errors.New("可用余额不足，无法冻结保证�
 
 // 账户不存在。合作方必须先调创建账户接口，其它接口不会替他们悄悄建——否则uid手误写错的
 // 充值会成功地充给一个没人认领的账户
-var ErrAccountNotFound = errors.New("账户不存在，请先创建账户")
+var ErrAccountNotFound = repo.ErrAccountNotFound
 
 var (
 	// ErrInsufficientBalance 合作方扣减账户余额(POST /account/balance负数)时available不够
@@ -33,6 +33,23 @@ type AccountService struct {
 
 func NewAccountService(accounts *repo.AccountRepo, positions *PositionService, tx *repo.TxRepo) *AccountService {
 	return &AccountService{accounts: accounts, positions: positions, tx: tx}
+}
+
+// 设置账户状态(冻结/解冻)，返回变更前的状态和这次有没有真的变化，幂等：已经是目标状态就不改
+// 也不记历史。只负责改状态本身，冻结后清理存量的开仓委托/条件单由调用方(API层)负责——
+// 那需要往Kafka发撤单事件，这一层碰不到
+func (s *AccountService) SetStatus(ctx context.Context, uid uint64, to model.AccountStatus, reason, operator string) (model.AccountStatus, bool, error) {
+	return s.accounts.SetStatus(ctx, uid, to, reason, operator, NowMillis())
+}
+
+// 账户当前是不是冻结状态。账户不存在按未冻结处理(调用方各自有账户存在性检查)，
+// 数据库出错返回error，调用方按失败关闭处理，不能当成"没冻结"放行
+func (s *AccountService) IsFrozen(ctx context.Context, uid uint64) (bool, error) {
+	status, err := s.accounts.FindStatus(ctx, uid)
+	if err != nil {
+		return false, err
+	}
+	return status == model.AccountStatusFrozen, nil
 }
 
 // 按uid查账户，不存在返回(nil, nil)，不会创建
@@ -326,6 +343,7 @@ func (s *AccountService) CloseRound(ctx context.Context, uid, round uint64) (boo
 type AccountView struct {
 	UID                uint64          `json:"uid"`
 	IsInsured          bool            `json:"isInsured"`
+	Status             string          `json:"status"`
 	Round              uint64          `json:"round"`
 	Credit             decimal.Decimal `json:"credit"`
 	Available          decimal.Decimal `json:"available"`
@@ -347,6 +365,7 @@ func (s *AccountService) View(ctx context.Context, uid uint64) (*AccountView, er
 	return &AccountView{
 		UID:                uid,
 		IsInsured:          acc.IsInsured,
+		Status:             string(acc.Status),
 		Round:              acc.Round,
 		Credit:             acc.Credit,
 		Available:          acc.Available,

@@ -65,7 +65,7 @@ deploy/         容器化部署：Dockerfile、docker-compose.yml(+deps叠加层
 
 以`POST /order/add`一笔LIMIT开仓单为例，从HTTP进来到最终推送给WS客户端：
 
-1. `internal/api/router.go`的`addOrder`：校验账户存在（`requireAccount`）、参数、`requestId`幂等预检
+1. `internal/api/router.go`的`addOrder`：校验账户存在（`loadAccount`）、参数、`requestId`幂等预检
    （`idempotencyConflict`识别同一个键带了不同参数）、查`coins`表拿合约配置、算价格保护带、
    按保守参考价估算`requiredMargin`（SHORT+OPEN用`max(委托价,标记价)`，见
    [matching-and-settlement.md](matching-and-settlement.md)"冻结保证金的保守估计"）
@@ -213,10 +213,13 @@ group id做fan-out、应用层按symbol过滤。详见 [engine-sharding.md](engi
 
 - **`uid`是独立的请求参数，不是从鉴权里取的**：鉴权（`internal/api/auth.go`）只证明"请求来自哪把密钥、
   有没有权限"，不告诉我们`uid`是谁。合作方是服务端，终端用户的身份由它自己负责，我们信任它传来的`uid`。
-  所以handler里都是自己解析`uid`再`requireAccount`，不要去找"当前登录用户"。
+  所以handler里都是自己解析`uid`再`requireAccount`/`loadAccount`，不要去找"当前登录用户"。
 - **账户必须先创建，API层不会自动建**：`router.go`里的`requireAccount`/`parseAccountUID`统一校验，
   没创建返回`account_not_found`。但service/repo内部仍有`GetOrCreate`——那是给成交结算、强平这类
   "账户一定存在"的内部流程用的，不要在新的对外接口里用它。
+- **账户冻结（`status=frozen`）拦新增风险、不拦降低风险**：API层`rejectIfFrozen`拦下单/条件单/改杠杆，
+  引擎层`submitOrder`撮合前再兜底一次（撤单退款）。别跟挂单的"冻结保证金"`frozen_margin`搞混，见
+  [account-and-margin.md](account-and-margin.md)"账户状态"。
 - **错误响应有`code`和`errCode`两层**：`code`是粗粒度的400/429/500，`errCode`是稳定的机器
   可读小写下划线错误码（`insufficient_margin`），定义在`internal/api/errors.go`。新增有业务
   含义的失败要用`failC`指定`errCode`，只有没有专门含义的才用`fail`走兜底。

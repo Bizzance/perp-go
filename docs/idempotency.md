@@ -12,7 +12,7 @@
 |------------------------|-------------------------------------------------------------------------------|-----------------------------------------------|--------------------------|
 | 累加/创建类（相对量）  | `/account/balance`、`/account/credit`、`/order/add`、`/order/conditional/add` | 有：重复入账、额度翻倍、重复下单、重复冻结    | 幂等键 `requestId`       |
 | 状态推进类             | `/account/round/close`                                                        | 有：把已经进入的下一轮又结束一次              | 幂等键 `round`（版本号） |
-| 设为目标值类（绝对量） | `/position/leverage`、`/account/insured`、`/index-price`                      | 无：重复设置结果不变                          | 天然幂等，不需要         |
+| 设为目标值类（绝对量） | `/position/leverage`、`/account/insured`、`/account/status`、`/index-price`                    | 无：重复设置结果不变                          | 天然幂等，不需要         |
 | 撤销类                 | 撤单、条件单撤销、`/order/cancel-all`                                         | 无副作用，重复调用返回 `order_not_cancelable` | 天然幂等，不需要         |
 | 查询类                 | 所有 `GET`                                                                    | 无                                            | 天然幂等                 |
 

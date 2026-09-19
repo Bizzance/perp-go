@@ -20,10 +20,27 @@ CREATE TABLE IF NOT EXISTS accounts (
   frozen_margin  DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT '挂单冻结保证金(来自available的部分)',
   frozen_credit  DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT '挂单冻结保证金(来自credit的部分)，必须单独记账才能精确退回',
   version        INT UNSIGNED NOT NULL DEFAULT 0 COMMENT '乐观锁版本号，MVP阶段原子UPDATE为主，这个字段先留着备用',
+  status         ENUM('active','frozen') NOT NULL DEFAULT 'active' COMMENT 'frozen=禁止开仓/条件开仓/改杠杆，仍允许平仓、撤单、查询、结束本轮和运营的资金操作',
+  status_reason  VARCHAR(255) NOT NULL DEFAULT '' COMMENT '最近一次状态变更的原因',
+  status_time    BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '最近一次状态变更的毫秒时间戳，0=从没变更过',
   created_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   updated_at     DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP,
   PRIMARY KEY (id),
   UNIQUE KEY uk_accounts_uid (uid)
+) ENGINE=InnoDB;
+
+-- 账户状态变更历史：每次冻结/解冻记一行，谁(哪把API密钥)、什么时候、因为什么。这是管理类操作，
+-- 出了纠纷要能追溯，所以单独留一张表，不靠日志
+CREATE TABLE IF NOT EXISTS account_status_history (
+  id           BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
+  uid          BIGINT UNSIGNED NOT NULL,
+  from_status  ENUM('active','frozen') NOT NULL,
+  to_status    ENUM('active','frozen') NOT NULL,
+  reason       VARCHAR(255) NOT NULL DEFAULT '',
+  operator     VARCHAR(64) NOT NULL DEFAULT '' COMMENT '执行变更的API密钥id，鉴权关闭(本地开发)时为空',
+  create_time  BIGINT UNSIGNED NOT NULL,
+  PRIMARY KEY (id),
+  KEY idx_account_status_history_uid (uid)
 ) ENGINE=InnoDB;
 
 -- 合约配置：维持保证金率/最大杠杆按名义价值分档，见下面的risk_limit_tiers表。

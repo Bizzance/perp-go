@@ -213,6 +213,11 @@ Compose 会重建有变化的服务。几点说明：
 把 `IMAGE_TAG` 改回上一个版本再 `up -d`。**数据库结构变更不会自动回滚**：`schema.sql` 只是建表脚本，没有迁移机制
 （见 [architecture.md](architecture.md)"数据库"），涉及表结构变更的版本回滚要单独评估。
 
+**已经有数据的库升级到带新表结构的版本**：`schema.sql` 只有最终形态的 `CREATE TABLE`，不含 `ALTER`，
+对已存在的表不会补新列。测试环境直接重建库（`make compose-test-down` 连卷删掉再起）；生产环境要人工对照
+`schema.sql` 写迁移。举例：账户冻结功能给 `accounts` 加了 `status`/`status_reason`/`status_time` 三列，
+并新增了 `account_status_history` 表。
+
 ### 备份
 
 以 MySQL 为准：自动备份加 binlog，账户、委托、成交、资金流水都在里面。订单簿在引擎重启时从 MySQL 重建。Kafka 里的

@@ -2,6 +2,8 @@ package api
 
 import (
 	"context"
+	"errors"
+	"log"
 	"strconv"
 	"time"
 
@@ -10,6 +12,7 @@ import (
 
 	"perp-go/internal/events"
 	"perp-go/internal/model"
+	"perp-go/internal/service"
 )
 
 // 这个文件是合作方对接需要的"查询类/批量类"接口：合约信息、行情、单笔委托查询、批量撤单、
@@ -310,6 +313,108 @@ func (s *Server) publishCancel(orderID, uid uint64, symbol string) error {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 	return s.producer.Publish(ctx, events.TopicOrderCancel, symbol, events.OrderCancelEvent{OrderID: orderID, UID: uid, Symbol: symbol})
+}
+
+// ---------- 账户状态(冻结/解冻) ----------
+
+type setAccountStatusRequest struct {
+	UID    uint64              `json:"uid" binding:"required"`
+	Status model.AccountStatus `json:"status"`
+	Reason string              `json:"reason"`
+}
+
+type setAccountStatusResult struct {
+	UID     uint64              `json:"uid"`
+	Status  model.AccountStatus `json:"status"`
+	Changed bool                `json:"changed"` // 这次有没有真的改变状态，已经是目标状态就是false
+	// 下面几项只有冻结时才有意义：清理这个账户存量的开仓委托/条件开仓单的结果，含义同cancel-all
+	CancelRequested     int `json:"cancelRequested"`
+	CancelRequestFailed int `json:"cancelRequestFailed"`
+	ConditionalCanceled int `json:"conditionalCanceled"`
+	ConditionalFailed   int `json:"conditionalFailed"`
+}
+
+const maxStatusReasonLen = 255
+
+// 冻结/解冻账户(运营接口)。冻结是"禁止新增风险"：账户不能再开仓、创建条件开仓单、改杠杆，
+// 平仓、撤单、查询、结束本轮、运营的资金操作以及系统的强平/ADL/资金费/结算都不受影响。
+// 冻结成功后顺带把存量的开仓类挂单清掉：普通委托给每笔发一条Kafka撤单事件(异步)，条件开仓单
+// 直接撤销(同步)，强平委托和平仓类挂单不动。清理每次冻结请求都会执行、不管这次有没有改变状态，
+// 所以部分失败后带同样的参数重试本接口就能补完。清理之外还有引擎侧的兜底(冻结前已落库还在
+// Kafka排队的开仓委托、条件单刚好触发落地的委托，引擎撮合前会再查一次账户状态，冻结了就直接撤掉)，
+// 所以不会有"清理时漏掉的开仓单被撮合"的窗口
+func (s *Server) setAccountStatus(c *gin.Context) {
+	var req setAccountStatusRequest
+	if !bindJSON(c, &req) {
+		return
+	}
+	if req.Status != model.AccountStatusActive && req.Status != model.AccountStatusFrozen {
+		fail(c, 400, "status参数不合法，取值 active / frozen")
+		return
+	}
+	if len(req.Reason) > maxStatusReasonLen {
+		fail(c, 400, "reason最长255个字节")
+		return
+	}
+	ctx := c.Request.Context()
+	operator := c.GetString(ctxAPIKeyID)
+
+	_, changed, err := s.accounts.SetStatus(ctx, req.UID, req.Status, req.Reason, operator)
+	if err != nil {
+		if errors.Is(err, service.ErrAccountNotFound) {
+			failC(c, 400, ErrAccountNotFound, "账户不存在，请先调用 POST /account/create 创建")
+			return
+		}
+		fail(c, 500, err.Error())
+		return
+	}
+	if changed {
+		log.Printf("[INFO] 账户状态变更 uid=%d status=%s operator=%q reason=%q", req.UID, req.Status, operator, req.Reason)
+	}
+
+	result := setAccountStatusResult{UID: req.UID, Status: req.Status, Changed: changed}
+	if req.Status == model.AccountStatusFrozen {
+		if err := s.sweepOpenOrders(ctx, req.UID, &result); err != nil {
+			// 状态已经改成功了，只是清理没做完：返回失败让调用方重试(重试时changed=false，清理会重做)
+			fail(c, 500, "账户已冻结，但清理存量开仓挂单失败，请重试本接口: "+err.Error())
+			return
+		}
+	}
+	ok(c, result)
+}
+
+// 冻结后清理这个账户的存量开仓类挂单：普通委托里只撤开仓且不是强平单的，平仓委托保留，
+// 条件单里只撤开仓类的，平仓类的止盈止损保留
+func (s *Server) sweepOpenOrders(ctx context.Context, uid uint64, result *setAccountStatusResult) error {
+	orders, err := s.orders.FindActiveByUID(ctx, uid, "")
+	if err != nil {
+		return err
+	}
+	for _, o := range orders {
+		if o.Action != model.ActionOpen || o.Liquidation {
+			continue
+		}
+		if err := s.publishCancel(o.OrderID, o.UID, o.Symbol); err != nil {
+			result.CancelRequestFailed++
+			continue
+		}
+		result.CancelRequested++
+	}
+	pending, err := s.conditionalOrders.FindActiveByUID(ctx, uid, "")
+	if err != nil {
+		return err
+	}
+	for _, co := range pending {
+		if co.Action != model.ActionOpen {
+			continue
+		}
+		if err := s.cancelPendingConditional(ctx, co); err != nil {
+			result.ConditionalFailed++
+			continue
+		}
+		result.ConditionalCanceled++
+	}
+	return nil
 }
 
 // ---------- 资金流水 / 强平记录 ----------

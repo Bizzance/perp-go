@@ -23,7 +23,9 @@ MySQL的`orders`表里，这笔委托的`status`依然正确地是`open`/`partia
    相对先后时兜底提供更细的顺序
 2. 依次把每一笔按顺序 **重放进撮合**（`submitOrder`，正常下单走的那条"先`Match`再`Rest`"的
    路径）。纯挂单（没有产生成交）时不推送深度和账户快照，避免恢复大订单簿时产生成千上万次
-   Redis发布和数据库查询；只有重放真的产生了成交才推送
+   Redis发布和数据库查询；只有重放真的产生了成交才推送。重放同样要过账户冻结检查：已冻结账户的
+   开仓委托（冻结清理没做完就重启的残留）在这里被撤销并退款，不会重新挂回订单簿，
+   见 [account-and-margin.md](account-and-margin.md)"账户状态"
 
 只查`type = 'limit'`：MARKET单不管成交与否都从不挂在订单簿上（撮合后没吃掉的剩余部分
 直接终结成`canceled`、不排队等待，见 [known-limitations.md](known-limitations.md)"已经

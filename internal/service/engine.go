@@ -180,6 +180,30 @@ func (e *EngineService) submitOrder(ctx context.Context, order *model.Order, ent
 		return false, nil
 	}
 
+	// 冻结账户不能再新增风险：开仓委托(强平单不算，那是系统降风险的动作)在撮合前直接撤掉、
+	// 退回冻结的保证金。API层下单时已经拦过一遍，这里是兜底——冻结前已经落库、还在Kafka里排队
+	// 的委托，条件单触发后新落地的开仓委托，以及重启恢复时重放的开仓委托，都会走到这里。
+	// 查询出错就返回错误、不往下撮合(失败关闭)：不能因为查不出账户状态就让冻结账户的开仓单成交。
+	// 代价是这笔委托在数据库里还是活跃状态、却没进订单簿：Kafka消费者对处理失败的消息只记日志、
+	// 不重试，要等下次引擎重启恢复订单簿时才会被重新处理(用户在这之前可以撤单，撤单不依赖订单簿里有没有它)，
+	// 跟提交路径上其它数据库出错的处理方式一致
+	if order.Action == model.ActionOpen && !order.Liquidation {
+		frozen, err := e.accounts.IsFrozen(ctx, order.UID)
+		if err != nil {
+			return false, fmt.Errorf("查询账户冻结状态失败, uid=%d: %w", order.UID, err)
+		}
+		if frozen {
+			log.Printf("[INFO] uid=%d 账户已冻结，撤销开仓委托 orderId=%d", order.UID, order.OrderID)
+			if _, err := e.cancelAndReleaseMargin(ctx, order, order.RemainingAmount()); err != nil {
+				return false, fmt.Errorf("撤销冻结账户的开仓委托失败, orderId=%d: %w", order.OrderID, err)
+			}
+			// 恢复时也要推：这是账户的挂单真的少了一笔，不是"重启前早就推送过"的纯挂单重放，
+			// 而且只有冻结账户的残留委托才会走到这里，数量很少，不会有恢复大订单簿时的推送风暴
+			e.push.PublishUserSnapshot(ctx, order.UID)
+			return false, nil
+		}
+	}
+
 	// 进入订单簿的order，只包含了下单的order中的一部分必要数据
 	resting := &matching.RestingOrder{
 		OrderID:     order.OrderID,
