@@ -415,13 +415,15 @@ func sellUID(f matching.Fill) uint64 {
 // 被强平的这个仓位的方向，穿仓分支触发ADL时要用来定位"该向哪个方向的持仓者强制减仓"（跟
 // 被强平方向相反——比如多头被强平是因为价格下跌亏钱，跟这次价格下跌方向相反、真正因为
 // 这次下跌赚钱的是空头，ADL该找空头里最赚钱的仓位，不是随便找）。判断依据是available+
-// credit的合计，不是available单独判断——credit也是账户权益的一部分(见checkAndLiquidate
-// 的equity计算)，穿仓/缓冲的定义要跟触发强平时用的权益口径一致：
+// credit的合计，不是available单独判断——credit也是账户权益的一部分(见Equity)。走到判断的时候
+// 这个uid已经没有仓位了，仓位保证金是0，所以available+credit就是账户权益，跟触发强平时用的
+// 权益口径一致：
+//  0. 前提：这个uid名下已经没有剩余仓位(见函数体里的说明)，还有仓位没平完就什么都不做
 //  1. 合计为负(穿仓)：用户自己的钱和信用额度都耗尽了还倒欠钱。保险基金余额不够覆盖这笔
 //     缺口时，先用ADL(runADL，见adl.go)强制减仓对手方最赚钱的仓位补一部分，补不满剩下的
 //     仍然由基金硬扛(基金余额可能因此变得更负)，这是明确接受的取舍，不是ADL的失败——极端
 //     行情下没有足够的反向盈利仓位可以减，基金兜底是最后一道防线
-//  2. 这个uid已经没有剩余仓位了(这一轮强平彻底结束)、合计为正：这部分是维持保证金要求留下
+//  2. 合计为正：这部分是维持保证金要求留下
 //     的缓冲，不退给用户——真实交易所是按破产价结算、多出来的差价当清算费进保险基金，这里
 //     不改结算价格/撮合逻辑，改成结算完直接把这部分正数余额扫进保险基金、账户清零，经济
 //     结果等价
@@ -429,7 +431,40 @@ func sellUID(f matching.Fill) uint64 {
 // 两种情况下available和credit最终都会被清零——不管available/credit各自是正是负，"结清"
 // 的终态就是两个字段都变成0，保险基金拿走或垫付两者的合计净值，这里不需要区分"先清哪个"：
 // 清算的是两个字段的总和，不是循环着一点点从某个字段里扣，最终状态跟顺序无关
+//
+// 同一个uid的这个结算在锁里串行执行：一个uid的多个仓位是各自异步平仓的，两个仓位几乎同时平完时
+// 会同时进到这里。不串行的话，两边可能读到同一份"缺口"各自垫付一遍，或者一边读余额之后另一边
+// 才把保证金退回账户、拿着过期的余额去结算
 func (e *EngineService) HandleLiquidationSettleAftermath(ctx context.Context, symbol string, uid uint64, side model.Side) error {
+	err := e.lock.WithLock(ctx, fmt.Sprintf("perpgo:lock:liqsettle:%d", uid), func() error {
+		return e.settleLiquidationAftermath(ctx, symbol, uid, side)
+	})
+	if errors.Is(err, ErrLockBusy) {
+		// 拿不到锁说明另一个仓位的结算正在这里长时间持锁——只有全部仓位都平完了才会走到耗时的
+		// 结清/ADL那一步，所以持锁的那个正在处理的就是这个uid的最终结算，这次不用重复做
+		log.Printf("[WARN] 强平后资金结算抢锁失败(大概率是这个uid另一个仓位的结算正在处理), uid=%d", uid)
+		return nil
+	}
+	return err
+}
+
+func (e *EngineService) settleLiquidationAftermath(ctx context.Context, symbol string, uid uint64, side model.Side) error {
+	// 先确认没有剩余仓位，再读余额：反过来的话，读到余额之后别的仓位才平完、保证金才退回来，
+	// 拿到的就是过期的余额。两种结局都要等这个uid已经没有剩余仓位了(这一轮强平彻底结束)才判断：
+	// 全仓强平是这个uid名下全部仓位各自异步平仓，先平完的那个仓位结算之后，available可能因为它的
+	// 亏损暂时为负，但别的仓位占用的保证金还锁在仓位里、平仓时会退回来——这时候就让基金垫付，
+	// 后面的仓位平完保证金回到账上，垫付就成了多余的一进一出，还可能不必要地触发ADL去强减无辜的
+	// 对手方。available为负本来就是全仓下的合法状态，留着不动，由最后一个平完的仓位来结清；
+	// 如果剩下的仓位没有被强平掉，账户权益低于维持保证金的话下一轮风控扫描会继续强平它们
+	positions, err := e.positionSvc.FindByUID(ctx, uid)
+	if err != nil {
+		return err
+	}
+	for _, p := range positions {
+		if p.Volume.Sign() > 0 {
+			return nil
+		}
+	}
 	available, err := e.accounts.FindFreshAvailable(ctx, uid)
 	if err != nil {
 		return err
@@ -439,6 +474,9 @@ func (e *EngineService) HandleLiquidationSettleAftermath(ctx context.Context, sy
 		return err
 	}
 	combined := available.Add(credit)
+	if combined.Sign() == 0 {
+		return nil
+	}
 	if combined.Sign() < 0 {
 		shortfall := combined.Neg()
 		fundBalance, err := e.fund.FreshBalance(ctx)
@@ -457,18 +495,6 @@ func (e *EngineService) HandleLiquidationSettleAftermath(ctx context.Context, sy
 			return err
 		}
 		return e.accounts.SettleToCredit(ctx, uid, credit.Neg())
-	}
-	if combined.Sign() <= 0 {
-		return nil
-	}
-	positions, err := e.positionSvc.FindByUID(ctx, uid)
-	if err != nil {
-		return err
-	}
-	for _, p := range positions {
-		if p.Volume.Sign() > 0 {
-			return nil // 这个uid还有别的仓位没平完，不是这轮强平的最终状态，先不清算
-		}
 	}
 	log.Printf("[WARN] 强平后账户仍有维持保证金缓冲，按清算费扫入保险基金, uid=%d, 缓冲=%s(available=%s, credit=%s)",
 		uid, combined, available, credit)
