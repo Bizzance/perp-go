@@ -366,3 +366,145 @@ func TestLiquidation_ConcurrentAftermathSettlesShortfallOnce(t *testing.T) {
 		t.Fatalf("基金流水应该只有1行, got %d", n)
 	}
 }
+
+// ---- 强平时撤挂单(币安/OKX全仓强平的做法) ----
+
+// 强平触发时先撤掉这个uid的全部挂单和条件单(含条件平仓单)，冻结的保证金退回账户，再处理仓位；
+// 别的账户的挂单不受影响。之前不撤的话，结算只看available+credit，挂单冻结的保证金被漏算：
+// 这里available会被亏到-705.75、基金垫付705.75，之后撤单退回700，账户白拿700
+// a充值1500：多头0.1@65000(保证金650、开仓手续费3.25)，挂开仓限价单冻结600，条件开仓单冻结100，
+// 另有一笔条件平仓单。标记价跌到50000：权益=146.75+700冻结+650仓位保证金-1500亏损=-3.25，触发强平。
+// 撤单后可用=846.75，平仓亏1500、手续费2.5、保证金650退回，可用=-5.75，这就是真实缺口
+func TestLiquidation_TriggerCancelsAllPendingOrdersAndSettlesRealShortfall(t *testing.T) {
+	e := newEngineEnv(t)
+	ctx := context.Background()
+	a := e.newAccount(t, 1, "1500")
+	b := e.newAccount(t, 2, "10000")
+	c := e.newAccount(t, 3, "10000")
+	e.openLongAgainst(t, a, b, testSymbol, "65000", "0.1", "650")
+
+	rest := e.insertOrder(t, a, orderOpts{side: model.SideLong, action: model.ActionOpen, price: "60000", amount: "0.1", margin: "600"})
+	if err := e.engine.SubmitOrder(ctx, rest, 3); err != nil {
+		t.Fatal(err)
+	}
+	if ok, err := e.accountRepo.FreezeFromAvailable(ctx, e.account(t, a).ID, decimalOf(t, "100")); err != nil || !ok {
+		t.Fatalf("冻结条件单保证金: ok=%v err=%v", ok, err)
+	}
+	condOpen := newConditionalOpen(e, a, "90000", "0.05", "100")
+	condClose := newConditionalOpen(e, a, "90000", "0.05", "0")
+	condClose.Action = model.ActionClose
+	for _, co := range []*model.ConditionalOrder{condOpen, condClose} {
+		if err := e.conditional.Insert(ctx, co); err != nil {
+			t.Fatal(err)
+		}
+	}
+	// c的挂单价格要低于a的强平保护价(50000-50000*0.4%*2=49600)，否则会被强平单当对手盘吃掉
+	otherOrder := e.insertOrder(t, c, orderOpts{side: model.SideLong, action: model.ActionOpen, price: "40000", amount: "0.1", margin: "400"})
+	if err := e.engine.SubmitOrder(ctx, otherOrder, 4); err != nil {
+		t.Fatal(err)
+	}
+	mustDec(t, e.account(t, a).FrozenMargin, "700", "强平前挂单+条件单冻结")
+	e.setFundBalance(t, "100000")
+	e.setMark(t, testSymbol, "50000")
+
+	e.liq.RiskScanOnce(ctx)
+	// 触发时的撤单是同步做的，RiskScanOnce一返回就已经生效，不用等异步的强平走完。这一条能区分
+	// "触发时先撤"和"只靠结算前的兜底撤"：后者要等强平走完才撤，两者最终账目一样
+	if got := e.order(t, rest.OrderID).Status; got != model.OrderStatusCanceled {
+		t.Fatalf("触发强平时挂单应该立刻被撤销, status=%s", got)
+	}
+	if e.book.BookFor(testSymbol).Contains(rest.OrderID) {
+		t.Fatal("被撤销的挂单应该立刻摘出订单簿")
+	}
+	e.waitLiquidationDone(t, a, 1)
+
+	for _, id := range []uint64{condOpen.OrderID, condClose.OrderID} {
+		var st model.ConditionalOrderStatus
+		if err := e.db.Get(&st, `SELECT status FROM conditional_orders WHERE order_id = ?`, id); err != nil || st != model.ConditionalStatusCanceled {
+			t.Fatalf("条件单%d应该被撤销(含条件平仓单), status=%s err=%v", id, st, err)
+		}
+	}
+	if got := e.order(t, otherOrder.OrderID).Status; got != model.OrderStatusOpen {
+		t.Fatalf("别的账户的挂单不能被撤, status=%s", got)
+	}
+
+	acc := e.account(t, a)
+	mustDec(t, acc.FrozenMargin, "0", "冻结保证金全部退回")
+	mustDec(t, acc.Available, "0", "缺口由基金垫付后账户清零")
+	mustDec(t, e.fundLedgerAmount(t, "强平穿仓垫付"), "-5.75", "垫付的是真实缺口，不是被漏算了挂单保证金的705.75")
+	mustDec(t, e.fundBalance(t), "99994.25", "基金余额")
+}
+
+// 兜底：强平窗口期里用户新挂的单，在结算前也要撤掉。这里直接构造"没有仓位、available=-100、
+// 还有一笔挂单冻结600"的状态：真实权益是500，撤单后合计为正，按缓冲扫进基金、账户清零，
+// 用户拿不到那600。不撤的话基金会垫付100、之后撤单退回600，用户白拿
+func TestLiquidation_AftermathCancelsOrdersPlacedDuringLiquidation(t *testing.T) {
+	e := newEngineEnv(t)
+	ctx := context.Background()
+	a := e.newAccount(t, 1, "5000")
+	o := e.insertOrder(t, a, orderOpts{side: model.SideLong, action: model.ActionOpen, price: "60000", amount: "0.1", margin: "600"})
+	if err := e.engine.SubmitOrder(ctx, o, 1); err != nil {
+		t.Fatal(err)
+	}
+	e.setFundBalance(t, "1000")
+	if _, err := e.db.Exec(`UPDATE accounts SET available = -100 WHERE uid = ?`, a); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := e.engine.HandleLiquidationSettleAftermath(ctx, testSymbol, a, model.SideLong); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := e.order(t, o.OrderID).Status; got != model.OrderStatusCanceled {
+		t.Fatalf("结算前应该把窗口期里的挂单撤掉, status=%s", got)
+	}
+	acc := e.account(t, a)
+	mustDec(t, acc.FrozenMargin, "0", "冻结保证金退回")
+	mustDec(t, acc.Available, "0", "合计500是缓冲，扫进基金后账户清零")
+	mustDec(t, e.fundBalance(t), "1500", "基金收到500，没有垫付")
+	mustDec(t, e.fundLedgerAmount(t, "强平穿仓垫付"), "0", "没有穿仓，不应该垫付")
+}
+
+// CancelAllPendingOrders本身：撤用户委托和条件单，强平单不撤(避免SubmitOrder里先结算后挂剩余量
+// 时留下数据库已撤销、订单簿还挂着的幽灵单)，别的账户不动
+func TestCancelAllPendingOrders_SkipsLiquidationOrdersAndOtherAccounts(t *testing.T) {
+	e := newEngineEnv(t)
+	ctx := context.Background()
+	a := e.newAccount(t, 1, "10000")
+	other := e.newAccount(t, 2, "10000")
+	normal := e.insertOrder(t, a, orderOpts{side: model.SideLong, action: model.ActionOpen, price: "60000", amount: "0.1", margin: "600"})
+	liq := e.insertOrder(t, a, orderOpts{side: model.SideLong, action: model.ActionClose, price: "70000", amount: "0.1", liquidation: true})
+	theirs := e.insertOrder(t, other, orderOpts{side: model.SideLong, action: model.ActionOpen, price: "60000", amount: "0.1", margin: "600"})
+	for _, o := range []*model.Order{normal, liq, theirs} {
+		if err := e.engine.SubmitOrder(ctx, o, 1); err != nil {
+			t.Fatal(err)
+		}
+	}
+	cond := newConditionalOpen(e, a, "90000", "0.05", "0")
+	if err := e.conditional.Insert(ctx, cond); err != nil {
+		t.Fatal(err)
+	}
+
+	if failed := e.engine.CancelAllPendingOrders(ctx, a); failed != 0 {
+		t.Fatalf("不应该有撤单失败, got %d", failed)
+	}
+
+	if got := e.order(t, normal.OrderID).Status; got != model.OrderStatusCanceled {
+		t.Fatalf("用户委托应该被撤, status=%s", got)
+	}
+	if got := e.order(t, liq.OrderID).Status; got != model.OrderStatusOpen {
+		t.Fatalf("强平单不能被撤, status=%s", got)
+	}
+	if !e.book.BookFor(testSymbol).Contains(liq.OrderID) {
+		t.Fatal("强平单应该还在订单簿里")
+	}
+	var st model.ConditionalOrderStatus
+	if err := e.db.Get(&st, `SELECT status FROM conditional_orders WHERE order_id = ?`, cond.OrderID); err != nil || st != model.ConditionalStatusCanceled {
+		t.Fatalf("条件单应该被撤, status=%s err=%v", st, err)
+	}
+	if got := e.order(t, theirs.OrderID).Status; got != model.OrderStatusOpen {
+		t.Fatalf("别的账户的委托不能被撤, status=%s", got)
+	}
+	mustDec(t, e.account(t, a).FrozenMargin, "0", "撤单退回冻结保证金")
+	mustDec(t, e.account(t, other).FrozenMargin, "600", "别的账户的冻结不变")
+}

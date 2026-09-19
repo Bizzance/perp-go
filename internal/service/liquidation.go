@@ -97,6 +97,11 @@ func (s *LiquidationService) checkAndLiquidate(ctx context.Context, uid uint64) 
 		return nil
 	}
 	log.Printf("[WARN] 触发全仓联合强平, uid=%d, 账户权益=%s, 维持保证金要求=%s, 仓位数=%d", uid, equity, maintainTotal, len(pending))
+	// 先撤掉这个uid的全部挂单和条件单，再处理仓位(币安、OKX的全仓强平都是这个顺序)。不需要撤单之后
+	// 重新评估要不要强平：权益已经把挂单冻结的保证金算进去了，撤单只是钱从冻结挪回available，权益不变
+	if failed := s.engine.CancelAllPendingOrders(ctx, uid); failed > 0 {
+		log.Printf("[ERROR] 强平前撤挂单有%d笔失败, uid=%d, 继续强平", failed, uid)
+	}
 	for _, p := range pending {
 		if !s.engine.OwnsSymbol(p.Symbol) {
 			// 分片部署下(docs/engine-sharding.md)风控扫描在每个实例上都独立跑一遍(全仓强平

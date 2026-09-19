@@ -465,6 +465,11 @@ func (e *EngineService) settleLiquidationAftermath(ctx context.Context, symbol s
 			return nil
 		}
 	}
+	// 兜底：强平触发时已经撤过一遍挂单，但强平窗口期里用户可能又挂了新单。这些单冻结的保证金
+	// 不在下面的available+credit里，不撤的话结算时被漏算：available为负时基金照常垫付，之后撤单把
+	// 冻结的保证金退回账户，用户拿到的比真实权益多。撤单失败已经记了ERROR日志，这里不中断结算——
+	// 中断的话账户会停在"没有仓位、available为负"的状态，没有任何后续动作会再来结清它
+	e.CancelAllPendingOrders(ctx, uid)
 	available, err := e.accounts.FindFreshAvailable(ctx, uid)
 	if err != nil {
 		return err
@@ -505,6 +510,41 @@ func (e *EngineService) settleLiquidationAftermath(ctx context.Context, symbol s
 		return err
 	}
 	return e.accounts.SettleToCredit(ctx, uid, credit.Neg())
+}
+
+// 撤掉这个uid全部还没成交的用户委托和还没触发的条件单，返回撤单失败的笔数(失败的已经记了ERROR日志)。
+// 强平用：币安、OKX的全仓强平都是先撤掉账户全部挂单(含条件单/机器人单)再处理仓位，见docs/liquidation.md。
+// 这样冻结在挂单里的保证金退回账户，不会在强平结算时被漏算；账户风险已经触及强平线，也不该再让新的
+// 成交增加仓位。强平单本身不撤：强平单的成交结算是在SubmitOrder里先于"挂剩余量"执行的，这时候
+// 把它标成已撤销，SubmitOrder接着还会把剩余量挂进订单簿，留下一笔数据库里已撤销、簿子里还挂着的幽灵单。
+// 分片部署下只撤自己拥有的symbol的挂单(别的实例的订单簿摸不到)，条件单只碰MySQL，不受分片限制
+func (e *EngineService) CancelAllPendingOrders(ctx context.Context, uid uint64) (failed int) {
+	orders, err := e.orders.FindActiveByUID(ctx, uid, "")
+	if err != nil {
+		log.Printf("[ERROR] 强平撤挂单：查询委托失败, uid=%d: %v", uid, err)
+		return 1
+	}
+	for i := range orders {
+		if orders[i].Liquidation || !e.OwnsSymbol(orders[i].Symbol) {
+			continue
+		}
+		if err := e.CancelOrder(ctx, &orders[i]); err != nil {
+			log.Printf("[ERROR] 强平撤挂单失败, uid=%d, orderId=%d: %v", uid, orders[i].OrderID, err)
+			failed++
+		}
+	}
+	conditional, err := e.conditionalOrders.FindActiveByUID(ctx, uid, "")
+	if err != nil {
+		log.Printf("[ERROR] 强平撤条件单：查询失败, uid=%d: %v", uid, err)
+		return failed + 1
+	}
+	for _, co := range conditional {
+		if err := e.cancelConditionalOrder(ctx, co); err != nil {
+			log.Printf("[ERROR] 强平撤条件单失败, uid=%d, orderId=%d: %v", uid, co.OrderID, err)
+			failed++
+		}
+	}
+	return failed
 }
 
 // 用户主动结束本轮：先撤掉这个uid全部还在排队的委托(跨所有symbol)，再按各自
