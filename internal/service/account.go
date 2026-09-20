@@ -106,7 +106,12 @@ type FreezeResult struct {
 	FromCredit    decimal.Decimal
 }
 
-// 挂单开仓冻结保证金，四级路径依次尝试：
+// 挂单开仓冻结保证金。先做一道买力预检：账户有浮亏时，买力是available+credit减掉浮亏，不够就直接拒绝，
+// 不管available本身够不够——币安的可用余额=钱包余额-初始保证金+未实现盈亏，浮亏直接减少可用余额，OKX也是
+// 从计入未实现盈亏的调整后权益算起。不这样的话，账户浮亏累累甚至已经满足强平条件，只要available还是正数就能
+// 继续开新仓；反过来，账户进入强平条件时(权益<=维持保证金<初始保证金)买力必然为负，新开仓自然被拒，
+// 不需要单独加"强平期间拒绝新单"的规则。浮盈不在预检里放宽，只在下面的第3级才能当买力。
+// 预检之后，四级路径依次尝试：
 //  1. available够 → 全部从available冻结
 //  2. available不够，available+credit够 → 缺口从credit冻结
 //  3. 前两级都不够，available+credit+全部持仓未实现盈亏够 → 币安式"持仓浮盈也能当买力
@@ -117,6 +122,13 @@ func (s *AccountService) FreezeMargin(ctx context.Context, uid uint64, amount de
 	account, err := s.accounts.GetOrCreate(ctx, uid)
 	if err != nil {
 		return FreezeResult{}, err
+	}
+	totalUnrealized, err := s.positions.TotalUnrealizedPnl(ctx, uid)
+	if err != nil {
+		return FreezeResult{}, err
+	}
+	if totalUnrealized.Sign() < 0 && account.Available.Add(account.Credit).Add(totalUnrealized).LessThan(amount) {
+		return FreezeResult{}, ErrInsufficientMargin
 	}
 	ok, err := s.accounts.FreezeFromAvailable(ctx, account.ID, amount)
 	if err != nil {
@@ -147,10 +159,6 @@ func (s *AccountService) FreezeMargin(ctx context.Context, uid uint64, amount de
 		}
 	}
 
-	totalUnrealized, err := s.positions.TotalUnrealizedPnl(ctx, uid)
-	if err != nil {
-		return FreezeResult{}, err
-	}
 	// 浮盈是跨symbol聚合持仓表+标记价格算出来的，没法像available/credit那样表达成一条
 	// SQL条件、交给数据库原子核对——这里能做的是在真正调用FreezeForceIntoNegative之前，
 	// 尽量贴近地重新读一次available/credit(不复用freshAvailable/freshCredit这两个更早

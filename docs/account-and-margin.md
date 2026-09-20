@@ -67,8 +67,19 @@
 
 ## 冻结保证金的四级路径（`FreezeMargin`）
 
-开仓下单时，`requiredMargin`按四级路径依次尝试冻结，返回`FreezeResult{FromAvailable,
-FromCredit}`告诉调用方这笔钱分别从两个来源各拿了多少：
+开仓下单时，`requiredMargin`先过一道**买力预检**，再按四级路径依次尝试冻结，返回`FreezeResult{FromAvailable,
+FromCredit}`告诉调用方这笔钱分别从两个来源各拿了多少。
+
+**买力预检：账户有浮亏时，买力是`available + credit`减掉浮亏，不够就直接拒绝**，不管`available`本身够不够。
+币安的可用余额 = 钱包余额 − 初始保证金 + 未实现盈亏（[币安说明](https://www.binance.com/en/blog/futures/what-is-the-available-balance-margin-balance-and-total-balance-on-binance-futures-457299340443288694)），
+浮亏直接减少可用余额；OKX的可用保证金也是从计入未实现盈亏的调整后权益算起。早期实现前两级只看余额、
+不扣浮亏，账户浮亏累累甚至已经满足强平条件，只要`available`还是正数就能继续冻结保证金开新仓（探针复现：
+权益21.75 <= 维持保证金22.1、浮亏975、`available`346.75时能冻结340）。按这个口径，账户进入强平条件
+（权益 <= 维持保证金 < 初始保证金）时买力必然为负，新开仓自然被拒，所以不需要单独加"强平期间拒绝新单"的规则，
+代码里也没有按仓位`liquidating`状态拦截。下单、创建条件单、降杠杆补保证金都走这个检查。
+浮盈不在预检里放宽，只在第3级才能当买力。
+
+预检之后的四级路径：
 
 1. **`available`够** → 全部从`available`冻结，`FromCredit`为0
 2. **`available`不够，但`available + credit`够** → 缺口部分从`credit`冻结
