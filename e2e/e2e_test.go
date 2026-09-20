@@ -423,9 +423,16 @@ func TestE2E_99_EngineRestartRecoversOrderBookAndKeepsConsuming(t *testing.T) {
 		return e.depthHasBid(t, price), "订单簿里还没有" + price
 	})
 
+	started := time.Now()
 	out, err := exec.Command("sh", "-c", e.restartEngineCmd).CombinedOutput()
 	if err != nil {
 		t.Fatalf("重启引擎失败: %v\n%s", err, out)
+	}
+	// 引擎要能很快关闭：kafka-go拉取的MaxWait默认10秒，Reader.Close()要等它，三个消费者顺序关闭实测要
+	// 15到26秒，逼近compose的30秒停止宽限期；改成500ms之后整个重启(关闭+启动)只要几秒。这里给个宽松
+	// 的上限，回退到默认值就会超
+	if took := time.Since(started); took > 12*time.Second {
+		t.Fatalf("重启引擎耗时%s，超过12秒：消费者关闭太慢，检查mq.NewConsumer的MaxWait", took)
 	}
 	eventually(t, "引擎重启后健康", 60*time.Second, func() (bool, string) {
 		resp, err := http.Get(e.engineURL + "/health")

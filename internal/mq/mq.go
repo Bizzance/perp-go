@@ -51,6 +51,12 @@ func NewConsumer(brokers []string, topic, groupID string) *Consumer {
 			// 消费者这时加入消费者组拿到的分区数是0，之后topic建出来了它也不会自己发现，一直空转
 			// 消费不到任何消息。打开分区变化监听，周期性检查分区数变化、变了就触发重新分配，
 			// 这种"先启动消费者、后有topic"的顺序就能自己恢复，不需要人工重启引擎
+			// 拉取的最长等待时间。kafka-go默认10秒：没有新消息时broker最多挂10秒才返回，Reader.Close()要等
+			// 这次进行中的拉取返回，三个消费者又是顺序关闭，引擎关闭实测要15到26秒，逼近compose的30秒
+			// 停止宽限期(被强杀的话消费者没有退出消费者组，新实例要等会话超时才能拿到分区)。改成500ms后
+			// 实测降到1秒左右。对消息延迟没有影响：有数据时broker立刻返回，MaxWait只决定没数据时最多
+			// 等多久；代价是空闲时每个消费者每秒多约2次拉取请求，可以忽略
+			MaxWait:                500 * time.Millisecond,
 			WatchPartitionChanges:  true,
 			PartitionWatchInterval: 5 * time.Second,
 		}),
