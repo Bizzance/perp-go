@@ -89,3 +89,34 @@ services:
       engine:
         condition: service_healthy
     logging: *logging
+
+  # 指数价喂价：从币安、OKX、Bybit取指数价，取中位数后推给api的POST /index-price。标记价靠它做锚，
+  # 喂价断了强平会暂停，见docs/index-feeder.md。**生产必须开**：在deploy/.env里设COMPOSE_PROFILES=feeder。
+  # 测试环境默认不开(模拟客户端的系统做市在喂指数价，两个喂价方会互相覆盖)。
+  # 需要ops权限的密钥，FEEDER_API_KEY_ID/FEEDER_API_SECRET要跟PERP_API_KEYS里的一把对上
+  feeder:
+    profiles: ["feeder"]
+    image: perp-go/feeder:${IMAGE_TAG:-latest}
+    build:
+      context: ..
+      dockerfile: deploy/Dockerfile
+      target: feeder
+      args:
+        GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
+    restart: unless-stopped
+    environment:
+      TZ: ${TZ:-UTC}
+      FEEDER_API_URL: http://api:7001
+      FEEDER_API_KEY_ID: ${FEEDER_API_KEY_ID:-}
+      FEEDER_API_SECRET: ${FEEDER_API_SECRET:-}
+      FEEDER_SYMBOLS: ${FEEDER_SYMBOLS:-}
+      FEEDER_SOURCES: ${FEEDER_SOURCES:-}
+      FEEDER_MIN_SOURCES: ${FEEDER_MIN_SOURCES:-}
+      FEEDER_OUTLIER: ${FEEDER_OUTLIER:-}
+      FEEDER_MAX_JUMP: ${FEEDER_MAX_JUMP:-}
+      FEEDER_JUMP_CONFIRM: ${FEEDER_JUMP_CONFIRM:-}
+      FEEDER_INTERVAL_MS: ${FEEDER_INTERVAL_MS:-}
+    depends_on:
+      api:
+        condition: service_healthy
+    logging: *logging
