@@ -1,0 +1,313 @@
+package main
+
+import (
+	"bytes"
+	"crypto/rand"
+	"embed"
+	"encoding/hex"
+	"encoding/json"
+	"io"
+	"io/fs"
+	"log"
+	"net"
+	"net/http"
+	"net/url"
+	"strconv"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/gorilla/websocket"
+	"github.com/shopspring/decimal"
+
+	"perp-go/internal/api"
+)
+
+//go:embed web
+var webFS embed.FS
+
+// 页面调用代理时必须带的请求头。浏览器里的跨站脚本没法在不触发CORS预检的前提下加自定义请求头，
+// 而这个代理不响应预检，所以别的网站的页面没法借用户的浏览器去调这个持有ops密钥的代理
+const guardHeader = "X-Sim-Client"
+
+type server struct {
+	cfg    config
+	signer signer
+	client *http.Client
+	maker  *maker // 没配币安地址时为nil
+}
+
+func newServer(cfg config) *server {
+	s := &server{cfg: cfg, signer: signer{keyID: cfg.keyID, secret: cfg.secret}, client: &http.Client{Timeout: 20 * time.Second, CheckRedirect: noRedirect}}
+	if cfg.binanceURL != "" {
+		mc := defaultMakerConfig()
+		if cfg.makerSymbols != "" {
+			mc.symbols = strings.Split(cfg.makerSymbols, ",")
+		}
+		if cfg.makerBaseUID != 0 {
+			mc.baseUID = cfg.makerBaseUID
+		}
+		if cfg.makerLevels > 0 {
+			mc.levels = cfg.makerLevels
+		}
+		if sc, err := decimal.NewFromString(cfg.makerScale); err == nil && sc.Sign() > 0 {
+			mc.scale = sc
+		}
+		if cfg.makerInterval > 0 {
+			mc.interval = cfg.makerInterval
+		}
+		s.maker = newMaker(mc, &apiClient{base: cfg.apiURL, signer: s.signer, http: &http.Client{Timeout: 15 * time.Second, CheckRedirect: noRedirect}}, newBinanceClient(cfg.binanceURL))
+	}
+	return s
+}
+
+// 不跟随重定向：请求带着签名头，跟着重定向去了别的地址就把签名(和API Key)送出去了；后端本来也不会重定向
+func noRedirect(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
+
+func (s *server) routes() http.Handler {
+	mux := http.NewServeMux()
+	mux.Handle("/api/", s.guard(s.forward(s.cfg.apiURL, "/api")))
+	mux.Handle("/engine/", s.guard(s.forward(s.cfg.engineURL, "/engine")))
+	mux.Handle("/ws", s.guardWS(http.HandlerFunc(s.ws)))
+	mux.Handle("/sim/config", s.guard(http.HandlerFunc(s.simConfig)))
+	mux.Handle("/sim/maker", s.guard(http.HandlerFunc(s.makerStatus)))
+	mux.Handle("/sim/maker/", s.guard(http.HandlerFunc(s.makerAction)))
+	sub, err := fs.Sub(webFS, "web")
+	if err != nil {
+		log.Fatal(err)
+	}
+	static := http.FileServer(http.FS(sub))
+	mux.Handle("/", http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.Header().Set("Cache-Control", "no-store") // 开发工具：改了页面刷新就要生效
+		static.ServeHTTP(w, r)
+	}))
+	return s.hostCheck(mux)
+}
+
+// 只接受用回环名字访问的请求，防DNS重绑定：攻击者的域名解析到127.0.0.1后，浏览器发出的请求Host头
+// 仍然是攻击者的域名，这里就能识别出来拒绝
+func (s *server) hostCheck(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !s.hostAllowed(r.Host) {
+			http.Error(w, "forbidden host", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func (s *server) hostAllowed(hostport string) bool {
+	if s.cfg.allowRemote {
+		return true
+	}
+	host, _, err := net.SplitHostPort(hostport)
+	if err != nil {
+		host = hostport
+	}
+	if host == "localhost" {
+		return true
+	}
+	ip := net.ParseIP(strings.Trim(host, "[]"))
+	return ip != nil && ip.IsLoopback()
+}
+
+func (s *server) guard(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Header.Get(guardHeader) == "" {
+			http.Error(w, "missing "+guardHeader, http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+// WebSocket握手没法带自定义请求头，改校验Origin：必须是本代理自己的页面发起的
+func (s *server) guardWS(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if !sameOrigin(r) {
+			http.Error(w, "forbidden origin", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
+}
+
+func sameOrigin(r *http.Request) bool {
+	origin := r.Header.Get("Origin")
+	if origin == "" {
+		return false
+	}
+	u, err := url.Parse(origin)
+	return err == nil && u.Host == r.Host
+}
+
+// ---- 签名 ----
+
+type signer struct{ keyID, secret string }
+
+// 生成签名请求头，签名直接用生产代码里的api.SignRequest，跟合作方对接用的是同一套。
+// 没配密钥返回nil(不签名)
+func (s signer) headers(method, escapedPath, rawQuery string, body []byte) http.Header {
+	if s.keyID == "" {
+		return nil
+	}
+	ts := strconv.FormatInt(time.Now().UnixMilli(), 10)
+	nb := make([]byte, 12)
+	_, _ = rand.Read(nb)
+	nonce := hex.EncodeToString(nb)
+	h := http.Header{}
+	h.Set("X-Api-Key", s.keyID)
+	h.Set("X-Timestamp", ts)
+	h.Set("X-Nonce", nonce)
+	h.Set("X-Signature", api.SignRequest(s.secret, ts, nonce, method, escapedPath, rawQuery, body))
+	return h
+}
+
+// ---- HTTP转发 ----
+
+const maxBodyBytes = 1 << 20
+
+// 把页面的请求原样(方法、路径、查询串、请求体)签名后转发给上游，响应原样回给页面。
+// 路径用EscapedPath、查询串用原始字符串签名，跟服务端验签用的是同一份
+func (s *server) forward(base, strip string) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		body, err := io.ReadAll(http.MaxBytesReader(w, r.Body, maxBodyBytes))
+		if err != nil {
+			http.Error(w, "request body too large", http.StatusRequestEntityTooLarge)
+			return
+		}
+		target, err := url.Parse(base + strings.TrimPrefix(r.URL.EscapedPath(), strip))
+		if err != nil {
+			http.Error(w, "bad path", http.StatusBadRequest)
+			return
+		}
+		target.RawQuery = r.URL.RawQuery
+		req, err := http.NewRequestWithContext(r.Context(), r.Method, target.String(), bytes.NewReader(body))
+		if err != nil {
+			http.Error(w, err.Error(), http.StatusBadRequest)
+			return
+		}
+		if ct := r.Header.Get("Content-Type"); ct != "" {
+			req.Header.Set("Content-Type", ct)
+		}
+		for k, v := range s.signer.headers(r.Method, target.EscapedPath(), target.RawQuery, body) {
+			req.Header[k] = v
+		}
+		resp, err := s.client.Do(req)
+		if err != nil {
+			writeJSON(w, http.StatusBadGateway, map[string]any{"code": 502, "errCode": "upstream_unreachable", "message": "连不上后端: " + err.Error()})
+			return
+		}
+		defer resp.Body.Close()
+		if ct := resp.Header.Get("Content-Type"); ct != "" {
+			w.Header().Set("Content-Type", ct)
+		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
+	})
+}
+
+func writeJSON(w http.ResponseWriter, status int, v any) {
+	w.Header().Set("Content-Type", "application/json; charset=utf-8")
+	w.WriteHeader(status)
+	_ = json.NewEncoder(w).Encode(v)
+}
+
+func (s *server) simConfig(w http.ResponseWriter, r *http.Request) {
+	writeJSON(w, http.StatusOK, map[string]any{
+		"authEnabled":    s.cfg.keyID != "",
+		"apiURL":         s.cfg.apiURL,
+		"makerAvailable": s.maker != nil,
+	})
+}
+
+// ---- 系统做市的开关和状态 ----
+
+func (s *server) makerStatus(w http.ResponseWriter, r *http.Request) {
+	if s.maker == nil {
+		writeJSON(w, http.StatusOK, map[string]any{"available": false})
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"available": true, "status": s.maker.snapshot()})
+}
+
+func (s *server) makerAction(w http.ResponseWriter, r *http.Request) {
+	if s.maker == nil || r.Method != http.MethodPost {
+		http.Error(w, "not available", http.StatusNotFound)
+		return
+	}
+	switch strings.TrimPrefix(r.URL.Path, "/sim/maker/") {
+	case "start":
+		s.maker.start()
+	case "stop":
+		s.maker.stop()
+	case "offset":
+		pct, err := decimal.NewFromString(r.URL.Query().Get("pct"))
+		if err == nil {
+			err = s.maker.setTarget(pct)
+		}
+		if err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"code": 400, "message": err.Error()})
+			return
+		}
+	case "reset":
+		if err := s.maker.reset(); err != nil {
+			writeJSON(w, http.StatusOK, map[string]any{"code": 500, "message": err.Error()})
+			return
+		}
+	default:
+		http.NotFound(w, r)
+		return
+	}
+	writeJSON(w, http.StatusOK, map[string]any{"code": 200, "status": s.maker.snapshot()})
+}
+
+// ---- WebSocket中继 ----
+
+var upgrader = websocket.Upgrader{CheckOrigin: sameOrigin}
+
+func wsURL(httpURL string) string {
+	return "ws" + strings.TrimPrefix(httpURL, "http")
+}
+
+// 页面 <-> 代理 <-> contract-api的/ws。上游握手由代理签名；之后订阅、推送都是原样中继
+func (s *server) ws(w http.ResponseWriter, r *http.Request) {
+	browser, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		return
+	}
+	defer browser.Close()
+
+	up, resp, err := websocket.DefaultDialer.Dial(wsURL(s.cfg.apiURL)+"/ws", s.signer.headers("GET", "/ws", "", nil))
+	if err != nil {
+		msg := "连不上后端WebSocket: " + err.Error()
+		if resp != nil {
+			// 握手被拒时后端返回的是普通JSON响应(比如鉴权失败)，把里面的信息带给页面
+			b, _ := io.ReadAll(io.LimitReader(resp.Body, 2048))
+			resp.Body.Close()
+			msg += " " + string(b)
+		}
+		_ = browser.WriteJSON(map[string]any{"channel": "sim:error", "data": msg})
+		return
+	}
+	defer up.Close()
+
+	var once sync.Once
+	done := make(chan struct{})
+	finish := func() { once.Do(func() { close(done) }) }
+	relay := func(from, to *websocket.Conn) {
+		defer finish()
+		for {
+			mt, msg, err := from.ReadMessage()
+			if err != nil {
+				return
+			}
+			if err := to.WriteMessage(mt, msg); err != nil {
+				return
+			}
+		}
+	}
+	go relay(browser, up)
+	go relay(up, browser)
+	<-done
+}

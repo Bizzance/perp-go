@@ -1,0 +1,146 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>perp-go 模拟客户端</title>
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+<header class="topbar">
+  <div class="brand">perp-go 模拟客户端 <span class="tag">内部测试</span></div>
+  <select id="symbol" title="合约"></select>
+  <div class="ticker" id="ticker"></div>
+  <div class="spacer"></div>
+  <button id="makerPill" class="pill off" title="系统做市(镜像币安盘口)，点击打开详情">做市: -</button>
+  <span id="wsDot" class="dot off"></span><span id="wsText" class="muted">WS 未连接</span>
+  <button id="btnOps" class="ghost">运营 / API 日志</button>
+</header>
+
+<main class="layout">
+  <section class="col-main">
+    <div class="panel chart-panel">
+      <div class="panel-head">
+        <span>K 线</span>
+        <div class="seg" id="intervals"></div>
+      </div>
+      <canvas id="chart"></canvas>
+    </div>
+
+    <div class="panel tabs-panel">
+      <div class="panel-head tabs" id="tabs">
+        <button data-tab="positions" class="active">持仓</button>
+        <button data-tab="orders">当前委托</button>
+        <button data-tab="conditional">条件单</button>
+        <button data-tab="orderHistory">委托历史</button>
+        <button data-tab="trades">成交历史</button>
+        <button data-tab="transactions">资金流水</button>
+        <button data-tab="liquidations">强平记录</button>
+      </div>
+      <div class="tab-tools" id="tabTools"></div>
+      <div class="table-wrap" id="tabBody"></div>
+    </div>
+  </section>
+
+  <section class="col-book">
+    <div class="panel book-panel">
+      <div class="panel-head"><span>订单簿</span><span class="muted" id="bookSrc">引擎实时</span></div>
+      <div id="book"></div>
+    </div>
+    <div class="panel trades-panel">
+      <div class="panel-head"><span>最新成交</span></div>
+      <div id="recentTrades"></div>
+    </div>
+  </section>
+
+  <section class="col-side">
+    <div class="panel account-panel">
+      <div class="panel-head">
+        <span>账户</span>
+        <span id="acctStatus"></span>
+      </div>
+      <div class="row gap">
+        <select id="uidSel" title="账户"></select>
+        <button id="btnNewAcct">新建</button>
+        <button id="btnDeposit">充值</button>
+      </div>
+      <div class="kv" id="acctInfo"></div>
+    </div>
+
+    <div class="panel order-panel">
+      <div class="panel-head">
+        <div class="seg" id="actionSeg">
+          <button data-action="open" class="active">开仓</button>
+          <button data-action="close">平仓</button>
+        </div>
+        <div class="seg" id="typeSeg">
+          <button data-type="limit" class="active">限价</button>
+          <button data-type="market">市价</button>
+        </div>
+      </div>
+      <div class="form">
+        <label><span class="lbl">价格 <span class="unit">USDT</span></span>
+          <div class="input-row"><input id="fPrice" inputmode="decimal" autocomplete="off"><button id="btnLast" class="mini" type="button">最新</button></div>
+        </label>
+        <label><span class="lbl">数量 <span class="unit" id="amtUnit">BTC</span></span>
+          <input id="fAmount" inputmode="decimal" autocomplete="off">
+        </label>
+        <div class="pct" id="pct"></div>
+        <label><span class="lbl">杠杆 <span class="unit" id="levHint"></span></span>
+          <input id="fLev" inputmode="numeric" value="10" autocomplete="off">
+        </label>
+        <label class="check"><input type="checkbox" id="fReduce"> 只减仓</label>
+        <div class="est" id="est"></div>
+        <div class="row gap two">
+          <button id="btnLong" class="buy">买入 / 开多</button>
+          <button id="btnShort" class="sell">卖出 / 开空</button>
+        </div>
+      </div>
+    </div>
+  </section>
+</main>
+
+<aside id="drawer" class="drawer hidden">
+  <div class="drawer-head">
+    <b>运营 / API 日志</b>
+    <button id="btnCloseDrawer" class="ghost">关闭</button>
+  </div>
+  <div class="drawer-body">
+    <h4>系统做市 <span class="muted">(用币安行情，用户的对手方是系统)</span></h4>
+    <div id="makerBox" class="maker-box"><span class="muted">未启用</span></div>
+    <div class="row gap"><button id="makerToggle">开启做市</button><button id="makerReset" title="停掉做市，结束本轮：按标记价平掉系统账户累积的全部仓位">重置系统账户</button></div>
+    <h4>行情情景 <span class="muted">(在币安价格之上叠加偏移，测试强平、盈亏)</span></h4>
+    <div id="scenarioBox" class="maker-box"><span class="muted">需要先开启做市</span></div>
+    <div class="scn-btns" id="scnBtns">
+      <button data-pct="-1">-1%</button><button data-pct="-5">-5%</button><button data-pct="-10">-10%</button>
+      <button data-pct="5">+5%</button><button data-pct="10">+10%</button><button data-pct="0" class="ghost">回到币安价</button>
+    </div>
+    <div class="ops-grid"><input id="scnPct" placeholder="自定义偏移 %，如 -7.5" inputmode="decimal"><button id="scnBtn">设置</button></div>
+    <h4>账户运营 <span class="muted">(需要 ops 密钥)</span></h4>
+    <div class="ops-grid">
+      <input id="opsReason" placeholder="冻结原因(可选)">
+      <div class="row gap"><button id="opsFreeze">冻结</button><button id="opsUnfreeze">解冻</button></div>
+      <input id="opsCredit" placeholder="发放信用额度金额" inputmode="decimal">
+      <button id="opsGrant">发放</button>
+      <input id="opsWithdraw" placeholder="扣减余额金额" inputmode="decimal">
+      <button id="opsWithdrawBtn">扣减</button>
+      <label class="check"><input type="checkbox" id="opsInsured"> 本轮已投保</label>
+      <button id="opsInsuredBtn">设置</button>
+      <span class="muted" id="opsRound"></span>
+      <button id="opsRoundClose">结束本轮</button>
+    </div>
+    <h4>行情运营</h4>
+    <div class="ops-grid">
+      <input id="opsIndex" placeholder="指数价" inputmode="decimal">
+      <button id="opsIndexBtn">设置指数价</button>
+    </div>
+    <h4>API 调用日志 <span class="muted">(点击展开)</span></h4>
+    <div id="apiLog"></div>
+  </div>
+</aside>
+
+<div id="toasts"></div>
+<div id="modal" class="modal hidden"></div>
+<script src="app.js"></script>
+</body>
+</html>

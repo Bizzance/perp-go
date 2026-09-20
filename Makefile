@@ -1,6 +1,6 @@
 BIN_DIR := bin
 
-.PHONY: fmt vet race-check build build-api build-engine test test-integration test-e2e test-race build-race run-api run-engine run-api-race run-engine-race clean docker-build compose-test-up compose-test-down compose-prod-up
+.PHONY: fmt vet race-check build build-api build-engine test test-integration test-e2e sim-client test-race build-race run-api run-engine run-api-race run-engine-race clean docker-build compose-test-up compose-test-down compose-prod-up
 
 fmt:
 	gofmt -w .
@@ -36,6 +36,11 @@ test-integration:
 # 结束自动拆掉。冷启动要2到3分钟，发布前跑，不放进日常测试。E2E_KEEP=1保留环境排查
 test-e2e:
 	./scripts/e2e.sh
+
+# 模拟客户端：内部测试用的交易页面(http://127.0.0.1:8088)，扮演合作方的后端对接我们的系统，可以在页面上
+# 交易、看盘口和K线、做运营操作，还能接币安行情做系统做市。先用compose-test-up把系统拉起来，详见docs/sim-client.md
+sim-client:
+	./scripts/sim-client.sh
 
 # -race只在运行时实际经过的代码路径上抓数据竞争，跑测试用例覆盖不到撮合引擎/风控扫描/资金
 # 费率结算这几个真正有并发的地方(都是go func启动的后台goroutine，没有单测覆盖)，所以另外
