@@ -58,7 +58,7 @@
 **幂等（`requestId`）**：跟普通下单一样支持可选的`requestId`，同一`uid`内唯一，
 唯一索引是`conditional_orders`表自己的`(uid, request_id)`。重复提交返回第一次那笔的
 `orderId`（`duplicate=true`），不会重复冻结保证金；并发重复提交靠唯一索引兜底，撞索引的那个请求会把
-自己刚冻结的保证金退回去。**触发后落地到`orders`表的那笔委托不继承`requestId`**——如果继承，
+自己刚冻结的保证金退回去。 **触发后落地到`orders`表的那笔委托不继承`requestId`**——如果继承，
 一个条件单和一笔普通委托恰好用了同一个`requestId`，触发落库时会撞`orders`表的唯一索引、
 走上面的"落库失败补偿"路径把这次触发白白取消掉，得不偿失。触发之后按`orderId`（两边是同一个）
 查`GET /order/detail`即可。可以用`GET /order/conditional/detail`按`orderId`或`requestId`查条件单本身。

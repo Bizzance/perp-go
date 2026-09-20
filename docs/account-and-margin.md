@@ -15,15 +15,15 @@
 账户级别共享一个资金池，不做逐仓隔离（逐仓是后续阶段的计划，见
 [known-limitations.md](known-limitations.md)）。一个uid只有一行`accounts`记录：
 
-| 字段            | 含义                                                                  |
-|-----------------|-----------------------------------------------------------------------|
-| `is_insured`    | 本轮是否投保，运营通过`POST /account/insured`单独设置                 |
+| 字段            | 含义                                                                            |
+|-----------------|---------------------------------------------------------------------------------|
+| `is_insured`    | 本轮是否投保，运营通过`POST /account/insured`单独设置                           |
 | `status`        | 账户状态`active`/`frozen`，运营通过`POST /account/status`设置，见下面"账户状态" |
-| `round`         | 轮数，结束本轮时+1                                                    |
-| `credit`        | 信用额度余额（用户买保险后的赔付），只能当开仓保证金用，不能转出/提现 |
-| `available`     | 可用余额，**可能为负**                                                |
-| `frozen_margin` | 挂单冻结的保证金（来自`available`的部分）                             |
-| `frozen_credit` | 挂单冻结的保证金（来自`credit`的部分）                                |
+| `round`         | 轮数，结束本轮时+1                                                              |
+| `credit`        | 信用额度余额（用户买保险后的赔付），只能当开仓保证金用，不能转出/提现           |
+| `available`     | 可用余额，**可能为负**                                                          |
+| `frozen_margin` | 挂单冻结的保证金（来自`available`的部分）                                       |
+| `frozen_credit` | 挂单冻结的保证金（来自`credit`的部分）                                          |
 
 `available`允许为负，这是全仓模式下的合法状态，不是bug——两种情况会让它变负：
 
@@ -32,7 +32,7 @@
 
 ## 账户状态（冻结/解冻）
 
-`accounts.status`有两个取值：`active`（默认）和`frozen`。**账户冻结跟挂单的"冻结保证金"（`frozen_margin`）是两回事**，
+`accounts.status`有两个取值：`active`（默认）和`frozen`。 **账户冻结跟挂单的"冻结保证金"（`frozen_margin`）是两回事**，
 前者是运营对账户的管控，后者是资金记账。
 
 冻结的语义是"禁止新增风险，不禁止降低风险"：
@@ -52,7 +52,7 @@
 
 冻结接口本身还会顺带清理存量的开仓类挂单和条件开仓单（见 [api.md](api.md)），所以正常路径下引擎层兜底是用不上的，
 它是为了让"清理漏掉某笔单"这类边角情况也不会让冻结账户的开仓单成交。创建条件开仓单落库后还会再看一次
-账户状态，冻结接口刚好扫完、这笔才落库的话直接撤销并返回`account_frozen`。结束本轮（`round/close`）**不会**
+账户状态，冻结接口刚好扫完、这笔才落库的话直接撤销并返回`account_frozen`。结束本轮（`round/close`） **不会**
 重置账户状态，冻结的账户进入下一轮仍然是冻结的，只有运营显式解冻才恢复。每次状态变更（只记真正发生变化的）写一行
 `account_status_history`：变更前后的状态、原因、操作的API密钥id、时间。
 
@@ -67,11 +67,12 @@
 
 ## 冻结保证金的四级路径（`FreezeMargin`）
 
-开仓下单时，`requiredMargin`先过一道**买力预检**，再按四级路径依次尝试冻结，返回`FreezeResult{FromAvailable,
+开仓下单时，`requiredMargin`先过一道 **买力预检**，再按四级路径依次尝试冻结，返回`FreezeResult{FromAvailable,
 FromCredit}`告诉调用方这笔钱分别从两个来源各拿了多少。
 
 **买力预检：账户有浮亏时，买力是`available + credit`减掉浮亏，不够就直接拒绝**，不管`available`本身够不够。
-币安的可用余额 = 钱包余额 − 初始保证金 + 未实现盈亏（[币安说明](https://www.binance.com/en/blog/futures/what-is-the-available-balance-margin-balance-and-total-balance-on-binance-futures-457299340443288694)），
+币安的可用余额 = 钱包余额 − 初始保证金 +
+未实现盈亏（[币安说明](https://www.binance.com/en/blog/futures/what-is-the-available-balance-margin-balance-and-total-balance-on-binance-futures-457299340443288694)），
 浮亏直接减少可用余额；OKX的可用保证金也是从计入未实现盈亏的调整后权益算起。早期实现前两级只看余额、
 不扣浮亏，账户浮亏累累甚至已经满足强平条件，只要`available`还是正数就能继续冻结保证金开新仓（探针复现：
 权益21.75 <= 维持保证金22.1、浮亏975、`available`346.75时能冻结340）。按这个口径，账户进入强平条件
@@ -104,7 +105,8 @@ FromCredit}`告诉调用方这笔钱分别从两个来源各拿了多少。
 完成（`AccountRepo.ApplyFundOp`）。正数是入账，直接加到`available`；负数是扣款，只在`available >= 扣减额`
 时才扣，用一条`UPDATE ... WHERE available >= ?`原子完成"检查余额+扣减"，不够返回`insufficient_balance`、
 事务回滚（流水一起撤掉，`requestId`不被占用）。事务开头先`SELECT ... FOR UPDATE`锁账户行，同一个账户的资金
-操作串行执行，避免并发的同一个`requestId`在唯一索引上死锁，见 [idempotency.md](idempotency.md)。`POST /account/credit`发额度同理，也是必填`requestId`+同一个事务。
+操作串行执行，避免并发的同一个`requestId`在唯一索引上死锁，见 [idempotency.md](idempotency.md)。`POST /account/credit`
+发额度同理，也是必填`requestId`+同一个事务。
 早期实现负数分支也是无条件的`available = available + ?`，文档写着"扣的时候必须有足够`available`"
 但代码根本没校验，扣款能把余额扣成负数。注意这里只看`available`，不看信用额度和浮盈——这个接口是
 合作方的资金划转（模拟提现），信用额度不能转出，浮盈没有兑现，都不该被这个接口扣走。每次成功的调整
@@ -156,7 +158,7 @@ equity = available + credit + frozenMargin + frozenCredit + positionMargin + tot
 `credit`要算进权益，信用额度才能真正起到"扛住浮亏、推迟强平"的作用——强平联合判断
 （见 [liquidation.md](liquidation.md)）用的也是这个口径。挂单冻结的保证金和仓位占用的保证金也要算进去
 （`positionMargin`是这个uid全部持仓占用的保证金之和，含来自信用额度的部分）：开仓只是把钱从`available`
-挪进冻结/仓位，权益不变，价格不动权益只会被手续费拉低。**买力**（开仓够不够钱，见"冻结保证金的四级路径"）
+挪进冻结/仓位，权益不变，价格不动权益只会被手续费拉低。 **买力**（开仓够不够钱，见"冻结保证金的四级路径"）
 是另一个口径，只看自由余额`available`（加`credit`和浮盈），不含已经占用的保证金。`totalUnrealizedPnl`是这个uid
 名下全部持仓当前未实现盈亏之和，跟`FreezeMargin`第三级路径共用同一份计算逻辑。
 

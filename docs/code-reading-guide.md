@@ -193,23 +193,23 @@ group id做fan-out、应用层按symbol过滤。详见 [engine-sharding.md](engi
 
 ## 文档-代码对照表
 
-| 想看哪个子系统            | 先看这篇文档                                                           | 核心代码                                                                  |
-|---------------------------|------------------------------------------------------------------------|---------------------------------------------------------------------------|
-| 账户/保证金/信用额度/轮次 | [account-and-margin.md](account-and-margin.md)                         | `service/account.go`, `repo/account_repo.go`                              |
-| 下单校验/撮合/结算        | [matching-and-settlement.md](matching-and-settlement.md)               | `service/engine.go`, `service/settlement.go`, `api/router.go`的`addOrder` |
-| 订单簿数据结构            | [order-book.md](order-book.md)                                         | `matching/book.go`                                                        |
-| 进程重启恢复挂单          | [order-book-recovery.md](order-book-recovery.md)                       | `service/engine.go`的`RecoverOrderBook`                                   |
-| 持仓/杠杆/保证金分档      | [risk-limit-tiers.md](risk-limit-tiers.md), [leverage.md](leverage.md) | `service/position.go`, `api/router.go`的`setLeverage`                     |
-| 条件单（止盈止损）        | [conditional-orders.md](conditional-orders.md)                         | `service/conditional_order.go`, `repo/conditional_order_repo.go`          |
-| 强平/保险基金/ADL         | [liquidation.md](liquidation.md)                                       | `service/liquidation.go`, `service/adl.go`, `service/insurancefund.go`    |
-| 资金费率                  | [funding-rate.md](funding-rate.md)                                     | `service/funding.go`                                                      |
-| K线                       | [kline.md](kline.md)                                                   | `service/kline.go`, `repo/kline_repo.go`                                  |
-| engine分片                | [engine-sharding.md](engine-sharding.md)                               | `cmd/contract-engine/main.go`, `service/engine.go`的`OwnsSymbol`          |
-| Kafka消息去重             | [message-dedup.md](message-dedup.md)                                   | `internal/mq/mq.go`                                                       |
-| WebSocket推送             | [websocket.md](websocket.md)                                           | `service/push.go`, `internal/ws/`, `internal/pubsub/`                     |
+| 想看哪个子系统            | 先看这篇文档                                                           | 核心代码                                                                                                     |
+|---------------------------|------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------|
+| 账户/保证金/信用额度/轮次 | [account-and-margin.md](account-and-margin.md)                         | `service/account.go`, `repo/account_repo.go`                                                                 |
+| 下单校验/撮合/结算        | [matching-and-settlement.md](matching-and-settlement.md)               | `service/engine.go`, `service/settlement.go`, `api/router.go`的`addOrder`                                    |
+| 订单簿数据结构            | [order-book.md](order-book.md)                                         | `matching/book.go`                                                                                           |
+| 进程重启恢复挂单          | [order-book-recovery.md](order-book-recovery.md)                       | `service/engine.go`的`RecoverOrderBook`                                                                      |
+| 持仓/杠杆/保证金分档      | [risk-limit-tiers.md](risk-limit-tiers.md), [leverage.md](leverage.md) | `service/position.go`, `api/router.go`的`setLeverage`                                                        |
+| 条件单（止盈止损）        | [conditional-orders.md](conditional-orders.md)                         | `service/conditional_order.go`, `repo/conditional_order_repo.go`                                             |
+| 强平/保险基金/ADL         | [liquidation.md](liquidation.md)                                       | `service/liquidation.go`, `service/adl.go`, `service/insurancefund.go`                                       |
+| 资金费率                  | [funding-rate.md](funding-rate.md)                                     | `service/funding.go`                                                                                         |
+| K线                       | [kline.md](kline.md)                                                   | `service/kline.go`, `repo/kline_repo.go`                                                                     |
+| engine分片                | [engine-sharding.md](engine-sharding.md)                               | `cmd/contract-engine/main.go`, `service/engine.go`的`OwnsSymbol`                                             |
+| Kafka消息去重             | [message-dedup.md](message-dedup.md)                                   | `internal/mq/mq.go`                                                                                          |
+| WebSocket推送             | [websocket.md](websocket.md)                                           | `service/push.go`, `internal/ws/`, `internal/pubsub/`                                                        |
 | HTTP接口清单（对接文档）  | [api.md](api.md)                                                       | `internal/api/router.go`, `internal/api/extra.go`, `internal/api/errors.go`, `internal/api/engine_server.go` |
-| 接口鉴权(API Key+HMAC)   | [auth-design.md](auth-design.md)                                       | （无对应代码）                                                            |
-| 已知限制/明确排除项       | [known-limitations.md](known-limitations.md)                           | （文档性质，无对应代码）                                                  |
+| 接口鉴权(API Key+HMAC)    | [auth-design.md](auth-design.md)                                       | （无对应代码）                                                                                               |
+| 已知限制/明确排除项       | [known-limitations.md](known-limitations.md)                           | （文档性质，无对应代码）                                                                                     |
 
 ## 看代码时容易疑惑、但其实是既定设计的几个点
 

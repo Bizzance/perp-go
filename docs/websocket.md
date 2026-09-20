@@ -99,12 +99,12 @@ user:{uid}              私有，{account, positions, activeOrders}三合一快�
 
 推送的 `data` 跟对应 REST 接口的返回结构保持一致，合作方可以复用同一份解析代码：
 
-| 频道         | 结构                                                                                       |
-|--------------|--------------------------------------------------------------------------------------------|
-| `depth`      | 同 `GET /depth`：`{bids: [{price, volume, count}], asks: [...]}`                           |
-| `trade`      | 同 `GET /market/trades` 的单条：`{tradeId, symbol, price, volume, takerSide, createTime}`  |
-| `kline`      | 同 `GET /kline` 的单条                                                                     |
-| `user`       | `{account, positions, activeOrders}`，分别同 `/account/info`、`/position/current`、`/order/current` |
+| 频道    | 结构                                                                                                |
+|---------|-----------------------------------------------------------------------------------------------------|
+| `depth` | 同 `GET /depth`：`{bids: [{price, volume, count}], asks: [...]}`                                    |
+| `trade` | 同 `GET /market/trades` 的单条：`{tradeId, symbol, price, volume, takerSide, createTime}`           |
+| `kline` | 同 `GET /kline` 的单条                                                                              |
+| `user`  | `{account, positions, activeOrders}`，分别同 `/account/info`、`/position/current`、`/order/current` |
 
 几条约定，跟 REST 一致（见 [api.md](api.md)）：字段名全部小驼峰；金额价格是字符串；雪花ID
 （`tradeId`/`orderId`）是字符串；没有数据时是空数组 `[]` 不是 `null`（`activeOrders`没有挂单时就是`[]`）。

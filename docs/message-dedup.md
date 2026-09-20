@@ -11,7 +11,7 @@
 [known-limitations.md](known-limitations.md)里记录的历史限制。现在补的是 **完整的消息级
 去重**，不依赖具体业务字段，三个消费者（下单/撤单/结束本轮）统一生效。
 
-## 方案：按(consumer_group, topic, partition, offset)落一张"已处理"表
+## 方案：按 (consumer_group, topic, partition, offset)落一张"已处理"表
 
 Kafka里每条消息在一个topic的一个partition内的offset是严格递增、全局唯一的坐标——
 `(topic, partition, offset)`这个三元组唯一标识一条消息，不管消息内容是什么。用这个坐标
@@ -29,15 +29,32 @@ Kafka里每条消息在一个topic的一个partition内的offset是严格递增�
 `processed_messages`表（`sql/schema.sql`）：
 
 ```sql
-CREATE TABLE IF NOT EXISTS processed_messages (
-  consumer_group VARCHAR(191) NOT NULL,
-  topic          VARCHAR(191) NOT NULL,
-  `partition`    INT NOT NULL,
-  `offset`       BIGINT NOT NULL,
-  create_time    TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
-  PRIMARY KEY (consumer_group, topic, `partition`, `offset`),
-  KEY idx_processed_messages_create_time (create_time)
-) ENGINE=InnoDB;
+CREATE TABLE IF NOT EXISTS processed_messages
+(
+    consumer_group
+    VARCHAR
+(
+    191
+) NOT NULL,
+    topic VARCHAR
+(
+    191
+) NOT NULL,
+    `partition` INT NOT NULL,
+    `offset` BIGINT NOT NULL,
+    create_time TIMESTAMP NOT NULL DEFAULT CURRENT_TIMESTAMP,
+    PRIMARY KEY
+(
+    consumer_group,
+    topic,
+    `partition`,
+    `offset`
+),
+    KEY idx_processed_messages_create_time
+(
+    create_time
+)
+    ) ENGINE=InnoDB;
 ```
 
 `internal/repo.ProcessedMessageRepo.TryMark(ctx, consumerGroup, topic, partition, offset)`
@@ -73,7 +90,7 @@ CREATE TABLE IF NOT EXISTS processed_messages (
 三个消费者的业务处理是`EngineService`的`HandleOrderSubmit`/`HandleOrderCancel`/`HandleRoundClose`
 （`internal/service/consumer_handlers.go`），`main.go`里只负责把它们包上`WithDedup`交给消费循环。
 
-注意消息级去重只管"**同一条Kafka消息**被重复投递"（按offset判断）。合作方**自己再调一次接口**产生的是一条
+注意消息级去重只管"**同一条Kafka消息**被重复投递"（按offset判断）。合作方 **自己再调一次接口**产生的是一条
 全新的消息，它管不到——这类重复要靠接口自己的幂等键：下单/条件单/资金操作的`requestId`、结束本轮的`round`
 （事件`RoundCloseEvent`里带着`Round`，引擎处理时跟账户当前轮数不一致就忽略），见 [idempotency.md](idempotency.md)。
 

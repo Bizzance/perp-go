@@ -242,34 +242,34 @@
   写入之间互相覆盖丢更新——之前这几个函数是"读一次、按SQL相对表达式写"，两次并发调用
   能各自读到旧状态、写操作互不知道对方的存在。用同样的压测场景重新验证：修复后同一个
   `positionID`只成功`MarkLiquidating`一次，分批clip严格顺序处理，最终账户状态归零且
-  正确。**这个模式值得记住：任何"部分更新一行记录的部分字段"的函数，只要这一行还有
+  正确。 **这个模式值得记住：任何"部分更新一行记录的部分字段"的函数，只要这一行还有
   其它字段承载着跨调用的状态语义（这里是`status`标记"强平进行中"），就不能用无条件覆写
   ——必须先读、只改真正要改的字段、其余字段原样保留，否则表面上"只是改了个数量"的一次
   调用会悄悄抹掉另一个并发流程留下的状态标记**。
-- **合作方对接接口的几处缺陷（对接评审发现）**：①**响应JSON字段命名混乱**：模型结构体没有`json`
+- **合作方对接接口的几处缺陷（对接评审发现）**：① **响应JSON字段命名混乱**：模型结构体没有`json`
   tag，同一个对象里既有`"ID"`、`"UID"`（大写开头）又有`"markPrice"`（小写开头），订单是全大写驼峰、账户是
   全小写驼峰——合作方按这个写解析代码，以后一改字段名就是破坏性变更。现在全部统一成小驼峰，并加了
-  `model_json_test.go`锁住字段命名。②**雪花ID当JSON数字返回**：`orderId`形如`226750310570262528`
+  `model_json_test.go`锁住字段命名。② **雪花ID当JSON数字返回**：`orderId`形如`226750310570262528`
   （约2.2×10¹⁷），超过JS安全整数范围（9×10¹⁵），经过JS/double解析会丢精度。现在所有雪花ID
-  （`orderId`/`tradeId`/资金流水`id`）都是字符串。③**余额不足下单返回500**：`FreezeMargin`返回的
+  （`orderId`/`tradeId`/资金流水`id`）都是字符串。③ **余额不足下单返回500**：`FreezeMargin`返回的
   `ErrInsufficientMargin`没被`respondLockErr`识别，落进了兜底的500分支，合作方分不清"余额不足"
   （业务上的正常拒绝）和"服务端故障"。现在是`400 insufficient_margin`。④**`POST /account/balance`
   扣款不校验余额**：文档写着"扣的时候必须有足够`available`"，代码里其实是无条件的`available = available + ?`，
   扣款能把余额扣成负数。现在负数走`UPDATE ... WHERE available >= ?`原子条件更新，不够返回
-  `insufficient_balance`。⑤**WS公开成交频道泄露用户身份**：`trade:{symbol}`是任何连接都能订阅的
+  `insufficient_balance`。⑤ **WS公开成交频道泄露用户身份**：`trade:{symbol}`是任何连接都能订阅的
   公开频道，却把内部`Trade`结构整个推了出去，带着买卖双方的`uid`和委托id。现在推`PublicTrade`视图，
-  用真实WS客户端订阅验证过收到的帧里没有任何`uid`字段。⑥**列表接口"没有数据"返回`null`**：
+  用真实WS客户端订阅验证过收到的帧里没有任何`uid`字段。⑥ **列表接口"没有数据"返回`null`**：
   `nil`切片被序列化成`null`，合作方遍历会出错，REST统一改成`[]`，WS私有快照的`activeOrders`同理。
-  ⑦**下单没有幂等机制**：请求超时后重试会重复下单、重复冻结保证金。现在支持`requestId`，
+  ⑦ **下单没有幂等机制**：请求超时后重试会重复下单、重复冻结保证金。现在支持`requestId`，
   并发重复提交用10~12路并行请求验证过：只有一笔订单、保证金只冻结一次。同一个`requestId`带了
-  不同参数会返回`idempotency_conflict`，不会静默返回第一笔。⑧**充值/扣款、发信用额度没有幂等键**：
+  不同参数会返回`idempotency_conflict`，不会静默返回第一笔。⑧ **充值/扣款、发信用额度没有幂等键**：
   `/account/balance`是相对加减、`/account/credit`是`credit = credit + ?`，合作方超时重试会重复入账
   或让信用额度翻倍。现在这两个接口`requestId`必填，"写流水占位幂等键+改余额"放进同一个事务（先写流水
   后改余额中间崩溃会让钱永远补不上，先改余额后写流水中间崩溃会重复入账），扣款余额不足时事务回滚、
   不占用`requestId`。12路并发同一个`requestId`充值验证过：只入账一次。（review时还压出一个死锁：同一个
-`requestId`并发扣款、先到的因余额不足回滚时，后面几个会在唯一索引上互相升级锁，16路并发约一半返回500。
-现在事务开头先`SELECT ... FOR UPDATE`锁账户行、同一账户的资金操作串行，再压24路×8轮零死锁，另外保留了
-死锁自动重试兜底，见 [idempotency.md](idempotency.md)。）⑨**`round/close`重试会把下一轮
+  `requestId`并发扣款、先到的因余额不足回滚时，后面几个会在唯一索引上互相升级锁，16路并发约一半返回500。
+  现在事务开头先`SELECT ... FOR UPDATE`锁账户行、同一账户的资金操作串行，再压24路×8轮零死锁，另外保留了
+  死锁自动重试兜底，见 [idempotency.md](idempotency.md)。）⑨**`round/close`重试会把下一轮
   又结束一次**（本组里后果最重的一个）：请求里没有"要结束哪一轮"，引擎处理时读的是当前轮，合作方超时
   重试会撤掉新一轮刚挂的单、强平刚开的仓、清零刚发的信用额度，Kafka消息级去重管不到这种"另一次独立
   调用"。现在`round`必填，API层预检（`already_closed`/`round_mismatch`）加引擎层权威判断（事件里的
@@ -293,7 +293,7 @@
   "看起来是个简单操作"就假设成立。现在把累加值拆成`sum`/`count`两个Redis key，用
   一段Lua脚本（`redis.NewScript`，`INCRBYFLOAT`+`INCR`）在Redis服务端原子地一次性
   完成两个key的更新，不再有Go这边GET-改-SET的竞态窗口。详见
-  [engine-sharding.md](engine-sharding.md)。**这个模式值得记住：'这个操作本身是原子的'
+  [engine-sharding.md](engine-sharding.md)。 **这个模式值得记住：'这个操作本身是原子的'
   这句话，要去看实现，不能只看调用方式看起来简单就假设成立**。
 - **`FreezeForceIntoNegative`用了过期的`available`/`credit`快照做守卫**：`AccountService.
   FreezeMargin`在四级判断的最后一级（`available+credit+未实现盈亏`覆盖但`available`单独

@@ -83,13 +83,13 @@ STP摘掉的maker列表，调用方（`EngineService.SubmitOrder`）要对每一
 
 ```go
 type PriceLevel struct {
-	Price  decimal.Decimal `json:"price"`
-	Volume decimal.Decimal `json:"volume"`
-	Count  int             `json:"count"`
+  Price  decimal.Decimal `json:"price"`
+  Volume decimal.Decimal `json:"volume"`
+  Count  int             `json:"count"`
 }
 type DepthSnapshot struct {
-	Bids []PriceLevel `json:"bids"` // 价格从高到低
-	Asks []PriceLevel `json:"asks"` // 价格从低到高
+  Bids []PriceLevel `json:"bids"` // 价格从高到低
+  Asks []PriceLevel `json:"asks"` // 价格从低到高
 }
 ```
 

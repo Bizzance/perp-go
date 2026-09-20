@@ -28,23 +28,22 @@ DUPLICATE KEY UPDATE`（`KlineRepo.UpsertBatch`），六个周期一条SQL、一
 
 ```sql
 INSERT INTO klines (symbol, `interval`, open_time, open, high, low, close, volume, trade_count, update_time)
-VALUES
-  (?, '1m', ?, ?, ?, ?, ?, ?, 1, ?),
-  (?, '5m', ?, ?, ?, ?, ?, ?, 1, ?),
-  ... -- 15m/1h/4h/1d同理，一共6行
-ON DUPLICATE KEY UPDATE
-  high = GREATEST(high, VALUES(high)),
-  low = LEAST(low, VALUES(low)),
-  close = VALUES(close),
-  volume = volume + VALUES(volume),
-  trade_count = trade_count + 1,
-  update_time = VALUES(update_time)
+VALUES (?, '1m', ?, ?, ?, ?, ?, ?, 1, ?),
+       (?, '5m', ?, ?, ?, ?, ?, ?, 1, ?), ... -- 15m/1h/4h/1d同理，一共6行
+    ON DUPLICATE KEY
+UPDATE
+    high = GREATEST(high, VALUES (high)),
+    low = LEAST(low, VALUES (low)),
+    close =
+VALUES (close), volume = volume +
+VALUES (volume), trade_count = trade_count + 1, update_time =
+VALUES (update_time)
 ```
 
-`VALUES(列名)`取的是**这一行**本来要写入的值（这里是成交价/成交量），不是当前表里已有
+`VALUES(列名)`取的是 **这一行**本来要写入的值（这里是成交价/成交量），不是当前表里已有
 的值，也不会跟同一条语句里其它行的值混在一起——多行UPSERT里每一行的冲突处理是各自独立
-计算的，已经用真实MySQL实例验证过。一条SQL原子完成"这根K线不存在就新建
-(open=high=low=close=成交价)，存在就按GREATEST/LEAST规则更新"，不是"先查是否存在、
+计算的，已经用真实MySQL实例验证过。一条SQL原子完成"这根K线不存在就新建 (open=high=low=close=成交价)
+，存在就按GREATEST/LEAST规则更新"，不是"先查是否存在、
 再判断插入还是更新"的两步走（那样在并发下会有竞态：两笔几乎同时的成交都判断出"不存在"，
 都尝试INSERT，后一个因为主键冲突失败）。
 
