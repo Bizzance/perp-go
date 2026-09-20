@@ -475,6 +475,47 @@ func TestE2E_09_OrderSubmitAndCancelAreNotSlowedByKafkaBatching(t *testing.T) {
 	}
 }
 
+// 标记价跟着指数价走，对敲拉不动：用ETHUSDT，别的用例都只碰BTCUSDT，订单簿是空的、没有盘口基差，标记价应该正好等于
+// 指数价。喂指数价3000，等engine的ticker把标记价算出来；再让两个账户在3100(比指数价高3.3%，在开仓单5%的价格保护带之内)
+// 对敲一笔，最新成交价变成3100，标记价仍然是3000。不做保护的话标记价会变成3100(见docs/mark-price.md)
+func TestE2E_10_MarkPriceFollowsIndexAndWashTradeCannotMoveIt(t *testing.T) {
+	e := loadEnv(t)
+	const sym = "ETHUSDT"
+	ticker := func() map[string]any {
+		return e.get(t, "/market/ticker?symbol="+sym).mustOK(t, "ticker").obj(t)
+	}
+	e.post(t, "/index-price", map[string]any{"symbol": sym, "price": 3000}).mustOK(t, "喂指数价")
+	eventually(t, "engine按指数价算出标记价3000", 20*time.Second, func() (bool, string) {
+		tk := ticker()
+		if tk["markPrice"] == nil {
+			return false, "还没有标记价"
+		}
+		return dec(t, tk["markPrice"]).Equal(decimal.NewFromInt(3000)), fmt.Sprintf("markPrice=%v", tk["markPrice"])
+	})
+
+	wash := func(uid uint64, side string) {
+		e.post(t, "/order/add", map[string]any{
+			"uid": uid, "symbol": sym, "side": side, "action": "open", "type": "limit",
+			"price": json.Number("3100"), "amount": json.Number("0.1"), "leverage": 10, "requestId": reqID(),
+		}).mustOK(t, "对敲："+side)
+	}
+	wash(e.newFundedAccount(t, "10000"), "short")
+	wash(e.newFundedAccount(t, "10000"), "long")
+	eventually(t, "对敲成交，最新成交价变成3100", 20*time.Second, func() (bool, string) {
+		tk := ticker()
+		if tk["lastPrice"] == nil {
+			return false, "还没有成交价"
+		}
+		return dec(t, tk["lastPrice"]).Equal(decimal.NewFromInt(3100)), fmt.Sprintf("lastPrice=%v", tk["lastPrice"])
+	})
+
+	// engine每秒重算一次标记价，多等几个周期，确认它没有被拉走(而不是还没来得及算)
+	time.Sleep(3 * time.Second)
+	if mark := dec(t, ticker()["markPrice"]); !mark.Equal(decimal.NewFromInt(3000)) {
+		t.Fatalf("对敲成交后标记价被拉走了: markPrice=%s, 期望仍然是指数价3000", mark)
+	}
+}
+
 func (e env) depthHasBid(t *testing.T, price string) bool {
 	t.Helper()
 	d := e.call(t, e.engineURL, "GET", "/depth?symbol="+symbol, nil).mustOK(t, "引擎/depth").obj(t)

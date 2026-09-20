@@ -25,11 +25,12 @@ func Connect(addr, password string) (*Cache, error) {
 
 func markPriceKey(symbol string) string { return "perpgo:mark:" + symbol }
 
+// 标记价格由MarkPriceService算好后写进来，其它地方不要直接写
 func (c *Cache) SetMarkPrice(ctx context.Context, symbol, price string) error {
 	return c.rdb.Set(ctx, markPriceKey(symbol), price, 0).Err()
 }
 
-// 返回("", nil)表示这个symbol还没有任何标记价格(从没成交过)——调用方要把"没有标记价格"当一个合法状态处理，不是错误
+// 返回("", nil)表示这个symbol还没有任何标记价格——调用方要把"没有标记价格"当一个合法状态处理，不是错误
 func (c *Cache) GetMarkPrice(ctx context.Context, symbol string) (string, error) {
 	v, err := c.rdb.Get(ctx, markPriceKey(symbol)).Result()
 	if errors.Is(err, redis.Nil) {
@@ -38,17 +39,42 @@ func (c *Cache) GetMarkPrice(ctx context.Context, symbol string) (string, error)
 	return v, err
 }
 
-func indexPriceKey(symbol string) string { return "perpgo:index:" + symbol }
+func indexPriceKey(symbol string) string   { return "perpgo:index:" + symbol }
+func indexPriceTsKey(symbol string) string { return "perpgo:index_ts:" + symbol }
 
-// 指数价格——反映外部真实市场(未来接入币安行情)的参考价，跟"标记价格"(反映
-// 我们自己盘口的最新成交)是两个独立概念，资金费率就是两者的溢价，见FundingService
-func (c *Cache) SetIndexPrice(ctx context.Context, symbol, price string) error {
-	return c.rdb.Set(ctx, indexPriceKey(symbol), price, 0).Err()
+// 指数价格——反映外部真实市场(币安等)的参考价，是标记价格的锚：标记价格由指数价、我们盘口相对
+// 指数价的基差、最新成交价三者取中位数得出，见MarkPriceService。价格和它的更新时间(毫秒)用MSET
+// 原子地一起写，读的一方才不会读到"新价格配旧时间"的组合——时间是判断喂价有没有断的依据
+func (c *Cache) SetIndexPrice(ctx context.Context, symbol, price string, tsMs int64) error {
+	return c.rdb.MSet(ctx, indexPriceKey(symbol), price, indexPriceTsKey(symbol), tsMs).Err()
 }
 
-// 返回("", nil)表示这个symbol还没有任何外部行情源喂过指数价格
-func (c *Cache) GetIndexPrice(ctx context.Context, symbol string) (string, error) {
-	v, err := c.rdb.Get(ctx, indexPriceKey(symbol)).Result()
+// 返回("", 0, nil)表示这个symbol还没有任何外部行情源喂过指数价格。价格存在但没有时间戳(旧版本
+// 写入的数据)时时间戳返回0，调用方会当成陈旧处理，等下一次喂价就恢复
+func (c *Cache) GetIndexPrice(ctx context.Context, symbol string) (price string, tsMs int64, err error) {
+	vals, err := c.rdb.MGet(ctx, indexPriceKey(symbol), indexPriceTsKey(symbol)).Result()
+	if err != nil {
+		return "", 0, err
+	}
+	if v, ok := vals[0].(string); ok {
+		price = v
+	}
+	if v, ok := vals[1].(string); ok {
+		tsMs, _ = strconv.ParseInt(v, 10, 64)
+	}
+	return price, tsMs, nil
+}
+
+func lastTradeKey(symbol string) string { return "perpgo:last:" + symbol }
+
+// 最新成交价单独存一份：标记价格不再等于它，但重算标记价格(引擎重启后、喂价变化时)还要用它
+func (c *Cache) SetLastTradePrice(ctx context.Context, symbol, price string) error {
+	return c.rdb.Set(ctx, lastTradeKey(symbol), price, 0).Err()
+}
+
+// 返回("", nil)表示这个symbol还没有成交过
+func (c *Cache) GetLastTradePrice(ctx context.Context, symbol string) (string, error) {
+	v, err := c.rdb.Get(ctx, lastTradeKey(symbol)).Result()
 	if errors.Is(err, redis.Nil) {
 		return "", nil
 	}

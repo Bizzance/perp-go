@@ -4,6 +4,7 @@
 package testutil
 
 import (
+	"context"
 	"crypto/rand"
 	"encoding/hex"
 	"os"
@@ -103,6 +104,26 @@ func NewRedisClient(t testing.TB) *redis.Client {
 	c := redis.NewClient(&redis.Options{Addr: requireEnv(t, envRedisAddr), Password: os.Getenv(envRedisPass)})
 	t.Cleanup(func() { c.Close() })
 	return c
+}
+
+// 清掉这些symbol跟标记价有关的全部Redis数据(标记价、最新成交价、指数价和它的时间戳)，并且在测试结束时
+// 再清一次。这些键按symbol、不按测试隔离：上一个测试留下的指数价会让下一个测试的标记价不再是"最新成交价"
+// (指数价存在时标记价由指数价、基差、成交价取中位数得出)，整包一起跑才会出问题、单独跑不会，很难查
+func ResetPriceKeys(t testing.TB, symbols ...string) {
+	t.Helper()
+	clean := func() {
+		c := redis.NewClient(&redis.Options{Addr: requireEnv(t, envRedisAddr), Password: os.Getenv(envRedisPass)})
+		defer c.Close()
+		var keys []string
+		for _, s := range symbols {
+			keys = append(keys, "perpgo:mark:"+s, "perpgo:last:"+s, "perpgo:index:"+s, "perpgo:index_ts:"+s)
+		}
+		if err := c.Del(context.Background(), keys...).Err(); err != nil {
+			t.Errorf("清理标记价相关的Redis键失败: %v", err)
+		}
+	}
+	clean()
+	t.Cleanup(clean)
 }
 
 // 每个测试用自己的uid段，避免同一个Redis里不同测试的锁、限流键互相影响。返回一个随机的

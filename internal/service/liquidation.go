@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"log"
+	"sync"
 	"time"
 
 	"github.com/shopspring/decimal"
@@ -23,6 +24,9 @@ type LiquidationService struct {
 	fund          *InsuranceFundService
 	coins         *repo.CoinRepo
 	timeoutMillis int64
+
+	staleLogMu sync.Mutex
+	staleLogAt map[string]time.Time
 }
 
 func NewLiquidationService(
@@ -49,6 +53,21 @@ func NewLiquidationService(
 	}
 }
 
+// 标记价过期告警：每个合约每分钟最多打一条，风控扫描每几秒一轮、每个账户都会走到这里，不限流会刷屏
+func (s *LiquidationService) logStaleMark(symbol string) {
+	s.staleLogMu.Lock()
+	defer s.staleLogMu.Unlock()
+	now := time.Now()
+	if last, ok := s.staleLogAt[symbol]; ok && now.Sub(last) < time.Minute {
+		return
+	}
+	if s.staleLogAt == nil {
+		s.staleLogAt = make(map[string]time.Time)
+	}
+	s.staleLogAt[symbol] = now
+	log.Printf("[ERROR] 标记价过期(指数价断供或没有喂过)，暂停这个合约相关账户的强平判断, symbol=%s", symbol)
+}
+
 // 全部有仓位的账户扫一遍
 func (s *LiquidationService) RiskScanOnce(ctx context.Context) {
 	uids, err := s.positions.FindAllOpenUIDs(ctx)
@@ -67,6 +86,18 @@ func (s *LiquidationService) checkAndLiquidate(ctx context.Context, uid uint64) 
 	maintainTotal, positions, err := s.positionSvc.MaintenanceMarginTotal(ctx, uid)
 	if err != nil || len(positions) == 0 {
 		return err
+	}
+	// 只要有一个持仓的标记价过期(指数价断供)，这个账户这一轮就不做强平判断：权益里包含这个仓位的
+	// 浮盈亏，用过期价格算出来的权益不可信，宁可少强平也不能误强平。喂价一般是所有合约一起断的，
+	// 所以这里不区分合约、不用其余数据齐全的仓位单独判断
+	for _, p := range positions {
+		if p.Volume.Sign() <= 0 {
+			continue
+		}
+		if _, state := s.markPrice.Lookup(ctx, p.Symbol); state == MarkStale {
+			s.logStaleMark(p.Symbol)
+			return nil
+		}
 	}
 	account, err := s.accounts.Find(ctx, uid)
 	if err != nil || account == nil {
@@ -171,7 +202,7 @@ func (s *LiquidationService) liquidateInClips(ctx context.Context, uid uint64, s
 // 挂出一批强平单，数量按coin.MaxVolume截断。返回ok=false表示这一批
 // 没能挂出去，调用方(liquidateInClips)应该直接退出整个强平循环
 func (s *LiquidationService) submitLiquidationClip(ctx context.Context, p model.Position) (uint64, bool) {
-	mark, hasMark := s.markPrice.Get(ctx, p.Symbol)
+	mark, hasMark := s.markPrice.GetFresh(ctx, p.Symbol)
 	if !hasMark {
 		s.positions.ClearLiquidating(ctx, p.ID)
 		// 上面(queueLiquidation)已经推过一次"liquidating"快照，这里状态被撤销回normal了，

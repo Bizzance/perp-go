@@ -7,7 +7,7 @@
 #       E2E_KEEP=1 make test-e2e            # 跑完不拆环境，方便排查(自己用docker compose -p <项目名> down -v 清理)
 #       make test-e2e ARGS='-run TestE2E_03 -v'   # 传给go test的额外参数(包路径固定是./e2e/)
 #
-# 场景见e2e/e2e_test.go：签名鉴权、下单撮合结算、撤单、冻结、结束本轮、WebSocket推送、引擎重启恢复。
+# 场景见e2e/e2e_test.go：签名鉴权、下单撮合结算、撤单、冻结、结束本轮、WebSocket推送、标记价抗对敲、引擎重启恢复。
 # 没有覆盖强平和资金费率：强平要把标记价格推到极端位置，资金费率周期8小时，这两块靠集成测试。
 set -euo pipefail
 

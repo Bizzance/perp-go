@@ -47,6 +47,7 @@ func newEngineEnv(t *testing.T) *engineEnv {
 	service.InitNodeID(1) // 成交结算会用雪花ID生成成交号，进程里必须初始化过
 	conn := testutil.NewDB(t)
 	rdb := testutil.NewCache(t)
+	testutil.ResetPriceKeys(t, testSymbol, "ETHUSDT") // 开头和结尾各清一次，不受前后测试留下的指数价影响
 
 	e := &engineEnv{db: conn, uidBase: testutil.UIDBase()}
 	e.nextID.Store(e.uidBase * 1000)
@@ -87,7 +88,10 @@ func newEngineEnv(t *testing.T) *engineEnv {
 }
 
 // 重启一个引擎：内存订单簿是全新的空的，数据库和Redis沿用，用来测恢复
-func (e *engineEnv) restartEngine(t *testing.T) {
+func (e *engineEnv) restartEngine(t *testing.T) { e.restartEngineOwning(t, nil) }
+
+// 重启一个只负责这些symbol的引擎(分片部署)，nil=负责全部
+func (e *engineEnv) restartEngineOwning(t *testing.T, symbols []string) {
 	t.Helper()
 	conn, rdb := e.db, testutil.NewCache(t)
 	positionRepo := repo.NewPositionRepo(conn)
@@ -98,7 +102,7 @@ func (e *engineEnv) restartEngine(t *testing.T) {
 	e.engine = service.NewEngineService(e.book, e.orders, e.conditional, e.trades, e.accounts, positionSvc,
 		settlementSvc, e.markPrice, service.NewInsuranceFundService(repo.NewInsuranceFundRepo(conn)),
 		service.NewKlineService(repo.NewKlineRepo(conn)), pushSvc, repo.NewRoundCloseProgressRepo(conn),
-		service.NewLockService(rdb), repo.NewCoinRepo(conn), nil)
+		service.NewLockService(rdb), repo.NewCoinRepo(conn), symbols)
 }
 
 func (e *engineEnv) id() uint64 { return e.nextID.Add(1) }
@@ -262,19 +266,27 @@ func (e *engineEnv) ledgerSum(t *testing.T, uid uint64, txType string) decimal.D
 
 func mustParse(t *testing.T, s string) decimal.Decimal { return decimalOf(t, s) }
 
-// 直接把标记价格写进Redis(等价于刚有一笔这个价格的成交)
+// 直接把标记价格写进Redis，绕开MarkPriceService的计算(指数价、基差、最新成交价)——大部分测试要的是
+// "标记价就是这个值"，不关心它怎么算出来。要测计算本身用markprice_integration_test.go里的用例
 func (e *engineEnv) setMark(t *testing.T, symbol, price string) {
 	t.Helper()
-	if err := e.markPrice.UpdateFromTrade(context.Background(), symbol, decimalOf(t, price)); err != nil {
+	if err := testutil.NewCache(t).SetMarkPrice(context.Background(), symbol, price); err != nil {
 		t.Fatal(err)
 	}
 }
 
-// 删掉某个symbol的标记价格，模拟"还从没成交过"。Redis是各测试共用的，标记价格键按symbol、
-// 不按测试隔离，需要"没有标记价格"的测试必须显式清一下
+// 删掉某个symbol跟标记价有关的全部Redis数据(标记价、最新成交价、指数价)，模拟"还从没成交过、没喂过价"。
+// Redis是各测试共用的，这些键按symbol、不按测试隔离，需要"没有标记价格"的测试必须显式清一下
 func (e *engineEnv) clearMark(t *testing.T, symbol string) {
 	t.Helper()
-	if err := testutil.NewRedisClient(t).Del(context.Background(), "perpgo:mark:"+symbol).Err(); err != nil {
+	resetPriceKeys(t, symbol)
+}
+
+// 中途清一次(不注册新的Cleanup)：需要"从没成交过、没喂过价"状态的测试用
+func resetPriceKeys(t *testing.T, symbol string) {
+	t.Helper()
+	keys := []string{"perpgo:mark:" + symbol, "perpgo:last:" + symbol, "perpgo:index:" + symbol, "perpgo:index_ts:" + symbol}
+	if err := testutil.NewRedisClient(t).Del(context.Background(), keys...).Err(); err != nil {
 		t.Fatal(err)
 	}
 }

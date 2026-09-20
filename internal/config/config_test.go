@@ -1,6 +1,9 @@
 package config
 
-import "testing"
+import (
+	"testing"
+	"time"
+)
 
 func TestParseEngineSymbols(t *testing.T) {
 	cases := []struct {
@@ -104,5 +107,33 @@ func TestConfigValidateAuth(t *testing.T) {
 	}
 	if err := (Config{APIKeys: []APIKey{{ID: "a", Secret: "0123456789abcdef", Scopes: []string{"trade"}}}}).ValidateAuth(); err != nil {
 		t.Errorf("有密钥应该通过, got %v", err)
+	}
+}
+
+// 标记价的配置：没设用默认值；设了按设的值；PERP_MARK_REQUIRE_INDEX只有"true"才开
+func TestLoad_MarkPriceSettings(t *testing.T) {
+	t.Setenv("PERP_MARK_MAX_INDEX_AGE_SEC", "")
+	t.Setenv("PERP_MARK_MAX_DEVIATION", "")
+	t.Setenv("PERP_MARK_BASIS_WINDOW_SEC", "")
+	t.Setenv("PERP_MARK_REQUIRE_INDEX", "")
+	def := Load(0)
+	if def.MarkPriceMaxIndexAge != 30*time.Second || def.MarkPriceMaxDeviation != 0.01 ||
+		def.MarkPriceBasisWindow != 60*time.Second || def.MarkPriceRequireIndex || def.MarkPriceRefreshMs != 1000 {
+		t.Fatalf("默认值不对: %+v", def)
+	}
+
+	t.Setenv("PERP_MARK_MAX_INDEX_AGE_SEC", "10")
+	t.Setenv("PERP_MARK_MAX_DEVIATION", "0.005")
+	t.Setenv("PERP_MARK_BASIS_WINDOW_SEC", "120")
+	t.Setenv("PERP_MARK_REQUIRE_INDEX", "true")
+	got := Load(0)
+	if got.MarkPriceMaxIndexAge != 10*time.Second || got.MarkPriceMaxDeviation != 0.005 ||
+		got.MarkPriceBasisWindow != 120*time.Second || !got.MarkPriceRequireIndex {
+		t.Fatalf("设置的值没生效: %+v", got)
+	}
+
+	t.Setenv("PERP_MARK_REQUIRE_INDEX", "1")
+	if Load(0).MarkPriceRequireIndex {
+		t.Fatal(`只有"true"才开启RequireIndex，"1"不算`)
 	}
 }

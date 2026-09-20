@@ -6,6 +6,7 @@ import (
 	"os"
 	"strconv"
 	"strings"
+	"time"
 )
 
 type Config struct {
@@ -23,13 +24,19 @@ type Config struct {
 	// 撮合/风控相关的可调参数，先用固定默认值
 	LiquidationOrderTimeoutMs int64 // 强平单挂单排队超时兜底阈值
 	RiskScanIntervalMs        int64 // 强平扫描周期
-	MarkPriceEmaAlpha         float64
+	MarkPriceRefreshMs        int64 // 标记价定时刷新周期(采盘口基差、按最新指数价重算)
 	FundingSampleIntervalMs   int64 // 资金费率溢价采样周期，采样越密集TWAP越准
 	ConditionalScanIntervalMs int64 // 条件单(止盈止损)触发扫描周期
 	SymbolCacheRefreshMs      int64 // /depth接口symbol合法性校验用的内存缓存刷新周期
 
 	DedupRetentionHours    int64 // Kafka消息去重记录(processed_messages)保留多久，早于这个时长的清掉
 	DedupCleanupIntervalMs int64 // 去重记录清理任务的扫描周期
+
+	// 标记价，见docs/mark-price.md和service.MarkPriceConfig
+	MarkPriceMaxIndexAge  time.Duration // PERP_MARK_MAX_INDEX_AGE_SEC，指数价多久没更新算断供
+	MarkPriceMaxDeviation float64       // PERP_MARK_MAX_DEVIATION，标记价相对指数价的最大偏离比例
+	MarkPriceBasisWindow  time.Duration // PERP_MARK_BASIS_WINDOW_SEC，盘口基差取多长窗口的平均
+	MarkPriceRequireIndex bool          // PERP_MARK_REQUIRE_INDEX=true，没有指数价就不产生标记价，生产环境必须开
 
 	// EngineSymbols 这个contract-engine实例负责撮合的symbol列表，来自PERP_ENGINE_SYMBOLS
 	// (逗号分隔，如"BTCUSDT,ETHUSDT")。nil(没设这个环境变量)=负责全部symbol，这是单实例
@@ -122,6 +129,32 @@ func ParseAPIKeys(raw string) ([]APIKey, error) {
 	return keys, nil
 }
 
+// 读整数环境变量，没设用默认值，设了但不合法直接退出——带着一个悄悄退回默认值的风控参数跑起来，比起不来更糟
+func envInt(key string, def int64) int64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	n, err := strconv.ParseInt(v, 10, 64)
+	if err != nil || n <= 0 {
+		log.Fatalf("%s不合法(需要正整数): %q", key, v)
+	}
+	return n
+}
+
+// 读浮点环境变量，规则同envInt，取值必须大于0
+func envFloat(key string, def float64) float64 {
+	v := os.Getenv(key)
+	if v == "" {
+		return def
+	}
+	f, err := strconv.ParseFloat(v, 64)
+	if err != nil || f <= 0 {
+		log.Fatalf("%s不合法(需要大于0的数): %q", key, v)
+	}
+	return f
+}
+
 func envOr(key, def string) string {
 	if v := os.Getenv(key); v != "" {
 		return v
@@ -161,12 +194,16 @@ func Load(defaultNodeID uint64) Config {
 		NodeIDExplicit:            nodeIDExplicit,
 		LiquidationOrderTimeoutMs: 10_000,
 		RiskScanIntervalMs:        2_000,
-		MarkPriceEmaAlpha:         1.0, // 标记价=最新成交价，不做平滑
+		MarkPriceRefreshMs:        1_000,
 		FundingSampleIntervalMs:   60_000,
 		ConditionalScanIntervalMs: 2_000,
 		SymbolCacheRefreshMs:      30_000,
 		DedupRetentionHours:       168,       // 7天，跟Kafka topic的常见默认retention对齐
 		DedupCleanupIntervalMs:    3_600_000, // 1小时扫一次，清理任务本身很轻量，不需要跑得更勤
+		MarkPriceMaxIndexAge:      time.Duration(envInt("PERP_MARK_MAX_INDEX_AGE_SEC", 30)) * time.Second,
+		MarkPriceMaxDeviation:     envFloat("PERP_MARK_MAX_DEVIATION", 0.01),
+		MarkPriceBasisWindow:      time.Duration(envInt("PERP_MARK_BASIS_WINDOW_SEC", 60)) * time.Second,
+		MarkPriceRequireIndex:     os.Getenv("PERP_MARK_REQUIRE_INDEX") == "true",
 		EngineSymbols:             parseEngineSymbols(os.Getenv("PERP_ENGINE_SYMBOLS")),
 	}
 }

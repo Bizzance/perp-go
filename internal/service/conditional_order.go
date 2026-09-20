@@ -49,9 +49,9 @@ func (s *ConditionalOrderService) ScanOnce(ctx context.Context) {
 		mark, ok := marks[co.Symbol]
 		if !ok {
 			var hasMark bool
-			mark, hasMark = s.markPrice.Get(ctx, co.Symbol)
+			mark, hasMark = s.markPrice.GetFresh(ctx, co.Symbol)
 			if !hasMark {
-				continue // 这个symbol还没有标记价格，这一轮没法判断，等下一轮
+				continue // 这个symbol没有标记价格、或者指数价断供了标记价已经过期，这一轮没法判断，等下一轮
 			}
 			marks[co.Symbol] = mark
 		}

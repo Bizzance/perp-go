@@ -56,6 +56,9 @@ func NewEngineService(
 			owned[s] = true
 		}
 	}
+	markPrice.OnChange(func(ctx context.Context, symbol string, mark decimal.Decimal) {
+		push.PublishMarkPrice(ctx, symbol, mark)
+	})
 	return &EngineService{
 		matchingEngine:     matchingEngine,
 		orders:             orders,
@@ -85,6 +88,32 @@ func (e *EngineService) OwnsSymbol(symbol string) bool {
 		return true
 	}
 	return e.ownedSymbols[symbol]
+}
+
+// 定时刷新这个实例负责的每个合约的标记价：用当前订单簿的买一卖一采一个基差样本，再按最新的指数价重算。
+// 成交只在有人交易时才发生，指数价变了而没有成交的时候，标记价全靠这个跟上
+func (e *EngineService) RefreshMarkPrices(ctx context.Context) {
+	coins, err := e.coins.FindAllEnabled(ctx)
+	if err != nil {
+		log.Printf("[ERROR] 刷新标记价: 查询合约列表失败: %v", err)
+		return
+	}
+	for _, coin := range coins {
+		if !e.OwnsSymbol(coin.Symbol) {
+			continue
+		}
+		var bid, ask decimal.Decimal
+		depth := e.matchingEngine.BookFor(coin.Symbol).Depth(1)
+		if len(depth.Bids) > 0 {
+			bid = depth.Bids[0].Price
+		}
+		if len(depth.Asks) > 0 {
+			ask = depth.Asks[0].Price
+		}
+		if err := e.markPrice.Refresh(ctx, coin.Symbol, bid, ask); err != nil {
+			log.Printf("[WARN] 刷新标记价失败, symbol=%s: %v", coin.Symbol, err)
+		}
+	}
 }
 
 // 进程启动时重建内存订单簿——订单簿(matching.Book)是纯内存结构，
@@ -340,10 +369,9 @@ func (e *EngineService) handleSelfCanceled(ctx context.Context, selfCanceled []*
 func (e *EngineService) settleOneFill(ctx context.Context, incoming *model.Order, f matching.Fill) error {
 	now := NowMillis()
 
+	// 成交价只是标记价的输入之一，标记价变了才会推送(推送的是算出来的标记价，不是这笔成交价)，见MarkPriceService
 	if err := e.markPrice.UpdateFromTrade(ctx, incoming.Symbol, f.Price); err != nil {
 		log.Printf("[WARN] update mark price failed: %v", err)
-	} else {
-		e.push.PublishMarkPrice(ctx, incoming.Symbol, f.Price)
 	}
 
 	tradeID := NextID()

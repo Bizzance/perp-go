@@ -83,6 +83,7 @@ func newAPIEnv(t *testing.T) *apiEnv {
 	service.InitNodeID(0)
 	conn := testutil.NewDB(t)
 	rdb := testutil.NewCache(t)
+	testutil.ResetPriceKeys(t, testSymbol, "ETHUSDT") // 不受别的测试留在Redis里的指数价影响
 
 	e := &apiEnv{db: conn, pub: &fakePublisher{}, uidBase: testutil.UIDBase()}
 	e.seq = e.uidBase * 1000

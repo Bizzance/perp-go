@@ -18,6 +18,12 @@ x-common-env: &common-env
   # PERP_AUTH_DISABLED=true只给本地开发用，生产绝对不能设
   PERP_API_KEYS: ${PERP_API_KEYS:-}
   PERP_AUTH_DISABLED: ${PERP_AUTH_DISABLED:-false}
+  # 标记价：由指数价、盘口基差、最新成交价取中位数得出，见docs/mark-price.md。
+  # PERP_MARK_REQUIRE_INDEX=true时没有指数价就不产生标记价(生产必须开)；留空的项用代码里的默认值
+  PERP_MARK_REQUIRE_INDEX: ${PERP_MARK_REQUIRE_INDEX:-false}
+  PERP_MARK_MAX_INDEX_AGE_SEC: ${PERP_MARK_MAX_INDEX_AGE_SEC:-}
+  PERP_MARK_MAX_DEVIATION: ${PERP_MARK_MAX_DEVIATION:-}
+  PERP_MARK_BASIS_WINDOW_SEC: ${PERP_MARK_BASIS_WINDOW_SEC:-}
 
 services:
   # 有状态：订单簿在内存里，重启时从MySQL重建。默认单实例，同一个symbol的订单簿只能在

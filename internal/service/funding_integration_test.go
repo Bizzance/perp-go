@@ -39,9 +39,7 @@ func (e *engineEnv) resetFundingState(t *testing.T) {
 		if err := c.ResetFundingAccumulator(ctx, sym); err != nil {
 			t.Fatal(err)
 		}
-		if err := testutil.NewRedisClient(t).Del(ctx, "perpgo:index:"+sym).Err(); err != nil {
-			t.Fatal(err)
-		}
+		resetPriceKeys(t, sym)
 	}
 }
 

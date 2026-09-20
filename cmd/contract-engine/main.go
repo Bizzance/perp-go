@@ -10,6 +10,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/shopspring/decimal"
+
 	"perp-go/internal/api"
 	"perp-go/internal/cache"
 	"perp-go/internal/config"
@@ -79,7 +81,12 @@ func main() {
 	processedMsgRepo := repo.NewProcessedMessageRepo(conn)
 	roundCloseProgressRepo := repo.NewRoundCloseProgressRepo(conn)
 
-	markPriceSvc := service.NewMarkPriceService(rdb)
+	markPriceSvc := service.NewMarkPriceService(rdb).WithConfig(service.MarkPriceConfig{
+		MaxIndexAge:  cfg.MarkPriceMaxIndexAge,
+		MaxDeviation: decimal.NewFromFloat(cfg.MarkPriceMaxDeviation),
+		BasisWindow:  cfg.MarkPriceBasisWindow,
+		RequireIndex: cfg.MarkPriceRequireIndex,
+	})
 	positionSvc := service.NewPositionService(positionRepo, riskLimitRepo, markPriceSvc)
 	accountSvc := service.NewAccountService(accountRepo, positionSvc, txRepo)
 	settlementSvc := service.NewSettlementService(accountSvc, positionRepo, coinRepo, txRepo)
@@ -155,6 +162,23 @@ func main() {
 				} else if n > 0 {
 					log.Printf("清理了%d条过期的消息去重记录(早于%s)", n, cutoff.Format(time.RFC3339))
 				}
+			}
+		}
+	}()
+
+	if !cfg.MarkPriceRequireIndex {
+		log.Printf("[WARN] PERP_MARK_REQUIRE_INDEX没有开启：没喂过指数价的合约，标记价会退回最新成交价，可以被自成交操纵。" +
+			"只能用于本地开发和测试，生产环境必须开启并持续喂指数价，见docs/mark-price.md")
+	}
+	go func() {
+		ticker := time.NewTicker(time.Duration(cfg.MarkPriceRefreshMs) * time.Millisecond)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-ticker.C:
+				engineSvc.RefreshMarkPrices(ctx)
 			}
 		}
 	}()

@@ -11,6 +11,8 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/shopspring/decimal"
+
 	"perp-go/internal/api"
 	"perp-go/internal/cache"
 	"perp-go/internal/config"
@@ -53,7 +55,12 @@ func main() {
 	riskLimitRepo := repo.NewRiskLimitRepo(dbConn)
 	klineRepo := repo.NewKlineRepo(dbConn)
 
-	markPriceSvc := service.NewMarkPriceService(rdb)
+	markPriceSvc := service.NewMarkPriceService(rdb).WithConfig(service.MarkPriceConfig{
+		MaxIndexAge:  cfg.MarkPriceMaxIndexAge,
+		MaxDeviation: decimal.NewFromFloat(cfg.MarkPriceMaxDeviation),
+		BasisWindow:  cfg.MarkPriceBasisWindow,
+		RequireIndex: cfg.MarkPriceRequireIndex,
+	})
 	positionSvc := service.NewPositionService(positionRepo, riskLimitRepo, markPriceSvc)
 	accountSvc := service.NewAccountService(accountRepo, positionSvc, txRepo)
 	fundingSvc := service.NewFundingService(rdb, coinRepo, positionRepo, fundingRepo, accountSvc, txRepo, markPriceSvc)

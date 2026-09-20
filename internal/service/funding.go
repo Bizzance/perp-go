@@ -50,7 +50,7 @@ func (s *FundingService) SampleOnce(ctx context.Context) {
 		return
 	}
 	for _, coin := range coins {
-		mark, hasMark := s.markPrice.Get(ctx, coin.Symbol)
+		mark, hasMark := s.markPrice.GetFresh(ctx, coin.Symbol)
 		index, hasIndex := s.markPrice.GetIndexPrice(ctx, coin.Symbol)
 		if !hasMark || !hasIndex || index.Sign() <= 0 {
 			continue
@@ -93,9 +93,9 @@ func (s *FundingService) settleSymbolIfDue(ctx context.Context, coin model.Coin,
 	if boundary <= lastSettled {
 		return nil // 还没跨过下一个结算点
 	}
-	mark, hasMark := s.markPrice.Get(ctx, coin.Symbol)
+	mark, hasMark := s.markPrice.GetFresh(ctx, coin.Symbol)
 	if !hasMark {
-		return nil // 没有标记价格没法结算，跳过、等下一次tick重试
+		return nil // 没有标记价格、或者喂价断了标记价已经过期，没法结算，跳过、等下一次tick重试
 	}
 	index, hasIndex := s.markPrice.GetIndexPrice(ctx, coin.Symbol)
 	if !hasIndex {
