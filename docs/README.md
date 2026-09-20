@@ -16,6 +16,7 @@ U本位永续合约交易系统，MVP阶段。文档按主题拆分，方便单�
 - [conditional-orders.md](conditional-orders.md) —— 条件单（止盈止损/条件开仓）
 - [risk-limit-tiers.md](risk-limit-tiers.md) —— 保证金分档（风险限额）
 - [leverage.md](leverage.md) —— 独立杠杆设置接口
+- [mark-price.md](mark-price.md) —— 标记价：指数价、盘口基差、最新成交价取中位数，抗对敲操纵，喂价断了怎么办
 - [funding-rate.md](funding-rate.md) —— 资金费率机制
 - [liquidation.md](liquidation.md) —— 强平与保险基金
 - [deployment.md](deployment.md) —— 部署：Docker镜像、Compose编排、生产环境清单、发布与故障排查

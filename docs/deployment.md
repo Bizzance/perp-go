@@ -131,18 +131,22 @@ mysql -h $HOST -u $ADMIN -p < sql/schema.sql
 cp deploy/.env.prod.example deploy/.env      # 把所有 CHANGE_ME 换成真实值
 ```
 
-| 变量（应用读取）        | 说明                                                                                      | 默认值（代码里）              |
-|-------------------------|-------------------------------------------------------------------------------------------|-------------------------------|
-| `PERP_MYSQL_DSN`        | `user:pass@tcp(host:3306)/perpgo?parseTime=true&loc=UTC`，`loc` 要跟 `TZ` 一致            | 本地开发用的默认值，**必须覆盖** |
-| `PERP_REDIS_ADDR`       | `host:6379`                                                                               | `127.0.0.1:6379`              |
-| `PERP_REDIS_PASS`       | Redis 密码                                                                                | 本地开发用的默认值，**必须覆盖** |
-| `PERP_KAFKA_BROKER`     | `host:9092`                                                                               | `127.0.0.1:9092`              |
-| `PERP_API_ADDR`         | api 监听地址                                                                              | `:7001`                       |
-| `PERP_ENGINE_HTTP_ADDR` | engine 的 HTTP 监听地址                                                                   | `:7002`                       |
-| `PERP_API_KEYS`         | 接口鉴权的密钥，格式 `id:secret:trade\|ops`，多把逗号分隔。**必填**，没配置进程拒绝启动    | 空                            |
-| `PERP_AUTH_DISABLED`    | `true` 关闭鉴权，**只给本地开发用，生产绝不能设**                                         | `false`                       |
-| `PERP_NODE_ID`          | 雪花 ID 的节点号，**每个实例必须不同**                                                    | api=0，engine=1               |
-| `PERP_ENGINE_SYMBOLS`   | engine 分片：本实例负责的 symbol，逗号分隔。留空=负责全部（单实例）                       | 空                            |
+| 变量（应用读取）              | 说明                                                                                                            | 默认值（代码里）                 |
+|-------------------------------|-----------------------------------------------------------------------------------------------------------------|----------------------------------|
+| `PERP_MYSQL_DSN`              | `user:pass@tcp(host:3306)/perpgo?parseTime=true&loc=UTC`，`loc` 要跟 `TZ` 一致                                  | 本地开发用的默认值，**必须覆盖** |
+| `PERP_REDIS_ADDR`             | `host:6379`                                                                                                     | `127.0.0.1:6379`                 |
+| `PERP_REDIS_PASS`             | Redis 密码                                                                                                      | 本地开发用的默认值，**必须覆盖** |
+| `PERP_KAFKA_BROKER`           | `host:9092`                                                                                                     | `127.0.0.1:9092`                 |
+| `PERP_API_ADDR`               | api 监听地址                                                                                                    | `:7001`                          |
+| `PERP_ENGINE_HTTP_ADDR`       | engine 的 HTTP 监听地址                                                                                         | `:7002`                          |
+| `PERP_API_KEYS`               | 接口鉴权的密钥，格式 `id:secret:trade\|ops`，多把逗号分隔。**必填**，没配置进程拒绝启动                         | 空                               |
+| `PERP_AUTH_DISABLED`          | `true` 关闭鉴权，**只给本地开发用，生产绝不能设**                                                               | `false`                          |
+| `PERP_NODE_ID`                | 雪花 ID 的节点号，**每个实例必须不同**                                                                          | api=0，engine=1                  |
+| `PERP_ENGINE_SYMBOLS`         | engine 分片：本实例负责的 symbol，逗号分隔。留空=负责全部（单实例）                                             | 空                               |
+| `PERP_MARK_REQUIRE_INDEX`     | `true`=没有指数价就不产生标记价，**生产必须设**；false 时没喂过指数价的合约标记价退回最新成交价，可被自成交操纵 | `false`                          |
+| `PERP_MARK_MAX_INDEX_AGE_SEC` | 指数价多久没更新算断供（标记价冻结、强平/资金费率/条件单暂停）                                                  | `30`                             |
+| `PERP_MARK_MAX_DEVIATION`     | 标记价相对指数价的最大偏离比例                                                                                  | `0.01`                           |
+| `PERP_MARK_BASIS_WINDOW_SEC`  | 盘口基差取多长时间窗口的平均                                                                                    | `60`                             |
 
 Compose 层的变量：`IMAGE_TAG`、`BIND_ADDR`、`API_PORT`、`ENGINE_PORT`、`API_NODE_ID`、`ENGINE_NODE_ID`、`TZ`。
 代码里的默认密码只是为了本地开发方便，写在源码里，**生产一定要用环境变量覆盖**；必填的变量缺失时 Compose 会直接
@@ -166,6 +170,9 @@ make compose-prod-up      # 等价于 docker compose --env-file deploy/.env -f d
   网关和这台机器通网时再改成内网地址，**不要绑 `0.0.0.0` 直接暴露到公网**
 - [ ] **网关没有改写路径、查询串、请求体**（签名覆盖这三样，改写会让签名对不上）
 - [ ] 限流和 IP 白名单还没做（见 auth-design.md"还没做"），需要的话先在网关层做
+- [ ] **标记价的指数价来源已经接好**：`PERP_MARK_REQUIRE_INDEX=true`，并且有行情源在持续调 `POST /index-price`
+  （建议每秒 1 到 2 次，超过 30 秒没更新强平会暂停）。不开的话没喂过指数价的合约标记价退回最新成交价，两个账户
+  对敲一笔就能推动别人的强平线，见 [mark-price.md](mark-price.md)
 - [ ] MySQL、Redis 密码已经覆盖默认值
 - [ ] MySQL、Redis、Kafka 只对应用所在网络开放，不暴露公网
 - [ ] `deploy/.env` 没有提交到 git

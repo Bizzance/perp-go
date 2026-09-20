@@ -62,7 +62,7 @@ X-Signature  HMAC-SHA256(secret, timestamp\nnonce\nMETHOD\npath\nrawQuery\nsha25
 | `order_not_found`       | 400  | 委托/条件单不存在，或不属于这个`uid`                                                      |
 | `order_not_cancelable`  | 400  | 委托已成交完/已撤销，或条件单已触发，不能再撤。不是故障，按最新状态处理即可               |
 | `position_not_found`    | 400  | 这个`uid+symbol+side`没有持仓（改杠杆时）                                                 |
-| `no_mark_price`         | 400  | 这个合约还没有标记价格（从没成交过），市价单/校验杠杆无法进行。先用限价单成交出第一个价格 |
+| `no_mark_price`         | 400  | 这个合约还没有标记价格（新合约没成交过，或生产模式下还没喂过指数价），市价单/校验杠杆无法进行 |
 | `price_out_of_range`    | 400  | 限价单价格偏离参考价超过价格保护带（`priceProtectionRatio`），开仓单才会触发              |
 | `price_tick_invalid`    | 400  | 价格不是最小变动单位（`priceTick`）的整数倍                                               |
 | `volume_out_of_range`   | 400  | 数量低于`minVolume`、超过`maxVolume`或不是`volumeStep`的整数倍                            |
@@ -654,7 +654,8 @@ GET /order/detail?uid=10001&requestId=order-20260919-0001
 ```
 
 - 没有对应数据的字段是`null`（比如合约从没成交过），**不是0**——0是合法价格，区分不了
-- `lastPrice`是最新一笔成交价；本系统里标记价格就是最新成交价，所以两者通常相等
+- `lastPrice`是最新一笔成交价；`markPrice`是标记价，由指数价、盘口基差、最新成交价取中位数得出，**不等于**最新成交价，
+  见 [mark-price.md](mark-price.md)
 - `indexPrice`是外部行情源喂进来的指数价格（`POST /index-price`）
 - **24h统计口径**：最近24根1小时K线聚合（含当前还没走完的这一根），实际时间窗口在23~24小时之间，不是严格滚动的24小时
 - `change24h`是小数比例（`0.0265`=+2.65%）
@@ -702,8 +703,11 @@ GET /order/detail?uid=10001&requestId=order-20260919-0001
 
 ### `POST /index-price`（运营接口）
 
-外部行情源推送指数价格，见 [funding-rate.md](funding-rate.md)。**这是运营/行情源调用的接口，不是给终端用户的**，
-正式对接时应该单独授权。
+外部行情源推送指数价格。指数价是标记价的锚，标记价再决定强平、盈亏、条件单触发和资金费率，见
+[mark-price.md](mark-price.md)。**这是运营/行情源调用的接口，不是给终端用户的**，正式对接时应该单独授权。
+
+**要持续推**：服务端记录每次推送的时间，超过30秒（`PERP_MARK_MAX_INDEX_AGE_SEC`）没更新就算断供，标记价冻结、
+强平/资金费率/条件单暂停。建议每秒推1到2次。
 
 ```json
 { "symbol": "BTCUSDT", "price": 64800.5 }

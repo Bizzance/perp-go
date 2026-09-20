@@ -131,7 +131,7 @@ func plan(desired []level, existing []liveOrder) (cancels []string, places []pla
 }
 
 // 行情情景的偏移往目标推进一步：每一步最多动maxStep个百分点。开仓限价单有价格保护带(偏离标记价超过5%会被拒)，
-// 做市的报价和标记价必须一步步走，一步跳很远的话挂单全被拒、对敲也做不了，标记价就永远追不上
+// 做市的报价和标记价必须一步步走，一步跳很远的话挂单全被拒，报价就永远进不了订单簿
 func rampOffset(cur, target, maxStep decimal.Decimal) decimal.Decimal {
 	diff := target.Sub(cur)
 	if diff.Abs().LessThanOrEqual(maxStep) {
