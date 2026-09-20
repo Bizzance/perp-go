@@ -18,6 +18,7 @@
 |-------------------|------|-------------------------------------------------------------------|
 | `contract-api`    | 7001 | 对外接口 + WebSocket网关，无状态，可多实例                        |
 | `contract-engine` | 7002 | 撮合/风控/条件单/资金费率，**有状态**（订单簿在内存），默认单实例 |
+| `index-feeder`    | 无   | 指数价喂价：从币安/OKX/Bybit取指数价取中位数，推给api。**生产必须部署**，见 [index-feeder.md](index-feeder.md) |
 | MySQL 8.x         | 3306 | 用`sql/schema.sql`初始化                                          |
 | Redis             | 6379 | 标记价、指数价、分布式锁、WS推送                                  |
 | Kafka             | 9092 | 下单/撤单/结束本轮事件                                            |
@@ -146,6 +147,7 @@ cp deploy/.env.prod.example deploy/.env      # 把所有 CHANGE_ME 换成真实�
 | `PERP_MARK_REQUIRE_INDEX`     | `true`=没有指数价就不产生标记价，**生产必须设**；false 时没喂过指数价的合约标记价退回最新成交价，可被自成交操纵 | `false`                          |
 | `PERP_MARK_MAX_INDEX_AGE_SEC` | 指数价多久没更新算断供（标记价冻结、强平/资金费率/条件单暂停）                                                  | `30`                             |
 | `PERP_MARK_MAX_DEVIATION`     | 标记价相对指数价的最大偏离比例                                                                                  | `0.01`                           |
+| `FEEDER_*`（喂价器读取，不是应用读取）| 喂价器的密钥、合约、来源、阈值，见 [index-feeder.md](index-feeder.md) | 见文档 |
 | `PERP_MARK_BASIS_WINDOW_SEC`  | 盘口基差取多长时间窗口的平均                                                                                    | `60`                             |
 
 Compose 层的变量：`IMAGE_TAG`、`BIND_ADDR`、`API_PORT`、`ENGINE_PORT`、`API_NODE_ID`、`ENGINE_NODE_ID`、`TZ`。
@@ -170,9 +172,10 @@ make compose-prod-up      # 等价于 docker compose --env-file deploy/.env -f d
   网关和这台机器通网时再改成内网地址， **不要绑 `0.0.0.0` 直接暴露到公网**
 - [ ] **网关没有改写路径、查询串、请求体**（签名覆盖这三样，改写会让签名对不上）
 - [ ] 限流和 IP 白名单还没做（见 auth-design.md"还没做"），需要的话先在网关层做
-- [ ] **标记价的指数价来源已经接好**：`PERP_MARK_REQUIRE_INDEX=true`，并且有行情源在持续调 `POST /index-price`
-  （建议每秒 1 到 2 次，超过 30 秒没更新强平会暂停）。不开的话没喂过指数价的合约标记价退回最新成交价，两个账户
-  对敲一笔就能推动别人的强平线，见 [mark-price.md](mark-price.md)
+- [ ] **标记价的指数价来源已经接好**：`PERP_MARK_REQUIRE_INDEX=true`，并且 index-feeder 在跑（`COMPOSE_PROFILES=feeder`，
+  `PERP_API_KEYS` 里加了一把 `feeder:<secret>:ops`，`FEEDER_API_KEY_ID`/`FEEDER_API_SECRET` 填对，见
+  [index-feeder.md](index-feeder.md)）。超过 30 秒没喂价强平会暂停。不开 `PERP_MARK_REQUIRE_INDEX` 的话没喂过指数价的合约
+  标记价退回最新成交价，两个账户对敲一笔就能推动别人的强平线，见 [mark-price.md](mark-price.md)
 - [ ] MySQL、Redis 密码已经覆盖默认值
 - [ ] MySQL、Redis、Kafka 只对应用所在网络开放，不暴露公网
 - [ ] `deploy/.env` 没有提交到 git

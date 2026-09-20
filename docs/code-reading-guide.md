@@ -32,7 +32,8 @@
 ```
 cmd/
   contract-api/main.go      contract-api进程入口：接线路由、repo、service，起Gin+WS Hub
-  contract-engine/main.go   contract-engine进程入口：接线撮合引擎、消费Kafka、起3个定时任务
+  contract-engine/main.go   contract-engine进程入口：接线撮合引擎、消费Kafka、起4个定时任务(含每秒刷新标记价)
+  index-feeder/main.go      指数价喂价进程入口：读环境变量，接线三家来源和签名发布方，见index-feeder.md
 
 internal/
   api/          HTTP handler层。router.go是核心交易链路（下单/撤单/条件单/杠杆/账户）的
@@ -52,6 +53,7 @@ internal/
   pubsub/       WS推送用的Redis channel命名规则，发布端(service/push.go)和订阅端
                 (ws/hub.go)共用同一份，见websocket.md解释过的"两边各自维护一份前缀
                 容易出bug"教训
+  indexfeed/    指数价喂价器的逻辑：币安/OKX/Bybit三家来源、聚合(中位数+离群)、跳变保护、签名发布
   cache/        Redis封装：标记价格、指数价格、资金费率采样累加器、WS推送的Pub/Sub
   mq/           Kafka生产者/消费者封装，含消息级去重（WithDedup）
   config/       环境变量加载，全部可调参数（扫描间隔、超时阈值、node id等）集中在这里

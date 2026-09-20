@@ -88,17 +88,16 @@
 
 ## 喂价的要求
 
-生产环境需要一个持续调用`POST /index-price`的行情源（ops权限的密钥），频率要明显高于`MaxIndexAge`，
-建议每秒1到2次。测试环境里由模拟客户端的系统做市承担这个角色（每个周期同步一次币安的价格）。
-
-**目前只支持单一来源**：喂价服务本身要保证价格可信。生产建议至少取2到3家交易所（币安、OKX、Bybit）的中位数
-再推进来，任何一家的价格异常或不可达都不影响结果——这个喂价适配器还没有做，是上线前要补的（见
-[known-limitations.md](known-limitations.md)）。
+生产环境需要一个持续调用`POST /index-price`的行情源（ops权限的密钥），频率要明显高于`MaxIndexAge`。
+仓库里自带这个组件：**index-feeder**，从币安、OKX、Bybit三家取指数价、取中位数、带离群和跳变保护，签名后推给contract-api，
+见 [index-feeder.md](index-feeder.md)。生产环境在`deploy/.env`里设`COMPOSE_PROFILES=feeder`就会一起拉起。
+测试环境里由模拟客户端的系统做市承担这个角色（每个周期同步一次币安的价格，还带行情情景偏移）。
 
 ## 已知限制
 
-- **喂价源是单点**：见上。喂价源自己被操纵或者出错，标记价会跟着错。`MaxDeviation`只限制标记价相对指数价的偏离，
-  不校验指数价本身是否合理，`POST /index-price`也没有单次跳变幅度的校验
+- **`POST /index-price`本身没有校验**：`MaxDeviation`只限制标记价相对指数价的偏离，不校验指数价本身是否合理，接口也没有单次
+  跳变幅度的校验，拿着ops密钥的人可以推任意正价格。离群和跳变保护在index-feeder里，见 [index-feeder.md](index-feeder.md)，
+  所以喂价的密钥要单独发、只给`ops`
 - **指数价的时间戳用contract-api所在机器的时钟，新鲜度由engine用自己的时钟判断**：两台机器的时钟偏差要远小于
   `MaxIndexAge`（30秒），不然会误判断供或者漏判。同一台机器或者有NTP的环境不用担心
 - **每笔成交多几次Redis往返**：重算标记价要读最新成交价、指数价、当前标记价再写回，比以前一次写入多几次往返，
