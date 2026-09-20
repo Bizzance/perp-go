@@ -37,6 +37,7 @@ const (
 	ErrIdempotencyConflict  = "idempotency_conflict"   // 同一个requestId已经用于一笔参数不同的请求
 	ErrRoundMismatch        = "round_mismatch"         // 结束本轮指定的round大于账户当前轮数
 	ErrAccountFrozen        = "account_frozen"         // 账户已冻结，不允许开仓/创建条件开仓单/修改杠杆
+	ErrIndexPriceJump       = "index_price_jump"       // 指数价相对当前值跳变超过服务端阈值，没有写入，新价位持续一段时间后会被承认
 	ErrInternal             = "internal_error"         // 服务端内部错误
 )
 

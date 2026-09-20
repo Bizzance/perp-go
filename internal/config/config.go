@@ -37,6 +37,10 @@ type Config struct {
 	MarkPriceMaxDeviation float64       // PERP_MARK_MAX_DEVIATION，标记价相对指数价的最大偏离比例
 	MarkPriceBasisWindow  time.Duration // PERP_MARK_BASIS_WINDOW_SEC，盘口基差取多长窗口的平均
 	MarkPriceRequireIndex bool          // PERP_MARK_REQUIRE_INDEX=true，没有指数价就不产生标记价，生产环境必须开
+	// POST /index-price的服务端跳变保护，见service.MarkPriceService.PushIndexPrice。
+	// 0=不校验(没设这个环境变量就是这样)，生产环境设成0.05
+	IndexMaxJump     float64       // PERP_INDEX_MAX_JUMP，一次推送相对当前指数价的变动超过这个比例就要等确认
+	IndexJumpConfirm time.Duration // PERP_INDEX_JUMP_CONFIRM_SEC，新价位要持续多久才承认
 
 	// EngineSymbols 这个contract-engine实例负责撮合的symbol列表，来自PERP_ENGINE_SYMBOLS
 	// (逗号分隔，如"BTCUSDT,ETHUSDT")。nil(没设这个环境变量)=负责全部symbol，这是单实例
@@ -204,6 +208,8 @@ func Load(defaultNodeID uint64) Config {
 		MarkPriceMaxDeviation:     envFloat("PERP_MARK_MAX_DEVIATION", 0.01),
 		MarkPriceBasisWindow:      time.Duration(envInt("PERP_MARK_BASIS_WINDOW_SEC", 60)) * time.Second,
 		MarkPriceRequireIndex:     os.Getenv("PERP_MARK_REQUIRE_INDEX") == "true",
+		IndexMaxJump:              envFloat("PERP_INDEX_MAX_JUMP", 0),
+		IndexJumpConfirm:          time.Duration(envInt("PERP_INDEX_JUMP_CONFIRM_SEC", 3)) * time.Second,
 		EngineSymbols:             parseEngineSymbols(os.Getenv("PERP_ENGINE_SYMBOLS")),
 	}
 }

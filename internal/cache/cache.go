@@ -65,6 +65,51 @@ func (c *Cache) GetIndexPrice(ctx context.Context, symbol string) (price string,
 	return price, tsMs, nil
 }
 
+func indexJumpKey(symbol string) string { return "perpgo:index_jump:" + symbol }
+
+// 待确认的指数价跳变：服务端跳变保护(MarkPriceService.PushIndexPrice)拒绝了一次超过阈值的推送后，
+// 把这个新价位记下来，等后续推送持续落在同一价位再承认。三个字段：目标价位、第一次出现的时间、
+// 最近一次出现的时间(毫秒)。状态放Redis而不是进程内存，是因为contract-api可以多实例部署，
+// 同一个喂价方的连续推送可能落在不同实例上
+type IndexJump struct {
+	Target  string
+	FirstTs int64
+	LastTs  int64
+}
+
+// key的过期时间只是清理用的兜底(喂价方消失了、这个key不会一直留着)，"是不是连续"由调用方
+// 用LastTs和自己的时钟判断，不靠Redis的过期——测试里的时钟可以手动拨，Redis的过期不行
+const indexJumpKeyTTL = 10 * time.Minute
+
+func (c *Cache) SetIndexJump(ctx context.Context, symbol string, j IndexJump) error {
+	pipe := c.rdb.TxPipeline()
+	pipe.HSet(ctx, indexJumpKey(symbol), "target", j.Target, "first", j.FirstTs, "last", j.LastTs)
+	pipe.Expire(ctx, indexJumpKey(symbol), indexJumpKeyTTL)
+	_, err := pipe.Exec(ctx)
+	return err
+}
+
+// 返回(零值, false, nil)表示没有待确认的跳变
+func (c *Cache) GetIndexJump(ctx context.Context, symbol string) (IndexJump, bool, error) {
+	m, err := c.rdb.HGetAll(ctx, indexJumpKey(symbol)).Result()
+	if err != nil {
+		return IndexJump{}, false, err
+	}
+	if len(m) == 0 {
+		return IndexJump{}, false, nil
+	}
+	first, err1 := strconv.ParseInt(m["first"], 10, 64)
+	last, err2 := strconv.ParseInt(m["last"], 10, 64)
+	if err1 != nil || err2 != nil || m["target"] == "" {
+		return IndexJump{}, false, nil // 数据损坏当没有，下一次推送会重新记
+	}
+	return IndexJump{Target: m["target"], FirstTs: first, LastTs: last}, true, nil
+}
+
+func (c *Cache) ClearIndexJump(ctx context.Context, symbol string) error {
+	return c.rdb.Del(ctx, indexJumpKey(symbol)).Err()
+}
+
 func lastTradeKey(symbol string) string { return "perpgo:last:" + symbol }
 
 // 最新成交价单独存一份：标记价格不再等于它，但重算标记价格(引擎重启后、喂价变化时)还要用它

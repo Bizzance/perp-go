@@ -24,15 +24,24 @@ type MarkPriceConfig struct {
 	// true=没有指数价就不产生标记价(生产环境应该开)；false=没有喂过指数价时退回"标记价=最新成交价"，
 	// 只给本地开发和没有行情源的环境用——最新成交价可以被自成交操纵，见docs/mark-price.md
 	RequireIndex bool
+	// 服务端的指数价跳变保护(POST /index-price)：一次推送相对当前指数价的变动超过这个比例(0.05=5%)，
+	// 先不写，要这个新价位持续IndexJumpConfirm之后才承认，见PushIndexPrice。<=0表示不校验，
+	// 默认不校验：本地开发、模拟客户端的行情情景(故意大幅改价)、各种测试都不需要它，生产环境显式打开
+	IndexMaxJump     decimal.Decimal
+	IndexJumpConfirm time.Duration
 }
 
 func DefaultMarkPriceConfig() MarkPriceConfig {
 	return MarkPriceConfig{
-		MaxIndexAge:  30 * time.Second,
-		MaxDeviation: decimal.RequireFromString("0.01"),
-		BasisWindow:  60 * time.Second,
+		MaxIndexAge:      30 * time.Second,
+		MaxDeviation:     decimal.RequireFromString("0.01"),
+		BasisWindow:      60 * time.Second,
+		IndexJumpConfirm: 3 * time.Second,
 	}
 }
+
+// 判断"这次推送是不是还在同一个待确认价位"的容差(1%)，跟index-feeder的离群阈值默认值一致
+var indexJumpTolerance = decimal.RequireFromString("0.01")
 
 // 标记价格服务。标记价格是强平、未实现盈亏、条件单触发、资金费率共同依赖的价格，如果直接用最新
 // 成交价，谁能在我们的盘口上成交谁就能推动别人的强平线(两个账户对敲一笔就行)，所以不能单靠成交价：
@@ -155,6 +164,91 @@ func (s *MarkPriceService) indexStale(ts int64) bool {
 // 外部行情源推送这个symbol的指数价格。这个进程(contract-api)只存价格，标记价由engine按ticker重算
 func (s *MarkPriceService) SetIndexPrice(ctx context.Context, symbol string, price decimal.Decimal) error {
 	return s.cache.SetIndexPrice(ctx, symbol, price.String(), s.now())
+}
+
+// 指数价推送的结果
+type IndexPushResult struct {
+	Accepted bool
+	// 没被接受时才有意义：当前生效的指数价，以及这个新价位已经持续了多久
+	Current decimal.Decimal
+	Waited  time.Duration
+}
+
+// POST /index-price走这个：在SetIndexPrice前面加一道跳变保护。接口本身没有别的校验，拿着ops密钥
+// 的人可以推任意价格，这道保护限制的是"变动的速度"：
+//
+//   - 相对当前指数价变动不超过IndexMaxJump：直接写
+//   - 超过：不写，把这个新价位记下来；后续推送持续落在同一价位(容差1%)满IndexJumpConfirm之后才承认。
+//     期间任何一次落在正常范围内的推送(真实的喂价器每秒都在推)都会清掉这个待确认状态，
+//     所以靠短时间内连推几次来"凑够确认"是行不通的
+//   - 当前指数价不存在或已经陈旧：直接写。陈旧的价格不是可靠的参照，卡住它等于喂价断了以后
+//     再也恢复不了；这也是保护的上限——真实的闪崩最多被拦到断供阈值(MaxIndexAge)为止
+//
+// 保护不了的：拿着密钥的人每次只挪一小步。所以密钥仍然要单独发、只给ops。
+// 待确认状态放Redis(contract-api多实例)，读-判断-写不是原子的，但并发只可能出现在"同一个
+// 喂价方"和"攻击者"之间，前者每秒清一次待确认状态，攻击者攒不出满IndexJumpConfirm的持续时间
+func (s *MarkPriceService) PushIndexPrice(ctx context.Context, symbol string, price decimal.Decimal) (IndexPushResult, error) {
+	if s.cfg.IndexMaxJump.Sign() <= 0 {
+		return IndexPushResult{Accepted: true}, s.SetIndexPrice(ctx, symbol, price)
+	}
+	cur, curTs, hasCur := s.readIndex(ctx, symbol)
+	pending, hasPending, err := s.cache.GetIndexJump(ctx, symbol)
+	if err != nil {
+		return IndexPushResult{}, err
+	}
+	now := s.now()
+	accept, next, continued := decideIndexPush(s.cfg, now, price, cur, curTs, hasCur, pending, hasPending)
+	if !accept {
+		if err := s.cache.SetIndexJump(ctx, symbol, next); err != nil {
+			return IndexPushResult{}, err
+		}
+		if !continued {
+			log.Printf("[WARN] 指数价跳变被服务端保护拦下, 等待确认, symbol=%s, 当前=%s, 推送=%s, 阈值=%s",
+				symbol, cur, price, s.cfg.IndexMaxJump)
+		}
+		return IndexPushResult{Current: cur, Waited: time.Duration(now-next.FirstTs) * time.Millisecond}, nil
+	}
+	if err := s.SetIndexPrice(ctx, symbol, price); err != nil {
+		return IndexPushResult{}, err
+	}
+	if hasPending {
+		if err := s.cache.ClearIndexJump(ctx, symbol); err != nil {
+			// 价格已经写进去了。残留的待确认状态无害：下一次落在正常范围内的推送会再清一次
+			log.Printf("[WARN] 清理待确认的指数价跳变失败, symbol=%s: %v", symbol, err)
+		}
+	}
+	if continued {
+		log.Printf("[WARN] 指数价大幅跳变已确认, symbol=%s, %s -> %s", symbol, cur, price)
+	}
+	return IndexPushResult{Accepted: true}, nil
+}
+
+// PushIndexPrice的判断部分，不碰Redis也不读时钟，方便单测。
+// accept=true写入；false则不写，要把next记为待确认状态。continued=true表示这次推送延续了已有的待确认
+// 价位(而不是新起一个价位)——调用方用它决定要不要打日志，避免持续的推送每次都打一条
+func decideIndexPush(cfg MarkPriceConfig, now int64, price, cur decimal.Decimal, curTs int64, hasCur bool,
+	pending cache.IndexJump, hasPending bool) (accept bool, next cache.IndexJump, continued bool) {
+	maxAge := cfg.MaxIndexAge.Milliseconds()
+	if cfg.IndexMaxJump.Sign() <= 0 || !hasCur || now-curTs > maxAge ||
+		price.Sub(cur).Abs().Div(cur).LessThanOrEqual(cfg.IndexMaxJump) {
+		return true, cache.IndexJump{}, false
+	}
+	if hasPending && now-pending.LastTs <= maxAge {
+		if target, err := decimal.NewFromString(pending.Target); err == nil && target.Sign() > 0 &&
+			price.Sub(target).Abs().Div(target).LessThanOrEqual(indexJumpTolerance) {
+			continued = true
+		}
+	}
+	if continued {
+		next = pending
+		next.LastTs = now
+	} else {
+		next = cache.IndexJump{Target: price.String(), FirstTs: now, LastTs: now}
+	}
+	if now-next.FirstTs >= cfg.IndexJumpConfirm.Milliseconds() {
+		return true, cache.IndexJump{}, continued
+	}
+	return false, next, continued
 }
 
 // 返回(zero, false)表示这个symbol还没有任何外部行情源喂过指数价格。不管陈不陈旧都返回，

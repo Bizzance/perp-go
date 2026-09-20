@@ -24,6 +24,10 @@ x-common-env: &common-env
   PERP_MARK_MAX_INDEX_AGE_SEC: ${PERP_MARK_MAX_INDEX_AGE_SEC:-}
   PERP_MARK_MAX_DEVIATION: ${PERP_MARK_MAX_DEVIATION:-}
   PERP_MARK_BASIS_WINDOW_SEC: ${PERP_MARK_BASIS_WINDOW_SEC:-}
+  # POST /index-price的服务端跳变保护(只有api用得上)：一次推送相对当前指数价变动超过这个比例就要等新价位持续
+  # CONFIRM_SEC秒才承认。留空=不校验(测试环境、模拟客户端会故意大幅改价)，生产设成0.05，见docs/mark-price.md
+  PERP_INDEX_MAX_JUMP: ${PERP_INDEX_MAX_JUMP:-}
+  PERP_INDEX_JUMP_CONFIRM_SEC: ${PERP_INDEX_JUMP_CONFIRM_SEC:-}
 
 services:
   # 有状态：订单簿在内存里，重启时从MySQL重建。默认单实例，同一个symbol的订单簿只能在
@@ -116,6 +120,16 @@ services:
       FEEDER_MAX_JUMP: ${FEEDER_MAX_JUMP:-}
       FEEDER_JUMP_CONFIRM: ${FEEDER_JUMP_CONFIRM:-}
       FEEDER_INTERVAL_MS: ${FEEDER_INTERVAL_MS:-}
+      FEEDER_HEALTH_MAX_AGE_SEC: ${FEEDER_HEALTH_MAX_AGE_SEC:-}
+    # 状态端口7003不映射到宿主机(FEEDER_HTTP_ADDR保持默认，健康检查依赖它)：有合约超过
+    # FEEDER_HEALTH_MAX_AGE_SEC没成功发布就返回503，容器变unhealthy。restart: unless-stopped只在进程退出时重启，
+    # 不会因为unhealthy重启，所以这是给监控看的信号，不是自愈，见docs/index-feeder.md"状态和健康检查"
+    healthcheck:
+      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7003/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 20s
     depends_on:
       api:
         condition: service_healthy

@@ -3,6 +3,7 @@ package api
 import (
 	"context"
 	"errors"
+	"fmt"
 	"log"
 	"net/http"
 	"reflect"
@@ -1529,8 +1530,16 @@ func (s *Server) setIndexPrice(c *gin.Context) {
 		fail(c, 400, "price参数不合法")
 		return
 	}
-	if err := s.markPrice.SetIndexPrice(c.Request.Context(), req.Symbol, req.Price); err != nil {
+	res, err := s.markPrice.PushIndexPrice(c.Request.Context(), req.Symbol, req.Price)
+	if err != nil {
 		fail(c, 500, err.Error())
+		return
+	}
+	if !res.Accepted {
+		// 不是喂价方的错，是保护在等这个新价位持续够久。真实的行情大幅变动会在几秒内被承认，
+		// 喂价方继续按周期推就行，不用特殊处理
+		failC(c, 400, ErrIndexPriceJump, fmt.Sprintf("指数价相对当前值%s的变动超过服务端阈值，暂不写入，新价位持续一段时间后才会被承认(已持续%.1f秒)",
+			res.Current, res.Waited.Seconds()))
 		return
 	}
 	ok(c, nil)

@@ -60,6 +60,9 @@ func main() {
 		MaxDeviation: decimal.NewFromFloat(cfg.MarkPriceMaxDeviation),
 		BasisWindow:  cfg.MarkPriceBasisWindow,
 		RequireIndex: cfg.MarkPriceRequireIndex,
+		// 服务端跳变保护只有contract-api会用到(POST /index-price在这里)，engine不需要
+		IndexMaxJump:     decimal.NewFromFloat(cfg.IndexMaxJump),
+		IndexJumpConfirm: cfg.IndexJumpConfirm,
 	})
 	positionSvc := service.NewPositionService(positionRepo, riskLimitRepo, markPriceSvc)
 	accountSvc := service.NewAccountService(accountRepo, positionSvc, txRepo)

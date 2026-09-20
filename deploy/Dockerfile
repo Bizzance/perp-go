@@ -38,7 +38,8 @@ COPY --from=build /out/contract-engine /app/contract-engine
 EXPOSE 7002
 ENTRYPOINT ["/app/contract-engine"]
 
-# 指数价喂价进程：从多家交易所取指数价、取中位数、推给contract-api。要访问外网，不监听端口
+# 指数价喂价进程：从多家交易所取指数价、取中位数、推给contract-api。要访问外网；7003是状态和健康检查端口
 FROM runtime AS feeder
 COPY --from=build /out/index-feeder /app/index-feeder
+EXPOSE 7003
 ENTRYPOINT ["/app/index-feeder"]

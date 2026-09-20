@@ -5,7 +5,11 @@ import (
 	"time"
 
 	"github.com/shopspring/decimal"
+
+	"perp-go/internal/cache"
 )
+
+type cacheJump = cache.IndexJump
 
 func TestMedian3_AllOrders(t *testing.T) {
 	vals := []string{"1", "2", "3"}
@@ -134,5 +138,139 @@ func TestBasisWindow_AverageAndEviction(t *testing.T) {
 	}
 	if got := w.average(100_000, window); !got.IsZero() {
 		t.Fatalf("全部过期应该回到0: got %s", got)
+	}
+}
+
+// ---- POST /index-price的服务端跳变保护(decideIndexPush) ----
+
+// 阈值5%，确认3秒，断供阈值30秒。当前指数价60000，1秒前写入
+func jumpCfg() MarkPriceConfig {
+	cfg := DefaultMarkPriceConfig()
+	cfg.IndexMaxJump = d("0.05")
+	cfg.IndexJumpConfirm = 3 * time.Second
+	return cfg
+}
+
+const jumpNow = int64(1_700_000_100_000) // 任意基准时间(毫秒)
+
+// 单次推送的判断：只看价格相对当前值的变动
+func TestDecideIndexPush_SingleShot(t *testing.T) {
+	cases := []struct {
+		name       string
+		price      string
+		curAgeMs   int64 // 当前指数价是多久前写入的
+		hasCur     bool
+		maxJump    string // 空=用jumpCfg的5%
+		wantAccept bool
+	}{
+		{"正常波动1%：直接写", "60600", 1000, true, "", true},
+		{"上涨恰好5%不算跳变(63000/60000)", "63000", 1000, true, "", true},
+		{"上涨略超5%：拦下", "63001", 1000, true, "", false},
+		{"下跌恰好5%不算跳变(57000)", "57000", 1000, true, "", true},
+		{"下跌略超5%：拦下", "56999", 1000, true, "", false},
+		{"翻倍：拦下", "120000", 1000, true, "", false},
+		{"砸到接近0：拦下", "600", 1000, true, "", false},
+		{"没有当前指数价(第一次喂)：不拦", "120000", 0, false, "", true},
+		{"当前指数价恰好30秒：不算陈旧，照样拦", "120000", 30_000, true, "", false},
+		{"当前指数价超过30秒：陈旧的价格不是可靠参照，不拦", "120000", 30_001, true, "", true},
+		{"阈值是0(关闭)：什么都不拦", "120000", 1000, true, "0", true},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			cfg := jumpCfg()
+			if c.maxJump != "" {
+				cfg.IndexMaxJump = d(c.maxJump)
+			}
+			accept, next, continued := decideIndexPush(cfg, jumpNow, d(c.price), d("60000"), jumpNow-c.curAgeMs, c.hasCur, cacheJump{}, false)
+			if accept != c.wantAccept {
+				t.Fatalf("accept = %v, want %v", accept, c.wantAccept)
+			}
+			if continued {
+				t.Fatal("没有待确认状态，不可能是延续")
+			}
+			if accept && next != (cacheJump{}) {
+				t.Fatalf("接受时不该留待确认状态: %+v", next)
+			}
+			if !accept && (next.Target != c.price || next.FirstTs != jumpNow || next.LastTs != jumpNow) {
+				t.Fatalf("拦下时要以这个价位新起一个待确认状态: %+v", next)
+			}
+		})
+	}
+}
+
+// 待确认状态的推进：同一价位持续够久才承认
+func TestDecideIndexPush_PendingProgression(t *testing.T) {
+	cfg := jumpCfg()
+	cur, curTs := d("60000"), jumpNow // 当前指数价一直是新鲜的
+	pending := cacheJump{Target: "66000", FirstTs: jumpNow - 2000, LastTs: jumpNow - 1000}
+	sec := func(ms int64) int64 { return jumpNow + ms }
+
+	cases := []struct {
+		name          string
+		price         string
+		now           int64
+		pending       cacheJump
+		hasPending    bool
+		wantAccept    bool
+		wantContinued bool
+		wantFirst     int64 // 拦下时next.FirstTs
+	}{
+		{"同一价位、持续2.999秒：还不够", "66000", sec(999), pending, true, false, true, pending.FirstTs},
+		{"同一价位、恰好持续3秒：承认", "66000", sec(1000), pending, true, true, true, 0},
+		{"价位在容差内(66660恰好+1%)、持续够久：承认", "66660", sec(1000), pending, true, true, true, 0},
+		{"价位略超容差(66661)：不是同一个价位，重新起头", "66661", sec(1000), pending, true, false, false, sec(1000)},
+		{"换了个价位(72000)：重新起头，不继承时间", "72000", sec(500), pending, true, false, false, sec(500)},
+		{"没有待确认状态：新起", "66000", sec(0), cacheJump{}, false, false, false, sec(0)},
+		{"待确认状态里的价位坏了：当没有，新起", "66000", sec(500), cacheJump{Target: "abc", FirstTs: 1, LastTs: jumpNow - 1000}, true, false, false, sec(500)},
+		{"待确认状态里的价位是0：当没有，新起", "66000", sec(500), cacheJump{Target: "0", FirstTs: 1, LastTs: jumpNow - 1000}, true, false, false, sec(500)},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			accept, next, continued := decideIndexPush(cfg, c.now, d(c.price), cur, curTs, true, c.pending, c.hasPending)
+			if accept != c.wantAccept || continued != c.wantContinued {
+				t.Fatalf("accept=%v continued=%v, want %v %v", accept, continued, c.wantAccept, c.wantContinued)
+			}
+			if accept {
+				if next != (cacheJump{}) {
+					t.Fatalf("接受时不该留待确认状态: %+v", next)
+				}
+				return
+			}
+			if next.FirstTs != c.wantFirst || next.LastTs != c.now {
+				t.Fatalf("next = %+v, want first=%d last=%d", next, c.wantFirst, c.now)
+			}
+		})
+	}
+}
+
+// 连续性：两次推送间隔超过断供阈值(30秒)，不算"持续"，即使价位一样也要重新起头——
+// 否则攻击者可以隔很久推一次同样的价，第二次就"持续够久"了
+func TestDecideIndexPush_GapBreaksContinuity(t *testing.T) {
+	cfg := jumpCfg()
+	pending := cacheJump{Target: "66000", FirstTs: jumpNow - 100_000, LastTs: jumpNow - 30_000}
+	// 间隔恰好30秒：还算连续
+	accept, _, continued := decideIndexPush(cfg, jumpNow, d("66000"), d("60000"), jumpNow, true, pending, true)
+	if !accept || !continued {
+		t.Fatalf("间隔恰好30秒还算连续: accept=%v continued=%v", accept, continued)
+	}
+	// 间隔30.001秒：不连续
+	pending.LastTs = jumpNow - 30_001
+	accept, next, continued := decideIndexPush(cfg, jumpNow, d("66000"), d("60000"), jumpNow, true, pending, true)
+	if accept || continued || next.FirstTs != jumpNow {
+		t.Fatalf("间隔超过30秒要重新起头: accept=%v continued=%v next=%+v", accept, continued, next)
+	}
+}
+
+// 确认时间可配置；配成0等于不设防(第一次推送就满足"持续0秒")，配置层不允许配成0，这里只锁定函数本身的行为
+func TestDecideIndexPush_ConfirmDurationIsConfigurable(t *testing.T) {
+	cfg := jumpCfg()
+	cfg.IndexJumpConfirm = 10 * time.Second
+	pending := cacheJump{Target: "66000", FirstTs: jumpNow - 9_999, LastTs: jumpNow - 1000}
+	if accept, _, _ := decideIndexPush(cfg, jumpNow, d("66000"), d("60000"), jumpNow, true, pending, true); accept {
+		t.Fatal("9.999秒还不够10秒")
+	}
+	pending.FirstTs = jumpNow - 10_000
+	if accept, _, _ := decideIndexPush(cfg, jumpNow, d("66000"), d("60000"), jumpNow, true, pending, true); !accept {
+		t.Fatal("恰好10秒应该承认")
 	}
 }

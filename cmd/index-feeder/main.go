@@ -5,6 +5,7 @@ package main
 
 import (
 	"context"
+	"errors"
 	"log"
 	"net/http"
 	"os"
@@ -51,6 +52,8 @@ func main() {
 		Outlier:     decimal.NewFromFloat(envFloat("FEEDER_OUTLIER", 0.01)),
 		MaxJump:     decimal.NewFromFloat(envFloat("FEEDER_MAX_JUMP", 0.03)),
 		JumpConfirm: int(envInt("FEEDER_JUMP_CONFIRM", 3)),
+		// 要比contract-api的断供阈值(30秒)短，告警先响、强平暂停在后面
+		HealthMaxAge: time.Duration(envInt("FEEDER_HEALTH_MAX_AGE_SEC", 15)) * time.Second,
 	}
 	if cfg.MinSources > len(sources) {
 		log.Fatalf("FEEDER_MIN_SOURCES=%d大于来源数%d，永远凑不够、一个价格也发布不出去", cfg.MinSources, len(sources))
@@ -61,6 +64,24 @@ func main() {
 	defer stop()
 	log.Printf("index-feeder启动: api=%s symbols=%v sources=%d家 最少%d家一致 间隔%s", apiURL, symbols, len(sources), cfg.MinSources, interval)
 	f := indexfeed.New(cfg, &indexfeed.APIPublisher{BaseURL: apiURL, KeyID: keyID, Secret: secret, Client: client})
+
+	// 状态和健康检查的HTTP端口，见docs/index-feeder.md"状态和健康检查"。设成off关掉
+	if addr := envOr("FEEDER_HTTP_ADDR", ":7003"); addr != "off" {
+		statusSrv := &http.Server{Addr: addr, Handler: f.Handler(), ReadHeaderTimeout: 5 * time.Second}
+		go func() {
+			log.Printf("index-feeder状态端口: %s (GET /health, GET /status)", addr)
+			if err := statusSrv.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+				// 端口起不来不该拖垮喂价：喂价断了强平会暂停，比看不到状态严重得多。只报错，喂价照常
+				log.Printf("[ERROR] 状态端口启动失败，喂价不受影响但没有健康检查: %v", err)
+			}
+		}()
+		defer func() {
+			shutdownCtx, cancel := context.WithTimeout(context.Background(), 3*time.Second)
+			defer cancel()
+			_ = statusSrv.Shutdown(shutdownCtx)
+		}()
+	}
+
 	f.Run(ctx, interval)
 	log.Println("index-feeder退出")
 }

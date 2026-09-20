@@ -106,7 +106,7 @@ func NewRedisClient(t testing.TB) *redis.Client {
 	return c
 }
 
-// 清掉这些symbol跟标记价有关的全部Redis数据(标记价、最新成交价、指数价和它的时间戳)，并且在测试结束时
+// 清掉这些symbol跟标记价有关的全部Redis数据(标记价、最新成交价、指数价和它的时间戳、待确认的指数价跳变)，并且在测试结束时
 // 再清一次。这些键按symbol、不按测试隔离：上一个测试留下的指数价会让下一个测试的标记价不再是"最新成交价"
 // (指数价存在时标记价由指数价、基差、成交价取中位数得出)，整包一起跑才会出问题、单独跑不会，很难查
 func ResetPriceKeys(t testing.TB, symbols ...string) {
@@ -116,7 +116,7 @@ func ResetPriceKeys(t testing.TB, symbols ...string) {
 		defer c.Close()
 		var keys []string
 		for _, s := range symbols {
-			keys = append(keys, "perpgo:mark:"+s, "perpgo:last:"+s, "perpgo:index:"+s, "perpgo:index_ts:"+s)
+			keys = append(keys, "perpgo:mark:"+s, "perpgo:last:"+s, "perpgo:index:"+s, "perpgo:index_ts:"+s, "perpgo:index_jump:"+s)
 		}
 		if err := c.Del(context.Background(), keys...).Err(); err != nil {
 			t.Errorf("清理标记价相关的Redis键失败: %v", err)

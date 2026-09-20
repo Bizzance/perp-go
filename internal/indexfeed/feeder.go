@@ -2,6 +2,7 @@ package indexfeed
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"log"
 	"sort"
@@ -29,6 +30,9 @@ type Config struct {
 	MaxJump     decimal.Decimal
 	JumpConfirm int           // 默认3
 	Timeout     time.Duration // 单个来源的请求超时，默认2秒
+	// 某个合约超过这么久没有成功发布，/health就报不健康。默认15秒：要比contract-api的断供阈值(30秒)短，
+	// 这样告警先响、强平暂停在后面，见docs/index-feeder.md"状态和健康检查"
+	HealthMaxAge time.Duration
 }
 
 func (c *Config) applyDefaults() {
@@ -47,6 +51,9 @@ func (c *Config) applyDefaults() {
 	if c.Timeout <= 0 {
 		c.Timeout = 2 * time.Second
 	}
+	if c.HealthMaxAge <= 0 {
+		c.HealthMaxAge = 15 * time.Second
+	}
 }
 
 // 每个合约的发布状态
@@ -54,21 +61,41 @@ type symbolState struct {
 	last       decimal.Decimal // 上次发布的价格，零=还没发布过
 	jumpTarget decimal.Decimal // 正在等待确认的新价位，零=没有
 	jumpCount  int             // 已经连续多少个周期出现在这个新价位
+
+	// 下面是给状态输出用的(见status.go)，不参与发布决策
+	lastPublishAt time.Time // 零=还没成功发布过
+	lastSources   []string  // 上次发布用了哪些来源
+	issue         string    // 最近一次没发布成功的原因，成功发布后清空
+	issueAt       time.Time
+	failStreak    int // 连续多少个周期没发布成功
+}
+
+// 一个来源对一个合约的取价状态。seen/ok只用来在状态变化时才打日志
+type sourceState struct {
+	seen, ok bool
+	lastOKAt time.Time
+	err      string
+	errAt    time.Time
 }
 
 type Feeder struct {
 	cfg Config
 	pub Publisher
+	now func() time.Time // 测试里可以替换
+	// 进程启动时间：还没成功发布过的合约，健康与否从这个时间开始算，不然刚启动就报不健康
+	startedAt time.Time
 
 	mu       sync.Mutex
 	states   map[string]*symbolState
-	srcOK    map[string]bool // "来源/合约" -> 上一次是不是成功，只在变化时打日志
+	sources  map[string]*sourceState // "来源/合约" -> 取价状态
 	lastWarn map[string]time.Time
 }
 
 func New(cfg Config, pub Publisher) *Feeder {
 	cfg.applyDefaults()
-	return &Feeder{cfg: cfg, pub: pub, states: map[string]*symbolState{}, srcOK: map[string]bool{}, lastWarn: map[string]time.Time{}}
+	f := &Feeder{cfg: cfg, pub: pub, now: time.Now, states: map[string]*symbolState{}, sources: map[string]*sourceState{}, lastWarn: map[string]time.Time{}}
+	f.startedAt = f.now()
+	return f
 }
 
 // 定时跑，直到ctx结束
@@ -104,21 +131,47 @@ func (f *Feeder) stepSymbol(ctx context.Context, sym string) {
 	price, used, err := Aggregate(prices, f.cfg.Outlier, f.cfg.MinSources)
 	if err != nil {
 		f.warn(sym+"/aggregate", "[ERROR] 指数价不发布, symbol=%s: %v (有效来源%d家)", sym, err, len(prices))
+		f.recordIssue(sym, fmt.Sprintf("来源不足或对不上: %v", err))
 		return
 	}
 	if !f.acceptJump(sym, price) {
 		return
 	}
 	if err := f.pub.Publish(ctx, sym, price); err != nil {
+		if errors.Is(err, ErrJumpGuard) {
+			// 服务端的跳变保护在等这个新价位持续够久，不是故障：喂价器已经确认过这个价位，
+			// 会一直按周期推下去，服务端满了确认时间就承认
+			f.warn(sym+"/guard", "[WARN] 服务端跳变保护等待确认, symbol=%s, price=%s: %v", sym, price, err)
+			f.recordIssue(sym, fmt.Sprintf("服务端跳变保护等待确认: %v", err))
+			return
+		}
 		f.warn(sym+"/publish", "[ERROR] 发布指数价失败, symbol=%s, price=%s: %v", sym, price, err)
+		f.recordIssue(sym, fmt.Sprintf("发布失败: %v", err))
 		return
 	}
 	f.mu.Lock()
-	f.state(sym).last = price
+	st := f.state(sym)
+	st.last = price
+	st.lastPublishAt = f.now()
+	st.lastSources = used
+	st.issue, st.issueAt, st.failStreak = "", time.Time{}, 0
 	f.mu.Unlock()
 	if len(used) < len(f.cfg.Sources) {
 		f.warn(sym+"/degraded", "[WARN] 指数价只用了%d/%d家来源, symbol=%s, 使用=%v", len(used), len(f.cfg.Sources), sym, used)
 	}
+}
+
+// 记一次"这个周期没发布成功"，给状态输出用
+func (f *Feeder) recordIssue(sym, issue string) {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	f.recordIssueLocked(sym, issue)
+}
+
+func (f *Feeder) recordIssueLocked(sym, issue string) {
+	st := f.state(sym)
+	st.issue, st.issueAt = issue, f.now()
+	st.failStreak++
 }
 
 func (f *Feeder) state(sym string) *symbolState {
@@ -151,8 +204,18 @@ func (f *Feeder) fetchAll(ctx context.Context, sym string) map[string]decimal.De
 		r := <-out
 		key := r.name + "/" + sym
 		f.mu.Lock()
-		was, seen := f.srcOK[key]
-		f.srcOK[key] = r.err == nil
+		ss, exists := f.sources[key]
+		if !exists {
+			ss = &sourceState{}
+			f.sources[key] = ss
+		}
+		was, seen := ss.ok, ss.seen
+		ss.seen, ss.ok = true, r.err == nil
+		if r.err == nil {
+			ss.lastOKAt, ss.err = f.now(), ""
+		} else {
+			ss.err, ss.errAt = r.err.Error(), f.now()
+		}
 		f.mu.Unlock()
 		if r.err != nil {
 			if !seen || was {
@@ -169,7 +232,10 @@ func (f *Feeder) fetchAll(ctx context.Context, sym string) map[string]decimal.De
 }
 
 // 跳变保护：相对上次发布变动不超过MaxJump直接放行；超过的要连续JumpConfirm个周期都落在同一个新价位
-// (彼此偏差不超过Outlier)才放行。返回false=这个周期不发布
+// (彼此偏差不超过Outlier)才放行。返回false=这个周期不发布。
+// 确认之后不清计数：发布成功了last就变成新价位，下个周期走上面的直接放行分支、计数在那里清掉；发布没成功
+// (比如contract-api的服务端跳变保护还在等确认)last还是旧价位，下个周期继续放行，不用再从头数——
+// 从头数的话要等服务端确认的这段时间里，喂价器每3个周期才推一次
 func (f *Feeder) acceptJump(sym string, price decimal.Decimal) bool {
 	f.mu.Lock()
 	defer f.mu.Unlock()
@@ -184,12 +250,14 @@ func (f *Feeder) acceptJump(sym string, price decimal.Decimal) bool {
 		st.jumpTarget, st.jumpCount = price, 1
 	}
 	if st.jumpCount >= f.cfg.JumpConfirm {
-		log.Printf("[WARN] 指数价大幅跳变已确认, symbol=%s, %s -> %s", sym, st.last, price)
-		st.jumpTarget, st.jumpCount = decimal.Zero, 0
+		if st.jumpCount == f.cfg.JumpConfirm {
+			log.Printf("[WARN] 指数价大幅跳变已确认, symbol=%s, %s -> %s", sym, st.last, price)
+		}
 		return true
 	}
 	f.warnLocked(sym+"/jump", "[WARN] 指数价相对上次发布跳变超过%s，等待确认(%d/%d), symbol=%s, %s -> %s",
 		f.cfg.MaxJump, st.jumpCount, f.cfg.JumpConfirm, sym, st.last, price)
+	f.recordIssueLocked(sym, fmt.Sprintf("跳变%s -> %s，等待确认(%d/%d)", st.last, price, st.jumpCount, f.cfg.JumpConfirm))
 	return false
 }
 

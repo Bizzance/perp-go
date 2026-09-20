@@ -137,3 +137,21 @@ func TestLoad_MarkPriceSettings(t *testing.T) {
 		t.Fatal(`只有"true"才开启RequireIndex，"1"不算`)
 	}
 }
+
+// 指数价服务端跳变保护的两个参数：不设=不校验(阈值0)、确认3秒；设了就按设的来。
+// 设成0或负数、非数字会直接退出进程(跟别的风控参数一样)，log.Fatal测不了，这里不覆盖
+func TestLoad_IndexJumpSettings(t *testing.T) {
+	t.Setenv("PERP_INDEX_MAX_JUMP", "")
+	t.Setenv("PERP_INDEX_JUMP_CONFIRM_SEC", "")
+	def := Load(0)
+	if def.IndexMaxJump != 0 || def.IndexJumpConfirm != 3*time.Second {
+		t.Fatalf("默认值不对: max=%v confirm=%v", def.IndexMaxJump, def.IndexJumpConfirm)
+	}
+
+	t.Setenv("PERP_INDEX_MAX_JUMP", "0.05")
+	t.Setenv("PERP_INDEX_JUMP_CONFIRM_SEC", "10")
+	got := Load(0)
+	if got.IndexMaxJump != 0.05 || got.IndexJumpConfirm != 10*time.Second {
+		t.Fatalf("设置的值没生效: max=%v confirm=%v", got.IndexMaxJump, got.IndexJumpConfirm)
+	}
+}

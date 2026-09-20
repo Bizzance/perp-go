@@ -3,6 +3,7 @@ package indexfeed
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"io"
 	"net/http"
 	"net/http/httptest"
@@ -193,5 +194,31 @@ func TestAPIPublisher_BusinessErrorsAreErrors(t *testing.T) {
 				t.Fatal("应该报错")
 			}
 		})
+	}
+}
+
+// contract-api的服务端跳变保护拦下推送(errCode=index_price_jump)：要能用errors.Is认出来，
+// 喂价器据此不把它当接口故障；其它业务错误不能被误认成它
+func TestAPIPublisher_ServerJumpGuardIsRecognized(t *testing.T) {
+	respond := func(body string) error {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) { _, _ = io.WriteString(w, body) }))
+		defer srv.Close()
+		p := &APIPublisher{BaseURL: srv.URL, KeyID: "k", Secret: "s", Client: srv.Client()}
+		return p.Publish(context.Background(), "BTCUSDT", d("70000"))
+	}
+	err := respond(`{"code":400,"errCode":"index_price_jump","message":"变动超过服务端阈值(已持续1.0秒)"}`)
+	if !errors.Is(err, ErrJumpGuard) {
+		t.Fatalf("应该认出是服务端跳变保护: %v", err)
+	}
+	if !strings.Contains(err.Error(), "已持续1.0秒") {
+		t.Fatalf("服务端的说明要带上: %v", err)
+	}
+	for _, body := range []string{
+		`{"code":400,"errCode":"invalid_param","message":"price参数不合法"}`,
+		`{"code":403,"errCode":"forbidden","message":"没有权限"}`,
+	} {
+		if err := respond(body); err == nil || errors.Is(err, ErrJumpGuard) {
+			t.Fatalf("%s 不是跳变保护: %v", body, err)
+		}
 	}
 }

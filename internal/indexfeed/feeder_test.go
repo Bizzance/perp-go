@@ -3,6 +3,7 @@ package indexfeed
 import (
 	"context"
 	"errors"
+	"fmt"
 	"sync"
 	"testing"
 
@@ -97,9 +98,11 @@ func (s *fakeSource) set(symbol, price string) {
 }
 
 type fakePublisher struct {
-	mu   sync.Mutex
-	got  []published
-	fail bool
+	mu       sync.Mutex
+	got      []published
+	fail     bool
+	failWith error // 非nil时发布失败并返回这个错误，优先于fail
+	attempts int   // Publish被调用的总次数，成功失败都算
 }
 
 type published struct {
@@ -110,6 +113,10 @@ type published struct {
 func (p *fakePublisher) Publish(_ context.Context, symbol string, price decimal.Decimal) error {
 	p.mu.Lock()
 	defer p.mu.Unlock()
+	p.attempts++
+	if p.failWith != nil {
+		return p.failWith
+	}
 	if p.fail {
 		return errors.New("模拟发布失败")
 	}
@@ -307,4 +314,58 @@ func TestFeeder_SymbolsAreIndependent(t *testing.T) {
 	f.Step(context.Background())
 	eq(t, pub.prices("BTCUSDT"), "60000", "60000")
 	eq(t, pub.prices("ETHUSDT"), "3005")
+}
+
+// 跳变确认之后，发布没成功(服务端的跳变保护还在等)，下个周期要继续推，不用从头再数3个周期：
+// 从头数的话，服务端等确认的这段时间里喂价器每3个周期才推一次
+func TestFeeder_ConfirmedJumpKeepsPublishingWhileServerGuardWaits(t *testing.T) {
+	a, b := &fakeSource{name: "a"}, &fakeSource{name: "b"}
+	pub := &fakePublisher{}
+	f := newFeeder(pub, a, b)
+	ctx := context.Background()
+	setAll("BTCUSDT", "60000", a, b)
+	f.Step(ctx) // attempts=1
+
+	setAll("BTCUSDT", "66000", a, b)
+	pub.failWith = fmt.Errorf("%w: 等待确认", ErrJumpGuard)
+	f.Step(ctx)
+	f.Step(ctx)
+	if pub.attempts != 1 {
+		t.Fatalf("喂价器自己的确认还没满3个周期，不该推: attempts=%d", pub.attempts)
+	}
+	f.Step(ctx) // 第3个周期确认，推了一次，被服务端拦下
+	f.Step(ctx)
+	f.Step(ctx)
+	if pub.attempts != 4 {
+		t.Fatalf("确认之后每个周期都要继续推: attempts=%d, want 4", pub.attempts)
+	}
+	eq(t, pub.prices("BTCUSDT"), "60000") // 一直没成功，last还是60000
+
+	pub.failWith = nil // 服务端承认了
+	f.Step(ctx)
+	eq(t, pub.prices("BTCUSDT"), "60000", "66000")
+	setAll("BTCUSDT", "66100", a, b) // 之后是正常波动，直接发布
+	f.Step(ctx)
+	eq(t, pub.prices("BTCUSDT"), "60000", "66000", "66100")
+}
+
+// 确认之后价位又变了(离开了确认过的价位)：重新数，不能拿着旧的确认放行一个没确认过的价位
+func TestFeeder_ConfirmedJumpDoesNotVouchForAnotherLevel(t *testing.T) {
+	a, b := &fakeSource{name: "a"}, &fakeSource{name: "b"}
+	pub := &fakePublisher{}
+	f := newFeeder(pub, a, b)
+	ctx := context.Background()
+	setAll("BTCUSDT", "60000", a, b)
+	f.Step(ctx)
+	pub.failWith = fmt.Errorf("%w: 等待确认", ErrJumpGuard)
+	setAll("BTCUSDT", "66000", a, b)
+	f.Step(ctx)
+	f.Step(ctx)
+	f.Step(ctx) // 66000已确认(attempts=2)
+	setAll("BTCUSDT", "72000", a, b)
+	before := pub.attempts
+	f.Step(ctx)
+	if pub.attempts != before {
+		t.Fatal("72000是新的价位，要重新确认，不能直接推")
+	}
 }

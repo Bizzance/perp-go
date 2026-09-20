@@ -6,6 +6,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -28,6 +29,10 @@ type APIPublisher struct {
 }
 
 const indexPricePath = "/index-price"
+
+// contract-api的服务端跳变保护拦下了这次推送(errCode=index_price_jump)：新价位还在等确认，
+// 不是接口故障，也不是签名/权限问题。喂价器按周期继续推，服务端满了确认时间就会承认
+var ErrJumpGuard = errors.New("服务端跳变保护")
 
 func (p *APIPublisher) Publish(ctx context.Context, symbol string, price decimal.Decimal) error {
 	body, err := json.Marshal(map[string]string{"symbol": symbol, "price": price.String()})
@@ -65,6 +70,9 @@ func (p *APIPublisher) Publish(ctx context.Context, symbol string, price decimal
 	}
 	if err := json.Unmarshal(raw, &env); err != nil {
 		return fmt.Errorf("HTTP %d, 响应不是JSON: %s", resp.StatusCode, truncate(string(raw), 200))
+	}
+	if env.ErrCode == api.ErrIndexPriceJump {
+		return fmt.Errorf("%w: %s", ErrJumpGuard, env.Message)
 	}
 	if env.Code != 200 {
 		return fmt.Errorf("HTTP %d code=%d errCode=%s message=%s", resp.StatusCode, env.Code, env.ErrCode, env.Message)
