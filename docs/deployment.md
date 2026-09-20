@@ -18,7 +18,7 @@
 |-------------------|------|-------------------------------------------------------------------|
 | `contract-api`    | 7001 | 对外接口 + WebSocket网关，无状态，可多实例                        |
 | `contract-engine` | 7002 | 撮合/风控/条件单/资金费率，**有状态**（订单簿在内存），默认单实例 |
-| `index-feeder`    | 无   | 指数价喂价：从币安/OKX/Bybit取指数价取中位数，推给api。**生产必须部署**，见 [index-feeder.md](index-feeder.md) |
+| `index-feeder`    | 7003 | 指数价喂价：从币安/OKX/Bybit取指数价取中位数，推给api。**生产必须部署**。7003是状态和健康检查端口（不映射到宿主机），见 [index-feeder.md](index-feeder.md) |
 | MySQL 8.x         | 3306 | 用`sql/schema.sql`初始化                                          |
 | Redis             | 6379 | 标记价、指数价、分布式锁、WS推送                                  |
 | Kafka             | 9092 | 下单/撤单/结束本轮事件                                            |
@@ -149,6 +149,8 @@ cp deploy/.env.prod.example deploy/.env      # 把所有 CHANGE_ME 换成真实�
 | `PERP_MARK_MAX_DEVIATION`     | 标记价相对指数价的最大偏离比例                                                                                  | `0.01`                           |
 | `FEEDER_*`（喂价器读取，不是应用读取）| 喂价器的密钥、合约、来源、阈值，见 [index-feeder.md](index-feeder.md) | 见文档 |
 | `PERP_MARK_BASIS_WINDOW_SEC`  | 盘口基差取多长时间窗口的平均                                                                                    | `60`                             |
+| `PERP_INDEX_MAX_JUMP`         | `POST /index-price`服务端跳变保护：一次推送变动超过这个比例，新价位要持续几秒才承认。**生产建议设`0.05`**，测试环境留空 | 空（不校验）                     |
+| `PERP_INDEX_JUMP_CONFIRM_SEC` | 超过上面阈值的新价位要持续多少秒才承认                                                                          | `3`                              |
 
 Compose 层的变量：`IMAGE_TAG`、`BIND_ADDR`、`API_PORT`、`ENGINE_PORT`、`API_NODE_ID`、`ENGINE_NODE_ID`、`TZ`。
 代码里的默认密码只是为了本地开发方便，写在源码里， **生产一定要用环境变量覆盖**；必填的变量缺失时 Compose 会直接
@@ -176,6 +178,8 @@ make compose-prod-up      # 等价于 docker compose --env-file deploy/.env -f d
   `PERP_API_KEYS` 里加了一把 `feeder:<secret>:ops`，`FEEDER_API_KEY_ID`/`FEEDER_API_SECRET` 填对，见
   [index-feeder.md](index-feeder.md)）。超过 30 秒没喂价强平会暂停。不开 `PERP_MARK_REQUIRE_INDEX` 的话没喂过指数价的合约
   标记价退回最新成交价，两个账户对敲一笔就能推动别人的强平线，见 [mark-price.md](mark-price.md)
+- [ ] **指数价的服务端跳变保护已开**：`PERP_INDEX_MAX_JUMP=0.05`（`.env.prod.example`已经设了），并且喂价器的健康检查
+  （容器 `healthy`，或 `GET :7003/health`）接进了监控告警，见 [index-feeder.md](index-feeder.md)"状态和健康检查"
 - [ ] MySQL、Redis 密码已经覆盖默认值
 - [ ] MySQL、Redis、Kafka 只对应用所在网络开放，不暴露公网
 - [ ] `deploy/.env` 没有提交到 git

@@ -75,6 +75,7 @@ X-Signature  HMAC-SHA256(secret, timestamp\nnonce\nMETHOD\npath\nrawQuery\nsha25
 | `idempotency_conflict`  | 400  | 同一个`requestId`已经用于一笔**参数不同**的请求。是调用方误用（同一个键复用到了另一笔请求），换一个新的`requestId` |
 | `round_mismatch`        | 400  | `POST /account/round/close`指定的`round`大于账户当前轮数                                  |
 | `account_frozen`        | 400  | 账户已被冻结，不能开仓、创建条件开仓单、修改杠杆（平仓、撤单、查询仍可用），见`POST /account/status` |
+| `index_price_jump`      | 400  | `POST /index-price`的指数价相对当前值跳变超过服务端阈值，**没有写入**。新价位持续几秒后会被承认，继续按周期推即可，不是故障，见该接口说明 |
 | `auth_missing`          | 401  | 缺鉴权请求头，或者 nonce/时间戳格式不对                                                   |
 | `auth_expired`          | 401  | 时间戳不在前后 30 秒内。检查合作方服务器的时钟是否同步（NTP）                             |
 | `auth_invalid_signature`| 401  | 签名不对，或者密钥不存在（两种情况故意返回完全相同的响应）                                |
@@ -712,6 +713,15 @@ GET /order/detail?uid=10001&requestId=order-20260919-0001
 ```json
 { "symbol": "BTCUSDT", "price": 64800.5 }
 ```
+
+**服务端跳变保护**（配了`PERP_INDEX_MAX_JUMP`才生效，生产建议`0.05`，默认不校验）：一次推送相对当前指数价变动超过
+阈值，这次**不写入**，返回`code=400`、`errCode=index_price_jump`，`message`里有当前指数价和这个新价位已经持续了几秒。
+同一个新价位（容差1%）持续满`PERP_INDEX_JUMP_CONFIRM_SEC`（默认3秒）之后再推就会被承认；期间只要有一次落在正常范围内
+的推送，待确认状态就清掉重来。所以：
+
+- 真实的行情大幅变动只是被延迟几秒，行情源继续按周期推同一个价位就行，**不需要特殊处理**
+- 当前指数价已经断供（超过30秒没更新）时不校验，直接写，避免喂价断了以后再也恢复不了
+- 它限制的是变动速度，挡不住拿着密钥每次只挪一小步的人，所以密钥仍然要单独发、只给`ops`
 
 ### `GET /health`
 

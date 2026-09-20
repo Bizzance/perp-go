@@ -53,7 +53,7 @@ internal/
   pubsub/       WS推送用的Redis channel命名规则，发布端(service/push.go)和订阅端
                 (ws/hub.go)共用同一份，见websocket.md解释过的"两边各自维护一份前缀
                 容易出bug"教训
-  indexfeed/    指数价喂价器的逻辑：币安/OKX/Bybit三家来源、聚合(中位数+离群)、跳变保护、签名发布
+  indexfeed/    指数价喂价器的逻辑：币安/OKX/Bybit三家来源、聚合(中位数+离群)、跳变保护、签名发布、状态和健康检查(status.go)
   cache/        Redis封装：标记价格、指数价格、资金费率采样累加器、WS推送的Pub/Sub
   mq/           Kafka生产者/消费者封装，含消息级去重（WithDedup）
   config/       环境变量加载，全部可调参数（扫描间隔、超时阈值、node id等）集中在这里
