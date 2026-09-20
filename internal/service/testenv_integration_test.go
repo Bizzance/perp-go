@@ -76,7 +76,7 @@ func newEngineEnv(t *testing.T) *engineEnv {
 
 	e.book = matching.NewEngine()
 	e.engine = service.NewEngineService(e.book, e.orders, e.conditional, e.trades, e.accounts, positionSvc,
-		settlementSvc, e.markPrice, fundSvc, klineSvc, pushSvc, roundCloseProgressRepo, lockSvc, nil)
+		settlementSvc, e.markPrice, fundSvc, klineSvc, pushSvc, roundCloseProgressRepo, lockSvc, coinRepo, nil)
 	e.condSvc = service.NewConditionalOrderService(e.conditional, e.orders, e.markPrice, e.engine)
 	// 强平单超时兜底设短一点(200ms)，测试里不用干等
 	e.coins = coinRepo
@@ -98,7 +98,7 @@ func (e *engineEnv) restartEngine(t *testing.T) {
 	e.engine = service.NewEngineService(e.book, e.orders, e.conditional, e.trades, e.accounts, positionSvc,
 		settlementSvc, e.markPrice, service.NewInsuranceFundService(repo.NewInsuranceFundRepo(conn)),
 		service.NewKlineService(repo.NewKlineRepo(conn)), pushSvc, repo.NewRoundCloseProgressRepo(conn),
-		service.NewLockService(rdb), nil)
+		service.NewLockService(rdb), repo.NewCoinRepo(conn), nil)
 }
 
 func (e *engineEnv) id() uint64 { return e.nextID.Add(1) }
@@ -149,6 +149,7 @@ type orderOpts struct {
 	margin      string // 开仓时冻结的保证金，从available划到frozen_margin；平仓单填空
 	liquidation bool
 	symbol      string // 空=testSymbol
+	market      bool   // true=市价单：price填contract-api下单时存进去的参考价(标记价)，跟真实下单落库的形态一致
 }
 
 // 模拟contract-api下单的落库结果：开仓先冻结保证金，再插入status=open的委托。不发事件、不撮合，
@@ -170,13 +171,17 @@ func (e *engineEnv) insertOrder(t *testing.T, uid uint64, o orderOpts) *model.Or
 	if symbol == "" {
 		symbol = testSymbol
 	}
+	orderType := model.OrderTypeLimit
+	if o.market {
+		orderType = model.OrderTypeMarket
+	}
 	order := &model.Order{
 		OrderID:      e.id(),
 		UID:          uid,
 		Symbol:       symbol,
 		Side:         o.side,
 		Action:       o.action,
-		Type:         model.OrderTypeLimit,
+		Type:         orderType,
 		Price:        decimal.RequireFromString(o.price),
 		Amount:       decimal.RequireFromString(o.amount),
 		TradedAmount: decimal.Zero,

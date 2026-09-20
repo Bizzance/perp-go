@@ -94,7 +94,7 @@ func main() {
 	}
 
 	matchingEngine := matching.NewEngine()
-	engineSvc := service.NewEngineService(matchingEngine, orderRepo, conditionalOrderRepo, tradeRepo, accountSvc, positionSvc, settlementSvc, markPriceSvc, fundSvc, klineSvc, pushSvc, roundCloseProgressRepo, lockSvc, cfg.EngineSymbols)
+	engineSvc := service.NewEngineService(matchingEngine, orderRepo, conditionalOrderRepo, tradeRepo, accountSvc, positionSvc, settlementSvc, markPriceSvc, fundSvc, klineSvc, pushSvc, roundCloseProgressRepo, lockSvc, coinRepo, cfg.EngineSymbols)
 	liquidationSvc := service.NewLiquidationService(engineSvc, orderRepo, positionRepo, positionSvc, markPriceSvc, accountSvc, fundSvc, coinRepo, cfg.LiquidationOrderTimeoutMs)
 	conditionalOrderSvc := service.NewConditionalOrderService(conditionalOrderRepo, orderRepo, markPriceSvc, engineSvc)
 

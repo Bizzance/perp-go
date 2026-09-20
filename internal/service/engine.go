@@ -28,6 +28,7 @@ type EngineService struct {
 	push               *PushService
 	roundCloseProgress *repo.RoundCloseProgressRepo
 	lock               *LockService
+	coins              *repo.CoinRepo  // 市价单要查合约的价格保护带
 	ownedSymbols       map[string]bool // nil=负责全部symbol(单实例默认)，见docs/engine-sharding.md
 }
 
@@ -45,6 +46,7 @@ func NewEngineService(
 	push *PushService,
 	roundCloseProgress *repo.RoundCloseProgressRepo,
 	lock *LockService,
+	coins *repo.CoinRepo,
 	engineSymbols []string,
 ) *EngineService {
 	var owned map[string]bool
@@ -68,6 +70,7 @@ func NewEngineService(
 		push:               push,
 		roundCloseProgress: roundCloseProgress,
 		lock:               lock,
+		coins:              coins,
 		ownedSymbols:       owned,
 	}
 }
@@ -204,6 +207,23 @@ func (e *EngineService) submitOrder(ctx context.Context, order *model.Order, ent
 		}
 	}
 
+	// 市价单的撮合价。库里存的Price是contract-api下市价单时用标记价估算保证金和数量的参考价，不是限价：
+	// 原样当限价传给撮合的话，市价单就变成"按标记价成交的限价单"，市价买只能吃低于等于标记价的卖单、
+	// 市价卖只能吃高于等于标记价的买单，而盘口对手价几乎总是在标记价的另一侧，市价单基本一笔都成交不了
+	// (页面第一次点市价平仓就暴露了)。所以要按真实对手价一档档吃，成交后按真实成交额多退少补保证金。
+	// 但不能完全不设限：价格保护带只校验限价开仓单，市价单不设限的话，共谋账户在远离标记价处挂一笔平仓
+	// 限价单(平仓单不校验价格带)，受害者的市价买单就会一路吃过去，保证金按标记价冻结、实际按远高于标记价
+	// 的成交额结算，钱流向挂单的共谋账户。所以市价单的撮合价设成参考价±保护带比例，跟限价开仓单受同一个
+	// 约束，超出的部分当作没有流动性，剩余量撤销
+	matchPrice := order.Price
+	if order.Type == model.OrderTypeMarket {
+		limit, err := e.marketOrderPriceLimit(ctx, order)
+		if err != nil {
+			return false, fmt.Errorf("查询合约价格保护带失败, orderId=%d: %w", order.OrderID, err) // 失败关闭，不放开价格限制去撮合
+		}
+		matchPrice = limit
+	}
+
 	// 进入订单簿的order，只包含了下单的order中的一部分必要数据
 	resting := &matching.RestingOrder{
 		OrderID:     order.OrderID,
@@ -211,7 +231,7 @@ func (e *EngineService) submitOrder(ctx context.Context, order *model.Order, ent
 		Side:        order.Side,
 		Action:      order.Action,
 		Direction:   matching.DirectionOf(order.Side, order.Action),
-		Price:       order.Price,
+		Price:       matchPrice,
 		Remaining:   order.RemainingAmount(),
 		EntryTime:   entryTime,
 		ReduceOnly:  order.ReduceOnly,
@@ -408,6 +428,22 @@ func sellUID(f matching.Fill) uint64 {
 		return f.MakerOrder.UID
 	}
 	return f.TakerOrder.UID
+}
+
+// 市价单撮合时的价格上下限：参考价(下单时的标记价)买入向上、卖出向下各放宽价格保护带的比例，见
+// submitOrder里的说明。合约没配保护带(比例<=0)就返回0，撮合里价格0表示不设限
+func (e *EngineService) marketOrderPriceLimit(ctx context.Context, order *model.Order) (decimal.Decimal, error) {
+	coin, err := e.coins.FindBySymbol(ctx, order.Symbol)
+	if err != nil {
+		return decimal.Zero, err
+	}
+	if coin == nil || coin.PriceProtectionRatio.Sign() <= 0 || order.Price.Sign() <= 0 {
+		return decimal.Zero, nil
+	}
+	if matching.DirectionOf(order.Side, order.Action) == matching.Buy {
+		return order.Price.Mul(decimal.NewFromInt(1).Add(coin.PriceProtectionRatio)), nil
+	}
+	return order.Price.Mul(decimal.NewFromInt(1).Sub(coin.PriceProtectionRatio)), nil
 }
 
 // 强平结算之后调用(挂单排队正常成交见settleOneFill、超时

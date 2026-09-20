@@ -402,6 +402,45 @@ func TestE2E_07_WebSocketPushesDepthAndUserSnapshot(t *testing.T) {
 	}
 }
 
+// 市价单要能吃到标记价另一侧的对手盘：卖盘挂在65500(高于标记价65000)，市价买必须能成交。
+// 之前市价单被当成"按标记价成交的限价单"，这种情况一笔都成交不了，页面上点市价平仓才发现
+func TestE2E_08_MarketOrderSweepsOppositeSideAcrossMarkPrice(t *testing.T) {
+	e := loadEnv(t)
+	// 市价单要用标记价估算保证金，标记价就是最新成交价。这里自己先造一笔成交，不依赖前面用例留下的成交价
+	seedSeller := e.newFundedAccount(t, "10000")
+	seedBuyer := e.newFundedAccount(t, "10000")
+	e.placeOrder(t, orderReq{seedSeller, "short", "open", "65000", "0.01"}).mustOK(t, "造成交：卖")
+	e.placeOrder(t, orderReq{seedBuyer, "long", "open", "65000", "0.01"}).mustOK(t, "造成交：买")
+	eventually(t, "造成交的多头仓位出现(标记价已建立)", 20*time.Second, func() (bool, string) {
+		pos := e.get(t, fmt.Sprintf("/position/current?uid=%d", seedBuyer)).mustOK(t, "查持仓").list(t)
+		return len(pos) == 1, fmt.Sprintf("持仓数=%d", len(pos))
+	})
+	maker := e.newFundedAccount(t, "10000")
+	taker := e.newFundedAccount(t, "10000")
+	e.placeOrder(t, orderReq{maker, "short", "open", "65500", "0.1"}).mustOK(t, "挂卖单(高于标记价)")
+	eventually(t, "卖单进订单簿", 20*time.Second, func() (bool, string) {
+		d := e.call(t, e.engineURL, "GET", "/depth?symbol="+symbol, nil).mustOK(t, "引擎/depth").obj(t)
+		raw, _ := json.Marshal(d["asks"])
+		return strings.Contains(string(raw), "65500"), "卖盘里还没有65500"
+	})
+
+	e.post(t, "/order/add", map[string]any{
+		"uid": taker, "symbol": symbol, "side": "long", "action": "open", "type": "market",
+		"amount": json.Number("0.1"), "leverage": 10, "requestId": reqID(),
+	}).mustOK(t, "市价买入")
+
+	eventually(t, "市价买单吃掉65500的卖单，出现多头仓位", 20*time.Second, func() (bool, string) {
+		pos := e.get(t, fmt.Sprintf("/position/current?uid=%d", taker)).mustOK(t, "查持仓").list(t)
+		if len(pos) != 1 {
+			return false, fmt.Sprintf("持仓数=%d", len(pos))
+		}
+		if ok, d := fieldIs(t, pos[0], "volume", "0.1"); !ok {
+			return false, d
+		}
+		return fieldIs(t, pos[0], "avgEntryPrice", "65500")
+	})
+}
+
 func (e env) depthHasBid(t *testing.T, price string) bool {
 	t.Helper()
 	d := e.call(t, e.engineURL, "GET", "/depth?symbol="+symbol, nil).mustOK(t, "引擎/depth").obj(t)
