@@ -18,6 +18,14 @@ func NewProducer(brokers []string) *Producer {
 		Addr:                   kafka.TCP(brokers...),
 		Balancer:               &kafka.Hash{}, // 按key哈希分区——同一个symbol的下单/撤单事件要落到同一分区，
 		AllowAutoTopicCreation: true,          // 保证engine端消费时的相对顺序不乱掉
+		// 批处理超时。kafka-go默认1秒：不满一批的消息最多等1秒才发出去，而我们每条事件都是同步的单条写入
+		// (调用方要等它返回才能告诉合作方"已提交")，所以每笔下单、撤单都固定多出约1秒延迟(实测1.03秒)。
+		// 改成10ms：订单事件的吞吐远没到需要靠攒批来提效的程度，延迟比吞吐重要
+		BatchTimeout: 10 * time.Millisecond,
+		// 等全部同步副本确认再返回。kafka-go默认RequireNone(发出去就不管了)：broker没收到、或者收到了
+		// 但leader马上挂了，接口照样告诉合作方"委托已提交"，事件其实丢了。订单事件丢了的后果是保证金已经
+		// 冻结、委托已经落库，却永远没人撮合，要等引擎重启恢复才会被重新处理
+		RequiredAcks: kafka.RequireAll,
 	}}
 }
 
@@ -47,16 +55,16 @@ func NewConsumer(brokers []string, topic, groupID string) *Consumer {
 			Brokers: brokers,
 			Topic:   topic,
 			GroupID: groupID,
-			// 全新的Kafka上引擎启动时topic可能还不存在(topic是下单接口第一次写入时才自动创建的)，
-			// 消费者这时加入消费者组拿到的分区数是0，之后topic建出来了它也不会自己发现，一直空转
-			// 消费不到任何消息。打开分区变化监听，周期性检查分区数变化、变了就触发重新分配，
-			// 这种"先启动消费者、后有topic"的顺序就能自己恢复，不需要人工重启引擎
 			// 拉取的最长等待时间。kafka-go默认10秒：没有新消息时broker最多挂10秒才返回，Reader.Close()要等
 			// 这次进行中的拉取返回，三个消费者又是顺序关闭，引擎关闭实测要15到26秒，逼近compose的30秒
 			// 停止宽限期(被强杀的话消费者没有退出消费者组，新实例要等会话超时才能拿到分区)。改成500ms后
 			// 实测降到1秒左右。对消息延迟没有影响：有数据时broker立刻返回，MaxWait只决定没数据时最多
 			// 等多久；代价是空闲时每个消费者每秒多约2次拉取请求，可以忽略
-			MaxWait:                500 * time.Millisecond,
+			MaxWait: 500 * time.Millisecond,
+			// 全新的Kafka上引擎启动时topic可能还不存在(topic是下单接口第一次写入时才自动创建的)，
+			// 消费者这时加入消费者组拿到的分区数是0，之后topic建出来了它也不会自己发现，一直空转
+			// 消费不到任何消息。打开分区变化监听，周期性检查分区数变化、变了就触发重新分配，
+			// 这种"先启动消费者、后有topic"的顺序就能自己恢复，不需要人工重启引擎
 			WatchPartitionChanges:  true,
 			PartitionWatchInterval: 5 * time.Second,
 		}),

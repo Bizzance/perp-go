@@ -261,13 +261,17 @@ func TestE2E_03_OrderFlowThroughKafkaFillsAndSettles(t *testing.T) {
 		}
 		return fieldIs(t, pos[0], "volume", "0.1")
 	})
-	// 0.1 BTC*65000=6500名义价值：保证金650，taker手续费3.25，maker手续费1.3
-	acc := e.accountInfo(t, long)
-	for field, want := range map[string]string{"available": "9346.75", "positionMargin": "650", "frozenMargin": "0", "equity": "9996.75"} {
-		if ok, detail := fieldIs(t, acc, field, want); !ok {
-			t.Fatalf("多头账户字段不对: %s", detail)
+	// 0.1 BTC*65000=6500名义价值：保证金650，taker手续费3.25，maker手续费1.3。
+	// 手续费是在仓位可见之后才扣的(先落仓位、再扣手续费)，所以账户字段也要轮询，不能读一次就断言
+	eventually(t, "多头账户结算完成(含手续费)", 20*time.Second, func() (bool, string) {
+		acc := e.accountInfo(t, long)
+		for field, want := range map[string]string{"available": "9346.75", "positionMargin": "650", "frozenMargin": "0", "equity": "9996.75"} {
+			if ok, detail := fieldIs(t, acc, field, want); !ok {
+				return false, detail
+			}
 		}
-	}
+		return true, ""
+	})
 	eventually(t, "空头账户结算", 20*time.Second, func() (bool, string) {
 		return fieldIs(t, e.accountInfo(t, short), "available", "9348.7")
 	})
@@ -441,6 +445,36 @@ func TestE2E_08_MarketOrderSweepsOppositeSideAcrossMarkPrice(t *testing.T) {
 	})
 }
 
+// 下单/撤单接口要等Kafka事件发出去才返回：kafka-go生产者的BatchTimeout默认1秒，每条同步写入都要等满，
+// 每笔下单撤单固定多出约1秒(实测1.03秒)；改成10ms之后只要几十毫秒。连续采样几次取最小值：回退到默认值时
+// 每一次都要1秒以上，最小值也超标；而机器慢、Kafka冷启动这类抖动只会抬高个别样本，不会让最小值超标，
+// 比单次固定阈值稳得多
+func TestE2E_09_OrderSubmitAndCancelAreNotSlowedByKafkaBatching(t *testing.T) {
+	const samples = 5
+	const limit = 500 * time.Millisecond
+	e := loadEnv(t)
+	uid := e.newFundedAccount(t, "10000")
+	minPlace, minCancel := time.Hour, time.Hour
+	for i := 0; i < samples; i++ {
+		started := time.Now()
+		placed := e.placeOrder(t, orderReq{uid, "long", "open", "64000", "0.01"}).mustOK(t, "挂单").obj(t)
+		if took := time.Since(started); took < minPlace {
+			minPlace = took
+		}
+		started = time.Now()
+		e.post(t, "/order/cancel/"+placed["orderId"].(string), map[string]any{"uid": uid}).mustOK(t, "撤单")
+		if took := time.Since(started); took < minCancel {
+			minCancel = took
+		}
+	}
+	if minPlace > limit {
+		t.Fatalf("%d次下单最快的一次也要%s，超过%s：检查mq.NewProducer的BatchTimeout(kafka-go默认1秒)", samples, minPlace, limit)
+	}
+	if minCancel > limit {
+		t.Fatalf("%d次撤单最快的一次也要%s，超过%s：检查mq.NewProducer的BatchTimeout(kafka-go默认1秒)", samples, minCancel, limit)
+	}
+}
+
 func (e env) depthHasBid(t *testing.T, price string) bool {
 	t.Helper()
 	d := e.call(t, e.engineURL, "GET", "/depth?symbol="+symbol, nil).mustOK(t, "引擎/depth").obj(t)
@@ -468,10 +502,10 @@ func TestE2E_99_EngineRestartRecoversOrderBookAndKeepsConsuming(t *testing.T) {
 		t.Fatalf("重启引擎失败: %v\n%s", err, out)
 	}
 	// 引擎要能很快关闭：kafka-go拉取的MaxWait默认10秒，Reader.Close()要等它，三个消费者顺序关闭实测要
-	// 15到26秒，逼近compose的30秒停止宽限期；改成500ms之后整个重启(关闭+启动)只要几秒。这里给个宽松
-	// 的上限，回退到默认值就会超
-	if took := time.Since(started); took > 12*time.Second {
-		t.Fatalf("重启引擎耗时%s，超过12秒：消费者关闭太慢，检查mq.NewConsumer的MaxWait", took)
+	// 15到26秒，逼近compose的30秒停止宽限期；改成500ms之后整个重启(关闭+启动)只要几秒(实测约1.4到3秒)。
+	// 上限给14秒：正常值的好几倍，又低于回退后关闭一项就要的15秒以上
+	if took := time.Since(started); took > 14*time.Second {
+		t.Fatalf("重启引擎耗时%s，超过14秒：消费者关闭太慢，检查mq.NewConsumer的MaxWait", took)
 	}
 	eventually(t, "引擎重启后健康", 60*time.Second, func() (bool, string) {
 		resp, err := http.Get(e.engineURL + "/health")

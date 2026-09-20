@@ -5,7 +5,7 @@
 #
 # 用法：make test-e2e
 #       E2E_KEEP=1 make test-e2e            # 跑完不拆环境，方便排查(自己用docker compose -p <项目名> down -v 清理)
-#       make test-e2e ARGS='-run TestE2E_03 -v'   # 传给go test的额外参数
+#       make test-e2e ARGS='-run TestE2E_03 -v'   # 传给go test的额外参数(包路径固定是./e2e/)
 #
 # 场景见e2e/e2e_test.go：签名鉴权、下单撮合结算、撤单、冻结、结束本轮、WebSocket推送、引擎重启恢复。
 # 没有覆盖强平和资金费率：强平要把标记价格推到极端位置，资金费率周期8小时，这两块靠集成测试。
@@ -76,8 +76,9 @@ export E2E_KEY_SECRET="$key_secret"
 export E2E_RESTART_ENGINE_CMD="${compose[*]} restart engine"
 
 # -p 1/-count=1：测试之间有先后依赖(最后一个会重启引擎)，不缓存
+# ARGS只放传给go test的参数(比如-run TestE2E_03)，包路径固定是./e2e/：不然设了ARGS就把默认的包路径也顶掉了
 # shellcheck disable=SC2086
-if ! go test -tags=e2e -count=1 -p 1 ${ARGS:--v ./e2e/}; then
+if ! go test -tags=e2e -count=1 -p 1 ${ARGS:--v} ./e2e/; then
   echo "端到端测试失败，最近的服务日志：" >&2
   "${compose[@]}" logs --tail=80 api engine >&2 || true
   exit 1
