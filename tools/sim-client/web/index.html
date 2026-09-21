@@ -82,9 +82,11 @@
         <label><span class="lbl">价格 <span class="unit">USDT</span></span>
           <div class="input-row"><input id="fPrice" inputmode="decimal" autocomplete="off"><button id="btnLast" class="mini" type="button">最新</button></div>
         </label>
-        <label><span class="lbl">数量 <span class="unit" id="amtUnit">BTC</span></span>
+        <!-- 单位切换按钮不能放在label里：label里的第一个可点击元素会被"点标签文字"触发 -->
+        <div class="field"><div class="lbl">数量 <span class="seg" id="unitSeg" title="币：按币的数量下单；USDT：按名义价值(数量×价格)输入，页面换算成币的数量再提交">
+            <button type="button" data-u="coin" class="active" id="unitCoin">BTC</button><button type="button" data-u="usdt">USDT</button></span></div>
           <input id="fAmount" inputmode="decimal" autocomplete="off">
-        </label>
+        </div>
         <div class="pct" id="pct"></div>
         <label><span class="lbl">杠杆 <span class="unit" id="levHint"></span></span>
           <input id="fLev" inputmode="numeric" value="10" autocomplete="off">

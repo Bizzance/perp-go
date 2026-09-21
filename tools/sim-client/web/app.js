@@ -33,6 +33,7 @@ const fmtClock = (ms) => new Date(Number(ms)).toLocaleTimeString('zh-CN', { hour
 // ---------- 状态 ----------
 const state = {
   symbol: 'BTCUSDT',
+  amtUnit: 'coin', // 数量输入框里填的是币(coin)还是USDT名义价值(usdt)
   contracts: [],
   detail: null,
   uid: null,
@@ -140,7 +141,7 @@ async function loadDetail() {
   const tiers = (state.detail && state.detail.tiers) || [];
   const maxLev = tiers.length ? Math.max(...tiers.map((t) => t.maxLeverage)) : '';
   $('levHint').textContent = maxLev ? `最大 ${maxLev}x` : '';
-  $('amtUnit').textContent = state.symbol.replace(/USDT$/, '');
+  $('unitCoin').textContent = state.symbol.replace(/USDT$/, '');
   refreshInputHints();
 }
 async function refreshTicker() {
@@ -354,6 +355,19 @@ $('actionSeg').addEventListener('click', (e) => { const b = e.target.closest('bu
 $('typeSeg').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setType(b.dataset.type); });
 $('btnLast').addEventListener('click', () => { if (state.ticker && state.ticker.lastPrice) { $('fPrice').value = px(state.ticker.lastPrice); updateEst(); } });
 ['fPrice', 'fAmount', 'fLev'].forEach((id) => $(id).addEventListener('input', updateEst));
+// 切换数量单位：把输入框里已有的数量换算成另一种单位，保持同样大小
+$('unitSeg').addEventListener('click', (e) => {
+  const b = e.target.closest('button');
+  if (!b || b.dataset.u === state.amtUnit) return;
+  const cur = $('fAmount').value.trim(), price = refPriceStr();
+  if (cur && price) {
+    if (b.dataset.u === 'usdt') { const n = Number(cur) * Number(price); $('fAmount').value = n > 0 ? fixed(Math.floor(n * 100) / 100, 2) : ''; } // 币 -> USDT
+    else $('fAmount').value = usdtToQty(cur, price, state.detail); // USDT -> 币
+  } else $('fAmount').value = '';
+  state.amtUnit = b.dataset.u;
+  document.querySelectorAll('#unitSeg button').forEach((x) => x.classList.toggle('active', x === b));
+  refreshInputHints(); updateEst();
+});
 // ---------- 下单输入按合约规则约束 ----------
 // 跟合作方的前端一样：位数、步长、最小/最大量全部取自 /contract/detail(priceScale、baseCoinScale、priceTick、volumeStep、
 // minVolume、maxVolume)，不写死。priceTick/volumeStep是0表示服务端不校验，这时输入精度按priceScale/baseCoinScale。
@@ -402,20 +416,57 @@ function floorQty(amt, d) {
 // 输入框的提示：步长和最小量
 function refreshInputHints() {
   const d = state.detail;
-  $('fAmount').placeholder = d ? `步长 ${qtyStepOf(d)} · 最小 ${d.minVolume}` : '';
+  $('fAmount').placeholder = state.amtUnit === 'usdt' ? '名义价值(USDT)，按价格换算成币' : (d ? `步长 ${qtyStepOf(d)} · 最小 ${d.minVolume}` : '');
   $('fPrice').placeholder = state.type === 'market' ? '按对手盘成交' : (d ? `步长 ${priceStepOf(d)}` : '');
 }
-function refPrice() {
-  if (state.type === 'limit' && Number($('fPrice').value) > 0) return Number($('fPrice').value);
+// ---------- 按USDT输入：换算成币的数量 ----------
+// 服务端只收币的数量(跟币安、OKX、Bybit的合约下单一样)，按USDT输入是前端自己换算：数量 = floor(名义价值 ÷ 价格 ÷ 数量步长) × 数量步长。
+// 价格：限价单用委托价；市价单用标记价(没有就最新价、指数价)——服务端估算市价单保证金用的也是标记价。这个价格只用来换算，
+// 不会传给服务端。全部按整数运算，不经过浮点数：比如名义价值243.7653÷价格81255.1恰好是0.003，用浮点算向下取整会得到0.002，少了一步
+function toUnits(str) {
+  const m = /^(\d+)(?:\.(\d+))?$/.exec(String(str).trim());
+  if (!m) return null;
+  const frac = (m[2] || '').replace(/0+$/, '');
+  return { n: BigInt(m[1] + frac), dp: frac.length };
+}
+function fromUnits(n, dp) {
+  let s = n.toString();
+  if (dp > 0) { s = s.padStart(dp + 1, '0'); s = s.slice(0, -dp) + '.' + s.slice(-dp); }
+  return s;
+}
+// notional、price是十进制字符串，d是/contract/detail的返回。返回固定baseCoinScale位的数量字符串，输入不合法返回''
+function usdtToQty(notional, price, d) {
+  const N = toUnits(notional), P = toUnits(price), S = toUnits(qtyStepOf(d));
+  if (!N || !P || !S || P.n === 0n || S.n === 0n) return '';
+  // 数量 = floor(N / (P×S)) × S，其中 N=n/10^a，P=p/10^b，S=s/10^c
+  const steps = (N.n * 10n ** BigInt(P.dp + S.dp)) / (10n ** BigInt(N.dp) * P.n * S.n);
+  const dp = Math.max(S.dp, d ? d.baseCoinScale : 0);
+  return fromUnits(steps * S.n * 10n ** BigInt(dp - S.dp), dp);
+}
+// 换算用的价格(字符串)：限价单用输入的委托价，否则用标记价，没有就最新价、指数价；都没有返回''
+function refPriceStr() {
+  if (state.type === 'limit' && Number($('fPrice').value) > 0) return $('fPrice').value.trim();
   const t = state.ticker || {};
-  return Number(t.markPrice || t.lastPrice || t.indexPrice || 0);
+  return String(t.markPrice || t.lastPrice || t.indexPrice || '');
+}
+// 要提交的币数量：按币输入就是输入框的值；按USDT输入就换算。输入为空或换算不了返回''
+function currentQty() {
+  const raw = $('fAmount').value.trim();
+  if (state.amtUnit === 'coin') return raw;
+  const price = refPriceStr();
+  return price ? usdtToQty(raw, price, state.detail) : '';
+}
+function refPrice() {
+  return Number(refPriceStr() || 0);
 }
 function updateEst() {
-  const amt = Number($('fAmount').value), lev = Number($('fLev').value), p = refPrice();
-  if (!(amt > 0) || !(p > 0)) { $('est').textContent = ''; return; }
+  const qtyStr = currentQty();
+  const amt = Number(qtyStr), lev = Number($('fLev').value), p = refPrice();
+  if (!(amt > 0) || !(p > 0)) { $('est').textContent = state.amtUnit === 'usdt' && $('fAmount').value.trim() ? '换算后的数量为0：金额太小，或者没有可用的价格' : ''; return; }
   const notional = amt * p;
+  const conv = state.amtUnit === 'usdt' ? `换算数量 ${qtyStr} ${state.symbol.replace(/USDT$/, '')}(向下取整到步长，约)<br>` : '';
   const taker = state.detail ? Number(state.detail.takerFee) : 0.0005;
-  $('est').innerHTML = `名义价值 ${fixed(notional, 2)} USDT<br>` +
+  $('est').innerHTML = conv + `实际名义价值 ${fixed(notional, 2)} USDT<br>` +
     (state.action === 'open' && lev > 0 ? `所需保证金 ≈ ${fixed(notional / lev, 2)} USDT<br>` : '') + `taker 手续费 ≈ ${fixed(notional * taker, 4)} USDT`;
 }
 function buildPct() {
@@ -429,13 +480,15 @@ $('pct').addEventListener('click', (e) => {
   let amt;
   if (state.action === 'open') amt = (Number(state.account.available) * lev * p) / price;
   else { const pos = state.positions.filter((x) => x.symbol === state.symbol && Number(x.volume) > 0); amt = pos.length ? Number(pos[0].volume) * p : 0; }
-  $('fAmount').value = floorQty(amt, state.detail); updateEst();
+  // 按USDT输入时填的是名义价值(币数量×价格，向下取到分)，按币输入时填的是币数量(向下取到步长)
+  $('fAmount').value = state.amtUnit === 'usdt' ? fixed(Math.floor(amt * price * 100) / 100, 2) : floorQty(amt, state.detail);
+  updateEst();
 });
 
 async function placeOrder(side) {
   if (!state.uid) return toast('先选择账户', '', true);
-  const amount = $('fAmount').value.trim();
-  if (!(Number(amount) > 0)) return toast('数量不合法', '', true);
+  const amount = currentQty();
+  if (!(Number(amount) > 0)) return toast(state.amtUnit === 'usdt' ? '换算后的数量为0' : '数量不合法', state.amtUnit === 'usdt' ? '金额太小，或者没有可用的价格来换算' : '', true);
   const body = { uid: state.uid, symbol: state.symbol, side, action: state.action, type: state.type, amount, leverage: Number($('fLev').value) || 1, reduceOnly: $('fReduce').checked, requestId: rid('ord') };
   if (state.type === 'limit') {
     const price = $('fPrice').value.trim();

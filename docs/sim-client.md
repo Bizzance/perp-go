@@ -18,6 +18,8 @@ K线、24h统计、最新价都是币安的，页面上的最新价跟着K线收
 - 下单输入按`/contract/detail`的规则约束：位数不超过`priceScale`/`baseCoinScale`，是`priceTick`/`volumeStep`的整数倍，不小于`minVolume`、不超过`maxVolume`
   （`priceTick`/`volumeStep`是0时按位数）。判断整数倍用整数运算，不经过浮点数。百分比按钮也按数量步长取整。这曾经出过问题：百分比按钮写死了3位小数，
   ETH的数量精度是2位，下出了`88.931`这样的数量，而服务端当时没配步长、照收了
+- 数量输入框旁边可以在"币 / USDT名义价值"之间切换：选USDT时，页面按`数量 = floor(名义价值 ÷ 价格 ÷ 数量步长) × 数量步长`换算成币的数量再提交
+  （限价单用委托价，市价单用标记价，全部按整数运算），服务端收到的仍然只有币的数量，见 [api.md](api.md)"按USDT下单怎么换算"。切换单位时输入框里已有的数量会换算成另一种单位
 - 持仓盈亏不随标记价推送，页面订阅`markprice`频道自己重算，跟合作方要做的一样，见 [websocket.md](websocket.md)
 - 深度走contract-engine自己的`/depth`（合作方也是这样），私有数据走签名的REST和WebSocket
 

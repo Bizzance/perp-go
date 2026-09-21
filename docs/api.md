@@ -393,6 +393,35 @@ X-Signature  HMAC-SHA256(secret, timestamp\nnonce\nMETHOD\npath\nrawQuery\nsha25
 **注意**：`price`对会立刻成交的"吃单"来说跟真实成交价可能不一致——冻结保证金按保守参考价估算、成交后按真实成交价
 多退少补，账户最终不会吃亏，见 [matching-and-settlement.md](matching-and-settlement.md#冻结保证金的保守估计)。
 
+#### 按USDT下单怎么换算
+
+服务端的数量参数：`amount`（币的数量）是主要方式；另外有`marginAmount`（保证金金额，USDT），由服务端换算成数量（见下面"服务端换算"）。
+**没有"按名义价值（数量×价格）"的参数。** 业界的合约下单接口都只收数量：币安USDⓈ-M的`quantity`、OKX永续的`sz`（合约张数）、
+Bybit永续的`qty`，都没有按金额下单的参数；按金额下单只出现在现货市价单（OKX的`tgtCcy`、Bybit的`marketUnit`）。
+下单界面上"按币 / 按USDT"的切换，是前端自己换算成币的数量再提交。
+
+**前端换算**（界面提供"币 / USDT"切换时用，`tools/sim-client/web/app.js`的`usdtToQty`是参考实现）：
+
+| 用户输入            | 换算                                                                       |
+|---------------------|----------------------------------------------------------------------------|
+| 名义价值N（USDT）   | `数量 = floor(N ÷ 价格 ÷ volumeStep) × volumeStep`                          |
+| 保证金M（USDT）、杠杆L | 先算`N = M × L`，再按上一行算                                            |
+
+- **价格用哪个**：限价单用委托价；市价单用`markPrice`（`GET /market/ticker`）。服务端估算市价单保证金用的也是标记价，两边一致。
+  这个价格**只用来换算，不会传给服务端**：服务端收到的只有币的数量（限价单另外带它本来就有的委托价`price`）
+- **必须向下取整**到`volumeStep`（`volumeStep`是0时按`baseCoinScale`位），否则会被`volume_out_of_range`拒绝。取整后实际名义价值略小于输入，
+  界面上要把换算后的币数量和实际名义价值（数量×价格）展示给用户；市价单的成交价跟换算用的价格会有差异，展示成"约"
+- 所需保证金 = `数量 × 价格 ÷ 杠杆`；**手续费不含在冻结的保证金里**，成交时才从余额扣，界面上估算要分开显示
+- 换算结果低于`minVolume`时前端直接提示，不用发请求
+- **换算要用十进制库，不要用浮点数**：例如`243.7653 ÷ 81255.1 ÷ 0.001`向下取整，正确结果是3，用浮点数算得到2
+
+**服务端换算`marginAmount`**：`数量 = marginAmount × leverage ÷ 价格`，向下取到`baseCoinScale`位。价格：限价单用委托价，市价单用标记价
+（没有标记价的合约，市价单返回`no_mark_price`）。换算后同样校验最小量、最大量和步长。`marginAmount`和`amount`都传时优先用`marginAmount`。注意：
+
+- 成功响应里**不返回换算出来的数量**，要看订单请查`GET /order/current`
+- 市价单的成交价跟标记价不同，实际占用的保证金跟传的`marginAmount`会有小差异
+- 只向下取到`baseCoinScale`位，不按`volumeStep`取整：`volumeStep`配得比位数更粗时，换算出来的数量可能不是步长的整数倍，会被拒绝
+
 ### `POST /order/cancel/:orderId`
 
 ```json

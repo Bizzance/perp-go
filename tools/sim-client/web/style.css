@@ -88,7 +88,8 @@ td.num { text-align: right; }
 .badge { padding: 1px 8px; border-radius: 10px; font-size: 11px; background: var(--buy-bg); color: var(--buy); }
 .badge.frozen { background: var(--sell-bg); color: var(--sell); }
 .form { display: flex; flex-direction: column; gap: 8px; }
-.form label { display: flex; flex-direction: column; gap: 3px; color: var(--muted); font-size: 12px; }
+.form label, .form .field { display: flex; flex-direction: column; gap: 3px; color: var(--muted); font-size: 12px; }
+.form .lbl .seg button { padding: 0 8px; font-size: 11px; }
 .form label.check { flex-direction: row; align-items: center; gap: 6px; }
 .form label.check input { width: auto; }
 .lbl { display: flex; justify-content: space-between; }
