@@ -25,7 +25,8 @@ U本位永续合约交易系统，MVP阶段。文档按主题拆分，方便单�
 - [idempotency.md](idempotency.md) —— 接口幂等性：哪些接口需要、`requestId`/`round`怎么做、业界方案对比
 - [auth-design.md](auth-design.md) —— 接口鉴权：API Key + HMAC 签名协议、权限范围、对接示例
 - [sim-client.md](sim-client.md) —— 模拟客户端：内部测试用的交易页面，接币安行情做系统做市，用户的对手方是系统
+- [counterparty-hedging-design.md](counterparty-hedging-design.md) —— **方案草案，尚无代码**：生产环境的对手方、系统持仓怎么对冲、亏损谁承担，含待决策事项
 - [testing.md](testing.md) —— 测试：单元/集成两层怎么跑、隔离方式、夹具、怎么写新的集成测试
 - [known-limitations.md](known-limitations.md) —— 已知限制、明确排除项、下一步计划
 
-这些文档记录的是 **当前代码的实际行为**，不是需求文档或历史演进记录——改代码时如果行为变了，要顺手把对应文档改掉，不要让文档和代码分叉。
+这些文档记录的是 **当前代码的实际行为**（标明"方案草案"的除外），不是需求文档或历史演进记录——改代码时如果行为变了，要顺手把对应文档改掉，不要让文档和代码分叉。
