@@ -1,8 +1,8 @@
 # 三个进程共用一份多阶段构建：build阶段一次编译出三个二进制(共享依赖下载和编译缓存)，
-# 最终镜像只有静态二进制，用api/engine/feeder三个target分别取用：
+# 最终镜像只有静态二进制，用api/engine/booksync三个target分别取用：
 #   docker build -f deploy/Dockerfile --target api    -t perp-go/api    .
 #   docker build -f deploy/Dockerfile --target engine -t perp-go/engine .
-#   docker build -f deploy/Dockerfile --target feeder -t perp-go/feeder .
+#   docker build -f deploy/Dockerfile --target booksync -t perp-go/booksync .
 # 构建上下文是仓库根目录(不是deploy/)
 
 FROM golang:1.27-alpine AS build
@@ -18,7 +18,7 @@ COPY . .
 # -s -w去掉调试符号缩小体积
 RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/contract-api ./cmd/contract-api \
  && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/contract-engine ./cmd/contract-engine \
- && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/index-feeder ./cmd/index-feeder
+ && CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o /out/orderbook-sync ./cmd/orderbook-sync
 
 # 运行镜像：alpine自带busybox wget，供容器健康检查用；ca-certificates给以后可能的TLS连接用；
 # tzdata让TZ环境变量生效。用非root用户运行
@@ -38,8 +38,7 @@ COPY --from=build /out/contract-engine /app/contract-engine
 EXPOSE 7002
 ENTRYPOINT ["/app/contract-engine"]
 
-# 指数价喂价进程：从多家交易所取指数价、取中位数、推给contract-api。要访问外网；7003是状态和健康检查端口
-FROM runtime AS feeder
-COPY --from=build /out/index-feeder /app/index-feeder
-EXPOSE 7003
-ENTRYPOINT ["/app/index-feeder"]
+# 订单簿同步进程：把币安的订单簿同步进我们的订单簿，用户吃的就是这些挂单。要访问外网和contract-api，不监听端口
+FROM runtime AS booksync
+COPY --from=build /out/orderbook-sync /app/orderbook-sync
+ENTRYPOINT ["/app/orderbook-sync"]

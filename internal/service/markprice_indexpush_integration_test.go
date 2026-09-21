@@ -104,8 +104,8 @@ func TestPushIndexPrice_BigJumpHeldUntilConfirmed(t *testing.T) {
 	}
 }
 
-// 关键性质：真正的喂价器每秒都在推正常价格，每一次都会清掉待确认状态，攻击者攒不出连续3秒。
-// 每个"秒"里攻击者推离谱价格、喂价器推正常价格，跑20秒，离谱价格一次都进不去
+// 关键性质：真正的行情源(orderbook-sync)每秒都在推正常价格，每一次都会清掉待确认状态，攻击者攒不出连续3秒。
+// 每个"秒"里攻击者推离谱价格、行情源推正常价格，跑20秒，离谱价格一次都进不去
 func TestPushIndexPrice_LegitFeedKeepsAttackerFromConfirming(t *testing.T) {
 	e := newPushEnv(t, "0.05")
 	e.push(t, testSymbol, "60000")

@@ -94,43 +94,36 @@ services:
         condition: service_healthy
     logging: *logging
 
-  # 指数价喂价：从币安、OKX、Bybit取指数价，取中位数后推给api的POST /index-price。标记价靠它做锚，
-  # 喂价断了强平会暂停，见docs/index-feeder.md。**生产必须开**：在deploy/.env里设COMPOSE_PROFILES=feeder。
-  # 测试环境默认不开(模拟客户端的系统做市在喂指数价，两个喂价方会互相覆盖)。
-  # 需要ops权限的密钥，FEEDER_API_KEY_ID/FEEDER_API_SECRET要跟PERP_API_KEYS里的一把对上
-  feeder:
-    profiles: ["feeder"]
-    image: perp-go/feeder:${IMAGE_TAG:-latest}
+  # 订单簿同步：把币安的订单簿同步进我们的订单簿，用户下单吃的就是这些挂单，对手方就是系统，见docs/orderbook-sync.md。
+  # **生产必须开**：在deploy/.env里设COMPOSE_PROFILES=booksync。测试环境默认不开，用模拟客户端的做市(两者用同一段uid，不能同时跑)。
+  # 需要一把同时有trade和ops权限的密钥(建系统账户、挂单撤单、给系统账户充值)，BOOKSYNC_API_KEY_ID/BOOKSYNC_API_SECRET
+  # 要跟PERP_API_KEYS里的一把对上。退出时要撤掉全部系统挂单，所以留够退出时间
+  booksync:
+    profiles: ["booksync"]
+    image: perp-go/booksync:${IMAGE_TAG:-latest}
     build:
       context: ..
       dockerfile: deploy/Dockerfile
-      target: feeder
+      target: booksync
       args:
         GOPROXY: ${GOPROXY:-https://proxy.golang.org,direct}
     restart: unless-stopped
+    stop_grace_period: 30s
     environment:
       TZ: ${TZ:-UTC}
-      FEEDER_API_URL: http://api:7001
-      FEEDER_API_KEY_ID: ${FEEDER_API_KEY_ID:-}
-      FEEDER_API_SECRET: ${FEEDER_API_SECRET:-}
-      FEEDER_SYMBOLS: ${FEEDER_SYMBOLS:-}
-      FEEDER_SOURCES: ${FEEDER_SOURCES:-}
-      FEEDER_MIN_SOURCES: ${FEEDER_MIN_SOURCES:-}
-      FEEDER_OUTLIER: ${FEEDER_OUTLIER:-}
-      FEEDER_MAX_JUMP: ${FEEDER_MAX_JUMP:-}
-      FEEDER_JUMP_CONFIRM: ${FEEDER_JUMP_CONFIRM:-}
-      FEEDER_INTERVAL_MS: ${FEEDER_INTERVAL_MS:-}
-      FEEDER_HEALTH_MAX_AGE_SEC: ${FEEDER_HEALTH_MAX_AGE_SEC:-}
-    # 状态端口7003不映射到宿主机(FEEDER_HTTP_ADDR保持默认，健康检查依赖它)：有合约超过
-    # FEEDER_HEALTH_MAX_AGE_SEC没成功发布就返回503，容器变unhealthy。restart: unless-stopped只在进程退出时重启，
-    # 不会因为unhealthy重启，所以这是给监控看的信号，不是自愈，见docs/index-feeder.md"状态和健康检查"
-    healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7003/health"]
-      interval: 10s
-      timeout: 3s
-      retries: 3
-      start_period: 20s
+      BOOKSYNC_API_URL: http://api:7001
+      BOOKSYNC_API_KEY_ID: ${BOOKSYNC_API_KEY_ID:-}
+      BOOKSYNC_API_SECRET: ${BOOKSYNC_API_SECRET:-}
+      BOOKSYNC_SYMBOLS: ${BOOKSYNC_SYMBOLS:-}
+      BOOKSYNC_LEVELS: ${BOOKSYNC_LEVELS:-}
+      BOOKSYNC_INTERVAL_MS: ${BOOKSYNC_INTERVAL_MS:-}
+      BOOKSYNC_STALE_SEC: ${BOOKSYNC_STALE_SEC:-}
+      BOOKSYNC_UID_BASE: ${BOOKSYNC_UID_BASE:-}
+      BOOKSYNC_BALANCE: ${BOOKSYNC_BALANCE:-}
+      BOOKSYNC_LEVERAGE: ${BOOKSYNC_LEVERAGE:-}
     depends_on:
       api:
+        condition: service_healthy
+      engine:
         condition: service_healthy
     logging: *logging

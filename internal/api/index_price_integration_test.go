@@ -15,7 +15,7 @@ import (
 )
 
 // POST /index-price的服务端跳变保护，验证HTTP层的响应：被拦下返回400+index_price_jump，
-// 喂价方(index-feeder)靠这个errCode认出"服务端在等确认"，不能把它当成别的错误。判断逻辑本身见
+// 推价方(orderbook-sync)靠这个errCode认出"服务端在等确认"，不能把它当成别的错误。判断逻辑本身见
 // service包的TestDecideIndexPush_*和TestPushIndexPrice_*
 func TestSetIndexPrice_JumpGuardResponses(t *testing.T) {
 	e := newAPIEnv(t)

@@ -80,7 +80,7 @@ func (c Config) ValidateAuth() error {
 }
 
 // 解析PERP_API_KEYS：逗号分隔多把密钥，每把是`id:secret:scope|scope`，比如
-// `partner-a:0123456789abcdef0123:trade|ops,feeder:abcdef0123456789abcd:ops`。选这个格式而不是
+// `partner-a:0123456789abcdef0123:trade|ops,booksync:abcdef0123456789abcd:trade|ops`。选这个格式而不是
 // JSON，是因为它放进.env文件和环境变量里不用处理引号转义。id和secret里不能出现`:`、`,`、`|`
 func ParseAPIKeys(raw string) ([]APIKey, error) {
 	raw = strings.TrimSpace(raw)

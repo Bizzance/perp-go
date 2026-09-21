@@ -1,6 +1,6 @@
 BIN_DIR := bin
 
-.PHONY: fmt vet race-check build build-api build-engine build-feeder test test-integration test-e2e sim-client test-race build-race run-api run-engine run-api-race run-engine-race clean docker-build compose-test-up compose-test-down compose-prod-up
+.PHONY: fmt vet race-check build build-api build-engine build-booksync test test-integration test-e2e sim-client test-race build-race run-api run-engine run-api-race run-engine-race clean docker-build compose-test-up compose-test-down compose-prod-up
 
 fmt:
 	gofmt -w .
@@ -15,7 +15,7 @@ vet:
 race-check:
 	go build -race ./...
 
-build: vet race-check build-api build-engine build-feeder
+build: vet race-check build-api build-engine build-booksync
 
 build-api:
 	go build -o $(BIN_DIR)/contract-api ./cmd/contract-api
@@ -23,8 +23,8 @@ build-api:
 build-engine:
 	go build -o $(BIN_DIR)/contract-engine ./cmd/contract-engine
 
-build-feeder:
-	go build -o $(BIN_DIR)/index-feeder ./cmd/index-feeder
+build-booksync:
+	go build -o $(BIN_DIR)/orderbook-sync ./cmd/orderbook-sync
 
 test:
 	go test ./...
@@ -79,7 +79,7 @@ COMPOSE_TEST = docker compose --env-file deploy/.env -f deploy/docker-compose.ym
 docker-build:
 	docker build -f deploy/Dockerfile --target api    -t perp-go/api:$(IMAGE_TAG) .
 	docker build -f deploy/Dockerfile --target engine -t perp-go/engine:$(IMAGE_TAG) .
-	docker build -f deploy/Dockerfile --target feeder -t perp-go/feeder:$(IMAGE_TAG) .
+	docker build -f deploy/Dockerfile --target booksync -t perp-go/booksync:$(IMAGE_TAG) .
 
 # 测试/联调环境：依赖(MySQL/Redis/Kafka)一起拉起来，需要先 cp deploy/.env.test.example deploy/.env
 compose-test-up:

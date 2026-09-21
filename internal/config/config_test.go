@@ -57,7 +57,7 @@ func TestLoad_NodeIDExplicit(t *testing.T) {
 }
 
 func TestParseAPIKeys(t *testing.T) {
-	keys, err := ParseAPIKeys("partner-a:0123456789abcdef0123:trade|ops, feeder:abcdef0123456789abcd:ops")
+	keys, err := ParseAPIKeys("partner-a:0123456789abcdef0123:trade|ops, booksync:abcdef0123456789abcd:ops")
 	if err != nil || len(keys) != 2 {
 		t.Fatalf("合法配置应该解析成功, got %v %v", keys, err)
 	}
