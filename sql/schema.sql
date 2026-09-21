@@ -284,11 +284,13 @@ CREATE TABLE IF NOT EXISTS round_close_progress (
   PRIMARY KEY (uid, round, symbol)
 ) ENGINE=InnoDB;
 
--- 演示用初始合约配置，方便本地对照测试
-INSERT INTO coins (symbol, base_coin_scale, price_scale, maker_fee, taker_fee, min_volume)
+-- 演示用初始合约配置，方便本地对照测试。price_tick/volume_step配成跟价格/数量精度一致(10^-scale)：
+-- 通过GET /contract/list、/contract/detail对外提供，对接方靠它们知道输入框的步进，服务端也据此拒绝位数超标的订单。
+-- 重复执行这个文件不会覆盖已经调过的配置(ON DUPLICATE KEY UPDATE是no-op)；已经建过库的环境要手动UPDATE
+INSERT INTO coins (symbol, base_coin_scale, price_scale, maker_fee, taker_fee, min_volume, price_tick, volume_step)
 VALUES
-  ('BTCUSDT', 3, 1, 0.000200, 0.000500, 0.001),
-  ('ETHUSDT', 2, 2, 0.000200, 0.000500, 0.01)
+  ('BTCUSDT', 3, 1, 0.000200, 0.000500, 0.001, 0.1, 0.001),
+  ('ETHUSDT', 2, 2, 0.000200, 0.000500, 0.01, 0.01, 0.01)
 ON DUPLICATE KEY UPDATE symbol = symbol;
 
 -- 演示用保证金分档：maintenance_amount(速算扣除数)是按"跨档位维持保证金连续"手工算好的常量，
