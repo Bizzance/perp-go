@@ -40,6 +40,8 @@ type engineEnv struct {
 
 	uidBase uint64
 	nextID  atomic.Uint64
+
+	bookIDs map[string][]uint64 // setBook摆在订单簿里的委托，下次setBook时先撤掉
 }
 
 func newEngineEnv(t *testing.T) *engineEnv {
@@ -81,7 +83,11 @@ func newEngineEnv(t *testing.T) *engineEnv {
 	e.condSvc = service.NewConditionalOrderService(e.conditional, e.orders, e.markPrice, e.engine)
 	// 强平单超时兜底设短一点(200ms)，测试里不用干等
 	e.coins = coinRepo
-	e.funding = service.NewFundingService(rdb, coinRepo, positionRepo, repo.NewFundingRepo(conn), e.accounts, txRepo, e.markPrice)
+	e.funding = service.NewFundingService(rdb, coinRepo, positionRepo, repo.NewFundingRepo(conn), e.accounts, txRepo, e.markPrice).
+		WithBook(func(symbol string) bool { return e.engine.OwnsSymbol(symbol) }, // 闭包里读e.book/e.engine：restartEngine会换掉它们
+			func(symbol string, notional decimal.Decimal) (decimal.Decimal, decimal.Decimal, bool) {
+				return e.book.BookFor(symbol).ImpactPrices(notional)
+			})
 	e.liq = service.NewLiquidationService(e.engine, e.orders, positionRepo, positionSvc, e.markPrice, e.accounts,
 		fundSvc, coinRepo, 200)
 	return e

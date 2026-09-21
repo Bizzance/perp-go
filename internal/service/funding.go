@@ -3,6 +3,7 @@ package service
 import (
 	"context"
 	"log"
+	"sync"
 
 	"github.com/shopspring/decimal"
 
@@ -10,6 +11,9 @@ import (
 	"perp-go/internal/model"
 	"perp-go/internal/repo"
 )
+
+// 按名义金额(USDT)吃盘口，返回冲击买价和冲击卖价，盘口不够深时ok=false。生产里是matching.Book.ImpactPrices
+type ImpactPriceFunc func(symbol string, notional decimal.Decimal) (bid, ask decimal.Decimal, ok bool)
 
 type FundingService struct {
 	cache     *cache.Cache
@@ -19,6 +23,14 @@ type FundingService struct {
 	accounts  *AccountService
 	tx        *repo.TxRepo
 	markPrice *MarkPriceService
+
+	// 采样要读订单簿，所以只有拥有这个symbol订单簿的engine实例才能采(分片部署下别的实例的本地订单簿是空的)，
+	// 用WithBook接上。没接的话SampleOnce什么都采不了
+	owns   func(symbol string) bool
+	impact ImpactPriceFunc
+
+	mu         sync.Mutex
+	skipReason map[string]string // symbol -> 上一次采样被跳过的原因，只在变化时打日志
 }
 
 func NewFundingService(
@@ -38,27 +50,86 @@ func NewFundingService(
 		accounts:  accounts,
 		tx:        tx,
 		markPrice: markPrice,
+
+		skipReason: make(map[string]string),
 	}
 }
 
-// 给每个启用的合约采一次样：溢价率=(标记价格-指数价格)/指数价格，累加进这个symbol当前资金费率周期的累加器，结算时取累加器的均值当TWAP。
-// 标记价/指数价任一缺失就跳过——不能当0处理，那样会把溢价算成一个错误的、有偏向性的值
+// 接上订单簿：owns判断这个engine实例负责不负责某个symbol，impact按名义金额算冲击买卖价。
+// 只在contract-engine里调用，SampleOnce要用
+func (s *FundingService) WithBook(owns func(symbol string) bool, impact ImpactPriceFunc) *FundingService {
+	s.owns, s.impact = owns, impact
+	return s
+}
+
+// 给这个engine实例负责的每个启用合约采一次样：算这一刻的溢价指数，累加进这个symbol当前资金费率周期的
+// 累加器，结算时取累加器的均值当TWAP。溢价指数是币安的口径，用冲击价格而不是标记价：
+//
+//	溢价 = [max(0, 冲击买价 - 指数价) - max(0, 指数价 - 冲击卖价)] / 指数价
+//
+// 冲击买价/卖价是按合约的FundingImpactNotional(USDT)去吃订单簿两侧、吃完的平均成交价。盘口的买卖价都高于
+// 指数价说明合约比现货贵、溢价为正；都低于指数价溢价为负；指数价夹在中间(买价<=指数价<=卖价)溢价为0。
+// 以前用(标记价-指数价)/指数价，但标记价被夹在指数价和"指数价加基差"之间，溢价会被压缩到不超过盘口基差。
+//
+// 这些情况跳过这一个合约、不采样(不能当0处理，那样会把溢价算成有偏向性的错误值)：
+//   - 不归这个实例负责：本地订单簿是空的。分片部署下每个symbol只有owner采样
+//   - 指数价缺失或断供
+//   - 没配冲击名义金额，或者任何一侧盘口的总名义价值不够：盘口太薄时没有可靠的冲击价格，
+//     否则可以靠撤掉一侧的挂单来控制溢价
 func (s *FundingService) SampleOnce(ctx context.Context) {
+	if s.impact == nil {
+		log.Printf("[ERROR] funding sample: 没有接订单簿(WithBook)，不能采样")
+		return
+	}
 	coins, err := s.coins.FindAllEnabled(ctx)
 	if err != nil {
 		log.Printf("[ERROR] funding sample: list coins failed: %v", err)
 		return
 	}
 	for _, coin := range coins {
-		mark, hasMark := s.markPrice.GetFresh(ctx, coin.Symbol)
-		index, hasIndex := s.markPrice.GetIndexPrice(ctx, coin.Symbol)
-		if !hasMark || !hasIndex || index.Sign() <= 0 {
+		if s.owns != nil && !s.owns(coin.Symbol) {
 			continue
 		}
-		premium := mark.Sub(index).Div(index)
+		index, hasIndex := s.markPrice.GetFreshIndex(ctx, coin.Symbol)
+		if !hasIndex {
+			continue // 喂价断了，标记价冻结、强平也暂停，见mark-price.md，这里不用另外告警
+		}
+		if coin.FundingImpactNotional.Sign() <= 0 {
+			s.noteSkip(coin.Symbol, "没有配置冲击名义金额(funding_impact_notional)")
+			continue
+		}
+		bid, ask, ok := s.impact(coin.Symbol, coin.FundingImpactNotional)
+		if !ok {
+			s.noteSkip(coin.Symbol, "盘口不够深，凑不够冲击名义金额"+coin.FundingImpactNotional.String())
+			continue
+		}
+		s.noteSkip(coin.Symbol, "")
+		premium := premiumFromImpact(index, bid, ask)
 		if err := s.cache.AccumulateFundingSample(ctx, coin.Symbol, premium); err != nil {
 			log.Printf("[ERROR] funding sample accumulate failed, symbol=%s: %v", coin.Symbol, err)
 		}
+	}
+}
+
+// 溢价指数：[max(0, 冲击买价-指数价) - max(0, 指数价-冲击卖价)] / 指数价。index必须大于0
+func premiumFromImpact(index, impactBid, impactAsk decimal.Decimal) decimal.Decimal {
+	up := decimal.Max(decimal.Zero, impactBid.Sub(index))
+	down := decimal.Max(decimal.Zero, index.Sub(impactAsk))
+	return up.Sub(down).Div(index)
+}
+
+// 记录这个symbol这一轮采样被跳过的原因(""=采样成功)，只在原因变化时打一条日志：采样每分钟一次，
+// 一个长期没有深度的合约(比如测试环境的做市停了)不能每分钟刷一条
+func (s *FundingService) noteSkip(symbol, reason string) {
+	s.mu.Lock()
+	prev := s.skipReason[symbol]
+	s.skipReason[symbol] = reason
+	s.mu.Unlock()
+	switch {
+	case reason != "" && reason != prev:
+		log.Printf("[WARN] 资金费率采样被跳过, symbol=%s: %s。这个周期的资金费率只按已采到的样本算，一个样本都没有就是0", symbol, reason)
+	case reason == "" && prev != "":
+		log.Printf("[INFO] 资金费率采样恢复, symbol=%s", symbol)
 	}
 }
 

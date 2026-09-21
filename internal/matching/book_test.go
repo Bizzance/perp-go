@@ -301,3 +301,136 @@ func TestBook_ReplayCrossedPairThroughMatch_Fills(t *testing.T) {
 		t.Errorf("成交后簿子应该是空的, got %+v", depth)
 	}
 }
+
+// ---- 冲击价格 ----
+
+// 期望值都按定义手算：按名义金额(价格*数量)从最优价往深处吃，平均成交价=名义金额/吃到的总数量
+func TestBook_ImpactPrices(t *testing.T) {
+	// 买盘：100(2个=200)、99(3个=297)、98(10个=980)；卖盘：101(1个=101)、102(4个=408)、110(5个=550)
+	build := func() *Book {
+		b := NewBook()
+		b.Rest(newResting(1, 1, Buy, "100", "2", 1))
+		b.Rest(newResting(2, 2, Buy, "99", "3", 2))
+		b.Rest(newResting(3, 3, Buy, "98", "10", 3))
+		b.Rest(newResting(4, 4, Sell, "101", "1", 4))
+		b.Rest(newResting(5, 5, Sell, "102", "4", 5))
+		b.Rest(newResting(6, 6, Sell, "110", "5", 6))
+		return b
+	}
+	cases := []struct {
+		name     string
+		notional string
+		bid, ask string // 期望的冲击买价、卖价，空=这一侧凑不够
+	}{
+		// 卖盘：101档只有101名义价值，200要吃到102档：1+99/102个，均价=200/(1+99/102)=6800/67
+		{"金额在第一档以内：就是最优价", "100", "100", "101"},
+		{"恰好吃完买盘第一档(200)：均价还是100；卖盘吃到第二档", "200", "100", "101.4925373134"},
+		// 买盘：2个在100，剩100在99档：100/99个，均价=300/(2+100/99)=14850/149；卖盘：1个在101，剩199在102档，均价=300/(1+199/102)=30600/301
+		{"吃穿买盘第一档", "300", "99.6644295302", "101.6611295681"},
+		// 买盘：200+297=497吃完前两档共5个，剩12在98档，均价=509/(5+12/98)=24941/251；卖盘：101+408=509恰好吃完前两档共5个，均价=509/5
+		{"卖盘刚好吃完前两档(101+408=509)", "509", "99.3665338645", "101.8"},
+		// 卖盘总名义价值101+408+550=1059，金额恰好等于总深度时还算够(吃完最后一档、没有剩余)：均价=1059/(1+4+5)=105.9；
+		// 买盘：吃完前两档5个(497)，剩562在98档，均价=1059/(5+562/98)=51891/526
+		{"金额恰好等于卖盘总深度(1059)：还算够", "1059", "98.6520912548", "105.9"},
+		{"买盘够(1477)，但卖盘总共只有1059：卖侧不够，整体不可用", "1477", "", ""},
+		{"超过卖盘总额1059一点点：卖侧不够", "1060", "", ""},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			bid, ask, ok := build().ImpactPrices(d(c.notional))
+			if c.bid == "" {
+				if ok {
+					t.Fatalf("应该凑不够: bid=%s ask=%s", bid, ask)
+				}
+				return
+			}
+			if !ok {
+				t.Fatal("应该凑得够")
+			}
+			if !bid.Round(10).Equal(d(c.bid).Round(10)) || !ask.Round(10).Equal(d(c.ask).Round(10)) {
+				t.Fatalf("bid=%s ask=%s, want bid=%s ask=%s", bid, ask, c.bid, c.ask)
+			}
+		})
+	}
+}
+
+// 任何一侧不够深就整体不可用，不能拿一侧的价格凑合(否则撤掉一侧挂单就能控制溢价)
+func TestBook_ImpactPrices_OneSidedOrEmptyBookIsUnavailable(t *testing.T) {
+	empty := NewBook()
+	if _, _, ok := empty.ImpactPrices(d("100")); ok {
+		t.Fatal("空盘口应该不可用")
+	}
+	onlyBids := NewBook()
+	onlyBids.Rest(newResting(1, 1, Buy, "100", "100", 1))
+	if _, _, ok := onlyBids.ImpactPrices(d("100")); ok {
+		t.Fatal("只有买盘应该不可用")
+	}
+	onlyAsks := NewBook()
+	onlyAsks.Rest(newResting(1, 1, Sell, "100", "100", 1))
+	if _, _, ok := onlyAsks.ImpactPrices(d("100")); ok {
+		t.Fatal("只有卖盘应该不可用")
+	}
+}
+
+// 名义金额<=0没有意义，不返回价格
+func TestBook_ImpactPrices_NonPositiveNotional(t *testing.T) {
+	b := NewBook()
+	b.Rest(newResting(1, 1, Buy, "100", "10", 1))
+	b.Rest(newResting(2, 2, Sell, "101", "10", 2))
+	for _, n := range []string{"0", "-1"} {
+		if _, _, ok := b.ImpactPrices(d(n)); ok {
+			t.Fatalf("名义金额%s应该不可用", n)
+		}
+	}
+}
+
+// 只读：算冲击价格不改订单簿
+func TestBook_ImpactPrices_DoesNotMutateBook(t *testing.T) {
+	b := NewBook()
+	b.Rest(newResting(1, 1, Buy, "100", "10", 1))
+	b.Rest(newResting(2, 2, Sell, "101", "10", 2))
+	before := b.Depth(0)
+	b.ImpactPrices(d("500"))
+	after := b.Depth(0)
+	if len(before.Bids) != len(after.Bids) || !before.Bids[0].Volume.Equal(after.Bids[0].Volume) ||
+		!before.Asks[0].Volume.Equal(after.Asks[0].Volume) {
+		t.Fatal("算冲击价格不该改订单簿")
+	}
+}
+
+// 抗操纵：在买一挂一个远高于市场的小单，最优价被拉高，但冲击价格只是被拉动一点点——
+// 要拉动冲击价格必须摆出至少名义金额那么大的单子
+func TestBook_ImpactPrices_TinyOrderAtTheTouchBarelyMovesIt(t *testing.T) {
+	b := NewBook()
+	b.Rest(newResting(1, 1, Buy, "100", "100", 1)) // 真实的买盘：100档，10000名义价值
+	b.Rest(newResting(2, 2, Sell, "101", "100", 2))
+	baseline, _, _ := b.ImpactPrices(d("1000"))
+
+	b.Rest(newResting(3, 3, Buy, "130", "0.1", 3)) // 操纵：买一被拉到130，但只有13的名义价值
+	if best := b.Depth(1).Bids[0].Price; !best.Equal(d("130")) {
+		t.Fatalf("买一应该被拉到130: %s", best)
+	}
+	manipulated, _, ok := b.ImpactPrices(d("1000"))
+	if !ok {
+		t.Fatal("应该可用")
+	}
+	// 1000名义：13吃在130，剩987吃在100 -> 总数量0.1+9.87=9.97，均价1000/9.97≈100.3009，
+	// 而买一中价会被直接拉到(130+101)/2
+	if !manipulated.Round(4).Equal(d("100.3009")) {
+		t.Fatalf("冲击买价 = %s, want 约100.3009(基线%s)", manipulated, baseline)
+	}
+}
+
+// 单档成交时冲击价必须恰好等于这一档的价格，不能带除法的舍入噪声：
+// 名义金额10000吃65065这一档，先算数量再反推均价，如果中间的除法精度不够会得到65064.99999999935
+func TestBook_ImpactPrices_SingleLevelIsExact(t *testing.T) {
+	for _, price := range []string{"65065", "3000.5", "0.0123", "97431.27"} {
+		b := NewBook()
+		b.Rest(newResting(1, 1, Buy, price, "1000000", 1))
+		b.Rest(newResting(2, 2, Sell, price, "1000000", 2))
+		bid, ask, ok := b.ImpactPrices(d("10000"))
+		if !ok || !bid.Equal(d(price)) || !ask.Equal(d(price)) {
+			t.Fatalf("价格%s: bid=%s ask=%s ok=%v, want 恰好等于%s", price, bid, ask, ok, price)
+		}
+	}
+}

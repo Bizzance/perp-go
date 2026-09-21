@@ -258,6 +258,15 @@ func (s *MarkPriceService) GetIndexPrice(ctx context.Context, symbol string) (de
 	return p, ok
 }
 
+// 指数价，但只在没断供时返回：过期的指数价没有参照意义。资金费率采样用它算溢价
+func (s *MarkPriceService) GetFreshIndex(ctx context.Context, symbol string) (decimal.Decimal, bool) {
+	p, ts, ok := s.readIndex(ctx, symbol)
+	if !ok || s.indexStale(ts) {
+		return decimal.Zero, false
+	}
+	return p, true
+}
+
 func (s *MarkPriceService) readIndex(ctx context.Context, symbol string) (decimal.Decimal, int64, bool) {
 	v, ts, err := s.cache.GetIndexPrice(ctx, symbol)
 	if err != nil || v == "" {

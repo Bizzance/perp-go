@@ -132,7 +132,9 @@ type Coin struct {
 	MaxVolume            decimal.Decimal `db:"max_volume" json:"maxVolume"`
 	FundingIntervalHours int32           `db:"funding_interval_hours" json:"fundingIntervalHours"`
 	FundingRateCap       decimal.Decimal `db:"funding_rate_cap" json:"fundingRateCap"`
-	PriceProtectionRatio decimal.Decimal `db:"price_protection_ratio" json:"priceProtectionRatio"`
+	// 资金费率溢价用的冲击名义金额(USDT)，见FundingService.SampleOnce。0=不采样，跟别的"0=不限制"字段不同
+	FundingImpactNotional decimal.Decimal `db:"funding_impact_notional" json:"fundingImpactNotional"`
+	PriceProtectionRatio  decimal.Decimal `db:"price_protection_ratio" json:"priceProtectionRatio"`
 }
 
 // 保证金分档(风险限额)：维持保证金率/最大杠杆按仓位名义价值分档，仓位越大

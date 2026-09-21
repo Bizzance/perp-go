@@ -349,6 +349,40 @@ func (b *Book) Depth(maxLevels int) DepthSnapshot {
 	}
 }
 
+// 冲击价格：按名义金额notional(USDT，即价格*数量)去吃盘口，返回吃完这些金额的平均成交价。
+// bid是卖出(吃买盘)的平均价，ask是买入(吃卖盘)的平均价。任何一侧的总名义价值不够notional，或者
+// notional<=0，都返回ok=false——盘口太薄时没有可靠的冲击价格，调用方不能拿一侧的价格凑合。
+// 资金费率的溢价用它算(见service.FundingService)：比买一卖一中价难操纵，要影响冲击价格得在盘口上
+// 摆出至少notional这么大的单子，而不是在买一挂一手就行
+func (b *Book) ImpactPrices(notional decimal.Decimal) (bid, ask decimal.Decimal, ok bool) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	bid, okBid := impactPrice(b.bids, notional)
+	ask, okAsk := impactPrice(b.asks, notional)
+	return bid, ask, okBid && okAsk
+}
+
+// 从最优价往深处吃，levels已经按"最优价在前"排好序(bids从高到低，asks从低到高)
+func impactPrice(levels []*priceLevel, notional decimal.Decimal) (decimal.Decimal, bool) {
+	if notional.Sign() <= 0 {
+		return decimal.Zero, false
+	}
+	remaining, qty := notional, decimal.Zero
+	for _, pl := range levels {
+		levelNotional := pl.price.Mul(pl.totalVolume)
+		if remaining.LessThanOrEqual(levelNotional) {
+			// 最后一档只吃一部分。中间这次除法用32位小数：默认的16位会让"名义金额/(名义金额/价格)"
+			// 差一点点不等于价格(65065变成65064.99999999935)，单档成交时冲击价必须恰好等于这一档的价格，
+			// 不然指数价恰好等于买价时溢价会算出一个1e-16量级的噪声而不是0
+			qty = qty.Add(remaining.DivRound(pl.price, 32))
+			return notional.DivRound(qty, 16), true
+		}
+		qty = qty.Add(pl.totalVolume)
+		remaining = remaining.Sub(levelNotional)
+	}
+	return decimal.Zero, false
+}
+
 func snapshotLevels(levels []*priceLevel, maxLevels int) []PriceLevel {
 	n := len(levels)
 	if maxLevels > 0 && maxLevels < n {

@@ -58,6 +58,7 @@ CREATE TABLE IF NOT EXISTS coins (
   max_volume                DECIMAL(18,8) NOT NULL DEFAULT 0 COMMENT '0=不限制',
   funding_interval_hours    INT UNSIGNED NOT NULL DEFAULT 8 COMMENT '资金费率结算周期(小时)，对齐到从0点起的整点边界',
   funding_rate_cap          DECIMAL(10,6) NOT NULL DEFAULT 0.007500 COMMENT '资金费率上下限，0=不限制',
+  funding_impact_notional   DECIMAL(18,8) NOT NULL DEFAULT 10000 COMMENT '资金费率溢价用的冲击名义金额(USDT)：按这个金额吃盘口算冲击买卖价，某一侧盘口不够深这个合约就采不到溢价样本。必须大于0，0=不采样(资金费率恒为0)',
   price_protection_ratio    DECIMAL(8,6) NOT NULL DEFAULT 0.050000 COMMENT '限价单允许偏离标记/指数价格的最大比例，0=不校验',
   created_at                DATETIME NOT NULL DEFAULT CURRENT_TIMESTAMP,
   PRIMARY KEY (symbol)

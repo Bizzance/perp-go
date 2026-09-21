@@ -102,6 +102,11 @@ func main() {
 
 	matchingEngine := matching.NewEngine()
 	engineSvc := service.NewEngineService(matchingEngine, orderRepo, conditionalOrderRepo, tradeRepo, accountSvc, positionSvc, settlementSvc, markPriceSvc, fundSvc, klineSvc, pushSvc, roundCloseProgressRepo, lockSvc, coinRepo, cfg.EngineSymbols)
+	// 资金费率采样读订单簿：只有拥有这个symbol的实例才采样，用冲击价格算溢价
+	fundingSvc.WithBook(func(symbol string) bool { return engineSvc.OwnsSymbol(symbol) },
+		func(symbol string, notional decimal.Decimal) (decimal.Decimal, decimal.Decimal, bool) {
+			return matchingEngine.BookFor(symbol).ImpactPrices(notional)
+		})
 	liquidationSvc := service.NewLiquidationService(engineSvc, orderRepo, positionRepo, positionSvc, markPriceSvc, accountSvc, fundSvc, coinRepo, cfg.LiquidationOrderTimeoutMs)
 	conditionalOrderSvc := service.NewConditionalOrderService(conditionalOrderRepo, orderRepo, markPriceSvc, engineSvc)
 

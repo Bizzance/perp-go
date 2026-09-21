@@ -18,7 +18,7 @@ func (r *CoinRepo) FindBySymbol(ctx context.Context, symbol string) (*model.Coin
 	var c model.Coin
 	err := r.db.GetContext(ctx, &c, `SELECT symbol, base_coin_scale, price_scale, enable,
 		maker_fee, taker_fee, price_tick, volume_step, min_volume, max_volume,
-		funding_interval_hours, funding_rate_cap, price_protection_ratio
+		funding_interval_hours, funding_rate_cap, funding_impact_notional, price_protection_ratio
 		FROM coins WHERE symbol = ?`, symbol)
 	if errors.Is(err, sql.ErrNoRows) {
 		return nil, nil
@@ -30,7 +30,7 @@ func (r *CoinRepo) FindAllEnabled(ctx context.Context) ([]model.Coin, error) {
 	var coins []model.Coin
 	err := r.db.SelectContext(ctx, &coins, `SELECT symbol, base_coin_scale, price_scale, enable,
 		maker_fee, taker_fee, price_tick, volume_step, min_volume, max_volume,
-		funding_interval_hours, funding_rate_cap, price_protection_ratio
+		funding_interval_hours, funding_rate_cap, funding_impact_notional, price_protection_ratio
 		FROM coins WHERE enable = 1`)
 	return coins, err
 }
