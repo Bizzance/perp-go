@@ -24,18 +24,24 @@ func TestDesiredLevels(t *testing.T) {
 		name string
 		n    int
 		dp   int32
+		step string // 数量步长，空=不校验
 		min  string
 		want []Level
 	}{
-		{"前2档，价格数量原样", 2, 3, "0.001", []Level{lv("100.1", "2"), lv("100.0", "0.456")}},
-		{"数量向下取到3位，0.0009取整成0不挂，顺延到后面的档位补够n档", 3, 3, "0.001", []Level{lv("100.1", "2"), lv("100.0", "0.456"), lv("99.8", "5")}},
-		{"低于最小下单量的不挂", 5, 3, "1", []Level{lv("100.1", "2"), lv("99.8", "5"), lv("99.7", "1")}},
-		{"n比档位数大：有多少给多少", 10, 3, "0.001", []Level{lv("100.1", "2"), lv("100.0", "0.456"), lv("99.8", "5"), lv("99.7", "1")}},
-		{"小数位是0：数量取整数", 5, 0, "1", []Level{lv("100.1", "2"), lv("99.8", "5"), lv("99.7", "1")}},
+		{"前2档，价格数量原样", 2, 3, "", "0.001", []Level{lv("100.1", "2"), lv("100.0", "0.456")}},
+		{"数量向下取到3位，0.0009取整成0不挂，顺延到后面的档位补够n档", 3, 3, "", "0.001", []Level{lv("100.1", "2"), lv("100.0", "0.456"), lv("99.8", "5")}},
+		{"低于最小下单量的不挂", 5, 3, "", "1", []Level{lv("100.1", "2"), lv("99.8", "5"), lv("99.7", "1")}},
+		{"n比档位数大：有多少给多少", 10, 3, "", "0.001", []Level{lv("100.1", "2"), lv("100.0", "0.456"), lv("99.8", "5"), lv("99.7", "1")}},
+		{"小数位是0：数量取整数", 5, 0, "", "1", []Level{lv("100.1", "2"), lv("99.8", "5"), lv("99.7", "1")}},
+		{"步长比小数位粗：向下取到步长的整数倍(0.4567→0.45)，取整成0的不挂", 4, 3, "0.05", "0.05", []Level{lv("100.1", "2"), lv("100.0", "0.45"), lv("99.8", "5"), lv("99.7", "1")}},
 	}
 	for _, c := range cases {
 		t.Run(c.name, func(t *testing.T) {
-			got := desiredLevels(levels, c.n, c.dp, d(c.min))
+			step := decimal.Zero
+			if c.step != "" {
+				step = d(c.step)
+			}
+			got := desiredLevels(levels, c.n, c.dp, step, d(c.min))
 			if len(got) != len(c.want) {
 				t.Fatalf("got %v, want %v", got, c.want)
 			}
@@ -46,7 +52,7 @@ func TestDesiredLevels(t *testing.T) {
 			}
 		})
 	}
-	if got := desiredLevels(nil, 5, 3, d("0.001")); len(got) != 0 {
+	if got := desiredLevels(nil, 5, 3, decimal.Zero, d("0.001")); len(got) != 0 {
 		t.Fatalf("空盘口: %v", got)
 	}
 }

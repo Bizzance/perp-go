@@ -18,7 +18,7 @@ const (
 	ErrOrderNotFound          = "order_not_found"           // 委托/条件单不存在(或不属于这个uid)
 	ErrOrderNotCancelable     = "order_not_cancelable"      // 委托/条件单已经成交完、已撤销或已触发，不能再撤
 	ErrPositionNotFound       = "position_not_found"        // 这个uid+symbol+side没有持仓
-	ErrNoMarkPrice            = "no_mark_price"             // 这个合约还没有标记价格(从没成交过)
+	ErrNoMarkPrice            = "no_mark_price"             // 这个合约还没有标记价格(既没有成交过，生产模式下也没喂过指数价)
 	ErrPriceOutOfRange        = "price_out_of_range"        // 委托价格偏离参考价超过价格保护带
 	ErrPriceTickInvalid       = "price_tick_invalid"        // 价格不是最小变动单位的整数倍
 	ErrVolumeOutOfRange       = "volume_out_of_range"       // 数量低于最小量/超过最大量/不是步长整数倍

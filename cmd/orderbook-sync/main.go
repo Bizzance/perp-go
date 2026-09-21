@@ -34,8 +34,9 @@ func main() {
 		Leverage:   int(envInt("BOOKSYNC_LEVERAGE", 5)),
 		Balance:    envOr("BOOKSYNC_BALANCE", "1000000000"),
 		StaleAfter: time.Duration(envInt("BOOKSYNC_STALE_SEC", 10)) * time.Second,
-		// 币安K线：每2秒同步一次最近几根(只推变了的)，启动时补500根历史(币安接口上限1500)
-		KlineEvery:    time.Duration(envInt("BOOKSYNC_KLINE_INTERVAL_SEC", 2)) * time.Second,
+		// 币安K线：每2秒同步一次最近几根(只推变了的)，启动时补500根历史(币安接口上限1500)。
+		// BOOKSYNC_KLINE_INTERVAL_SEC=0表示不同步K线(contract-api没设PERP_KLINE_SOURCE=external时用，否则每次同步都会被拒绝)
+		KlineEvery:    time.Duration(envIntOrZero("BOOKSYNC_KLINE_INTERVAL_SEC", 2)) * time.Second,
 		KlineBackfill: int(envInt("BOOKSYNC_KLINE_BACKFILL", 500)),
 	}
 	bn := &booksync.Binance{BaseURL: strings.TrimRight(envOr("BOOKSYNC_BINANCE_URL", "https://fapi.binance.com"), "/"), Client: &http.Client{Timeout: 5 * time.Second}}
@@ -80,4 +81,12 @@ func envInt(key string, def int64) int64 {
 		log.Fatalf("%s不合法(需要正整数): %q", key, v)
 	}
 	return n
+}
+
+// 跟envInt一样，但0也是合法的值(表示关闭这个功能)
+func envIntOrZero(key string, def int64) int64 {
+	if os.Getenv(key) == "0" {
+		return 0
+	}
+	return envInt(key, def)
 }

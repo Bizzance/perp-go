@@ -9,15 +9,18 @@ import (
 // 同步的纯逻辑：把币安的一侧盘口整理成"期望挂的档位"，再跟我们订单簿里系统账户已经挂着的委托做差异，
 // 算出要撤哪些、要挂哪些。不碰网络，方便单独测试。
 
-// 币安盘口的前n档(levels已经是最优价在前)：价格和数量都原样，数量向下取到合约允许的小数位，
-// 取整后低于最小下单量的档位不挂
-func desiredLevels(levels []Level, n int, qtyDP int32, minVolume decimal.Decimal) []Level {
+// 币安盘口的前n档(levels已经是最优价在前)：价格和数量都原样，数量向下取到合约允许的小数位、
+// 再向下取到数量步长的整数倍(step为0表示合约不校验步长)，取整后低于最小下单量的档位不挂
+func desiredLevels(levels []Level, n int, qtyDP int32, step, minVolume decimal.Decimal) []Level {
 	var out []Level
 	for _, l := range levels {
 		if len(out) == n {
 			break
 		}
 		q := l.Qty.Truncate(qtyDP)
+		if step.Sign() > 0 {
+			q = q.Div(step).Floor().Mul(step)
+		}
 		if q.Sign() <= 0 || q.LessThan(minVolume) {
 			continue
 		}

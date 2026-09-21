@@ -62,8 +62,9 @@ func (c Config) validate() error {
 }
 
 type contractInfo struct {
-	qtyDP     int32           // 数量的小数位数
-	minVolume decimal.Decimal // 最小下单量
+	qtyDP      int32           // 数量的小数位数
+	volumeStep decimal.Decimal // 数量步长，0=合约不校验
+	minVolume  decimal.Decimal // 最小下单量
 }
 
 // 每个合约的运行状态。每个合约的一轮在自己的goroutine里跑，只碰自己的这一份，不需要锁
@@ -254,8 +255,8 @@ func (s *Syncer) cycle(ctx context.Context, sym string) error {
 		return s.sourceFailed(ctx, sym, st, err)
 	}
 	ci := s.contracts[sym]
-	wantBids := desiredLevels(bids, s.cfg.Levels, ci.qtyDP, ci.minVolume)
-	wantAsks := desiredLevels(asks, s.cfg.Levels, ci.qtyDP, ci.minVolume)
+	wantBids := desiredLevels(bids, s.cfg.Levels, ci.qtyDP, ci.volumeStep, ci.minVolume)
+	wantAsks := desiredLevels(asks, s.cfg.Levels, ci.qtyDP, ci.volumeStep, ci.minVolume)
 	if len(wantBids) == 0 || len(wantAsks) == 0 {
 		// 币安的盘口有数据，但按我们合约的数量精度取整后一侧没有可挂的档位：不能只挂一侧
 		return s.sourceFailed(ctx, sym, st, errors.New("按合约的数量精度取整后，盘口一侧没有可挂的档位"))
@@ -554,8 +555,14 @@ func (s *Syncer) ensureReady(ctx context.Context) error {
 		var info struct {
 			Available string `json:"available"`
 		}
-		_ = json.Unmarshal(raw, &info)
-		avail, _ := decimal.NewFromString(info.Available)
+		// 解析不出来不能当余额0处理：每次重启都会多充一笔
+		if err := json.Unmarshal(raw, &info); err != nil {
+			return fmt.Errorf("系统账户%d的账户信息不是合法的JSON: %w", uid, err)
+		}
+		avail, err := decimal.NewFromString(info.Available)
+		if err != nil {
+			return fmt.Errorf("系统账户%d的可用余额不合法: %q", uid, info.Available)
+		}
 		if avail.LessThan(bal.Div(decimal.NewFromInt(2))) {
 			if _, err := s.api.call(ctx, "POST", "/account/balance", map[string]any{
 				"uid": uid, "amount": s.cfg.Balance, "requestId": fmt.Sprintf("bs-topup-%d-%d", uid, time.Now().UnixNano()),
@@ -571,11 +578,16 @@ func (s *Syncer) ensureReady(ctx context.Context) error {
 		}
 		var c struct {
 			BaseCoinScale int32  `json:"baseCoinScale"`
+			VolumeStep    string `json:"volumeStep"`
 			MinVolume     string `json:"minVolume"`
 		}
-		_ = json.Unmarshal(raw, &c)
+		if err := json.Unmarshal(raw, &c); err != nil {
+			return fmt.Errorf("合约%s的参数不是合法的JSON: %w", sym, err)
+		}
+		// 步长和最小量解析不出来(接口没返回)就当作0：不按它们取整
+		step, _ := decimal.NewFromString(c.VolumeStep)
 		minV, _ := decimal.NewFromString(c.MinVolume)
-		s.contracts[sym] = contractInfo{qtyDP: c.BaseCoinScale, minVolume: minV}
+		s.contracts[sym] = contractInfo{qtyDP: c.BaseCoinScale, volumeStep: step, minVolume: minV}
 	}
 	return nil
 }
