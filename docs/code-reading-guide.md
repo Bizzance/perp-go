@@ -153,8 +153,8 @@ review发现最严重bug（`ApplyCloseFill`覆盖`liquidating`标记）的地方
 
 ### 7. 资金费率：先落审计记录再转账 + Lua脚本原子累加
 
-`FundingService.SampleOnce`定时把溢价率累加进Redis（`AccumulateFundingSample`用Lua
-脚本把`INCRBYFLOAT`+`INCR`包成一次原子操作，多个engine分片实例并发采样也不丢样本）；
+`FundingService.SampleOnce`定时把溢价累加进Redis（溢价用订单簿的冲击价格算、只有拥有这个symbol的实例采样；
+`AccumulateFundingSample`用Lua脚本把`INCRBYFLOAT`+`INCR`包成一次原子操作，并发累加也不丢样本）；
 `SettleIfDue`结算时 **先**插入`funding_rate_history`审计记录、 **再**转账，划转到一半
 失败也不会导致重复结算。详见 [funding-rate.md](funding-rate.md)。
 

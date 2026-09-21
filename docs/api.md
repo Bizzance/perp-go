@@ -622,7 +622,7 @@ GET /order/detail?uid=10001&requestId=order-20260919-0001
     "symbol": "BTCUSDT", "baseCoinScale": 3, "priceScale": 1, "enable": true,
     "makerFee": "0.0002", "takerFee": "0.0005",
     "priceTick": "0", "volumeStep": "0", "minVolume": "0.001", "maxVolume": "0",
-    "fundingIntervalHours": 8, "fundingRateCap": "0.0075", "priceProtectionRatio": "0.05",
+    "fundingIntervalHours": 8, "fundingRateCap": "0.0075", "fundingImpactNotional": "10000", "priceProtectionRatio": "0.05",
     "tiers": [
       { "symbol": "BTCUSDT", "tier": 1, "maxNotional": "50000", "maintenanceMarginRate": "0.004", "maintenanceAmount": "0", "maxLeverage": 125 },
       { "symbol": "BTCUSDT", "tier": 2, "maxNotional": "250000", "maintenanceMarginRate": "0.005", "maintenanceAmount": "50", "maxLeverage": 100 }
@@ -638,6 +638,8 @@ GET /order/detail?uid=10001&requestId=order-20260919-0001
 | `minVolume` / `maxVolume`     | 单笔最小/最大下单量，`maxVolume`为`0`表示不限                                                 |
 | `makerFee` / `takerFee`       | 手续费率                                                                                      |
 | `fundingIntervalHours`        | 资金费率结算周期（小时）                                                                      |
+| `fundingRateCap`              | 资金费率上下限，`0`表示不限                                                                   |
+| `fundingImpactNotional`       | 算资金费率溢价用的冲击名义金额（USDT），见 [funding-rate.md](funding-rate.md)；**`0`表示这个合约不采样（资金费率恒为0），不是不限制** |
 | `priceProtectionRatio`        | 价格保护带：开仓限价单价格偏离参考价超过这个比例会被拒绝                                      |
 | `tiers[].maxNotional`         | 本档名义价值上限，`0`表示不限（最后一档）。仓位越大档位越高、允许的杠杆越低                   |
 | `tiers[].maxLeverage`         | 本档最大杠杆                                                                                  |
