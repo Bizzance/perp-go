@@ -181,7 +181,7 @@ make compose-prod-up      # 等价于 docker compose --env-file deploy/.env -f d
   不开 `PERP_MARK_REQUIRE_INDEX` 的话没喂过指数价的合约标记价退回最新成交价，两个账户对敲一笔就能推动别人的强平线，见 [mark-price.md](mark-price.md)。
   **部署地区要能稳定访问币安的行情接口**（部分地区返回 451）
 - [ ] **K 线来源设成了 `external`**：`PERP_KLINE_SOURCE=external`（`.env.prod.example`已经设了），api 和 engine 读同一个变量。K 线和 24h 统计
-  是币安的数据，成交量是币安全市场的、不是我们平台的；**把币安的行情数据再分发给合作方是否合规，需要你或法务确认**
+  是币安的数据，成交量是币安全市场的、不是我们平台的
 - [ ] **指数价的服务端跳变保护已开**：`PERP_INDEX_MAX_JUMP=0.05`（`.env.prod.example`已经设了）；orderbook-sync 日志里的
   `[ERROR] 币安数据已经超过…撤掉全部挂单、暂停报价` 接进了告警（此时订单簿是空的），见 [orderbook-sync.md](orderbook-sync.md)
 - [ ] MySQL、Redis 密码已经覆盖默认值
