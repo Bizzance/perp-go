@@ -25,6 +25,8 @@ type config struct {
 	listen      string
 	apiURL      string
 	engineURL   string
+	tradeKeyID  string // 交易类接口用的trade密钥，留空=所有请求都用keyID这把
+	tradeSecret string
 	keyID       string
 	secret      string
 	allowRemote bool
@@ -53,6 +55,8 @@ func loadConfig() config {
 	flag.StringVar(&c.engineURL, "engine", envOr("SIM_ENGINE_URL", "http://127.0.0.1:7002"), "contract-engine的地址")
 	flag.StringVar(&c.keyID, "key-id", envOr("SIM_KEY_ID", ""), "API Key的id，留空=不签名(后端开了PERP_AUTH_DISABLED才行)")
 	flag.StringVar(&c.secret, "key-secret", envOr("SIM_KEY_SECRET", ""), "API Key的secret")
+	flag.StringVar(&c.tradeKeyID, "trade-key-id", envOr("SIM_TRADE_KEY_ID", ""), "只有trade权限的API Key的id：设了以后交易类请求用它签名、页面标了运营的请求用key-id那把(ops)，跟合作方的用法一致；留空=所有请求都用key-id那把")
+	flag.StringVar(&c.tradeSecret, "trade-key-secret", envOr("SIM_TRADE_KEY_SECRET", ""), "trade密钥的secret")
 	flag.StringVar(&c.binanceURL, "binance-url", envOr("SIM_BINANCE_URL", "https://fapi.binance.com"), "币安USDⓈ-M合约公共行情的地址，留空=不提供系统做市")
 	flag.BoolVar(&c.makerAuto, "maker", envOr("SIM_MAKER", "") == "1", "启动时就开启系统做市(也可以在页面上开关)")
 	flag.StringVar(&c.makerSymbols, "maker-symbols", envOr("SIM_MAKER_SYMBOLS", "BTCUSDT,ETHUSDT"), "做市的合约，逗号分隔，必须是币安上也有的合约名")
@@ -91,6 +95,14 @@ func main() {
 	}
 	if cfg.keyID == "" {
 		log.Printf("[WARN] 没有配置API密钥，请求不会签名，后端必须开着PERP_AUTH_DISABLED才能用")
+	}
+	if (cfg.tradeKeyID == "") != (cfg.tradeSecret == "") {
+		log.Fatal("SIM_TRADE_KEY_ID和SIM_TRADE_KEY_SECRET要么都设、要么都不设")
+	}
+	if cfg.tradeKeyID != "" {
+		log.Printf("用两把密钥：交易类请求用trade密钥(%s)，页面标了运营的请求用ops密钥(%s)，接口权限分错了会直接返回forbidden", cfg.tradeKeyID, cfg.keyID)
+	} else if cfg.keyID != "" {
+		log.Printf("只有一把密钥(%s)，所有请求都用它，测不出接口权限范围分错的问题；想跟合作方一样分开用，配置SIM_TRADE_KEY_ID/SIM_TRADE_KEY_SECRET", cfg.keyID)
 	}
 
 	s := newServer(cfg)

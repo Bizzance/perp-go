@@ -33,6 +33,15 @@ if [ "$auth_disabled" != "true" ]; then
   export SIM_KEY_ID="${key%%:*}"
   rest="${key#*:}"
   export SIM_KEY_SECRET="${rest%%:*}"
+
+  # 再取第一把只有trade权限(不带ops)的密钥：有的话页面的交易类请求用它、运营类(充值、冻结、设指数价)用上面的ops密钥，
+  # 跟合作方的用法一致，接口权限范围分错了会直接返回forbidden。没有就所有请求都用上面那一把
+  trade_key="$(get PERP_API_KEYS | tr ',' '\n' | awk -F: '$3 ~ /(^|\|)trade($|\|)/ && $3 !~ /(^|\|)ops($|\|)/ {print; exit}')"
+  if [ -n "$trade_key" ]; then
+    export SIM_TRADE_KEY_ID="${trade_key%%:*}"
+    rest="${trade_key#*:}"
+    export SIM_TRADE_KEY_SECRET="${rest%%:*}"
+  fi
 fi
 
 # shellcheck disable=SC2086

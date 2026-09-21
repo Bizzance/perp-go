@@ -5,7 +5,9 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"strings"
+	"sync"
 	"testing"
+	"time"
 
 	"github.com/gorilla/websocket"
 
@@ -213,5 +215,140 @@ func TestForward_DoesNotFollowRedirects(t *testing.T) {
 	}
 	if leaked != nil {
 		t.Fatalf("不能跟着重定向去别的地址，签名头会泄露: %v", leaked)
+	}
+}
+
+// ---- 两把密钥：交易类请求用trade密钥，页面标了ops的请求用ops密钥 ----
+
+// 假的上游：记录每个请求用的是哪把密钥(X-Api-Key)，并用那把密钥的secret验签；也接受/ws的WebSocket握手
+type keyedUpstream struct {
+	secrets map[string]string // keyId -> secret
+	mu      sync.Mutex
+	got     []keyedReq
+}
+
+// 已经收到的请求(处理请求的goroutine和测试的goroutine不是同一个，读写都要加锁)
+func (u *keyedUpstream) received() []keyedReq {
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	return append([]keyedReq(nil), u.got...)
+}
+
+type keyedReq struct {
+	path, key string
+	sigOK     bool
+	hdr       http.Header
+}
+
+func (u *keyedUpstream) handler() http.Handler {
+	up := websocket.Upgrader{CheckOrigin: func(*http.Request) bool { return true }}
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		b, _ := io.ReadAll(r.Body)
+		key := r.Header.Get("X-Api-Key")
+		want := api.SignRequest(u.secrets[key], r.Header.Get("X-Timestamp"), r.Header.Get("X-Nonce"), r.Method, r.URL.EscapedPath(), r.URL.RawQuery, b)
+		u.mu.Lock()
+		u.got = append(u.got, keyedReq{path: r.URL.EscapedPath(), key: key, sigOK: want == r.Header.Get("X-Signature"), hdr: r.Header.Clone()})
+		u.mu.Unlock()
+		if r.URL.Path == "/ws" {
+			if c, err := up.Upgrade(w, r, nil); err == nil {
+				c.Close()
+			}
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		_, _ = w.Write([]byte(`{"code":200,"data":"pong"}`))
+	})
+}
+
+func newKeyedServer(t *testing.T, cfg config) (*httptest.Server, *keyedUpstream) {
+	t.Helper()
+	u := &keyedUpstream{secrets: map[string]string{"ops-key": "ops-secret-ops-secret-1", "trade-key": "trade-secret-trade-1"}}
+	us := httptest.NewServer(u.handler())
+	t.Cleanup(us.Close)
+	cfg.apiURL, cfg.engineURL = us.URL, us.URL
+	ts := httptest.NewServer(newServer(cfg).routes())
+	t.Cleanup(ts.Close)
+	return ts, u
+}
+
+var twoKeys = config{keyID: "ops-key", secret: "ops-secret-ops-secret-1", tradeKeyID: "trade-key", tradeSecret: "trade-secret-trade-1"}
+
+// 配了trade密钥：没标运营的请求(下单、查询、深度)用trade密钥，标了X-Sim-Scope: ops的用ops密钥，各自用自己的secret验签；
+// 这个头是页面和代理之间的，不转发给后端。合作方的用法就是这样，接口权限范围分错了会直接返回forbidden
+func TestScope_TwoKeysAreChosenByTheDeclaredScope(t *testing.T) {
+	ts, up := newKeyedServer(t, twoKeys)
+	do(t, "GET", ts.URL+"/api/account/info?uid=1", "", guarded)
+	do(t, "POST", ts.URL+"/api/order/add", `{}`, guarded)
+	do(t, "GET", ts.URL+"/engine/depth?symbol=BTCUSDT", "", guarded)
+	do(t, "POST", ts.URL+"/api/account/balance", `{}`, map[string]string{guardHeader: "1", scopeHeader: "ops"})
+	do(t, "POST", ts.URL+"/api/index-price", `{}`, map[string]string{guardHeader: "1", scopeHeader: "ops"})
+
+	want := []string{"trade-key", "trade-key", "trade-key", "ops-key", "ops-key"}
+	got := up.received()
+	if len(got) != len(want) {
+		t.Fatalf("收到%d个请求, want %d", len(got), len(want))
+	}
+	for i, w := range want {
+		if got[i].key != w || !got[i].sigOK {
+			t.Errorf("请求%d(%s): 用了%s(签名正确=%v), want %s", i, got[i].path, got[i].key, got[i].sigOK, w)
+		}
+		if got[i].hdr.Get(scopeHeader) != "" {
+			t.Errorf("请求%d: %s不该转发给后端", i, scopeHeader)
+		}
+	}
+}
+
+// 只有"ops"这个值才用ops密钥：别的值(大小写不同、乱写)一律当交易类，不能靠随便一个头升级成运营权限
+func TestScope_OnlyExactOpsSelectsTheOpsKey(t *testing.T) {
+	ts, up := newKeyedServer(t, twoKeys)
+	for _, v := range []string{"OPS", "admin", "true", "ops,trade"} {
+		do(t, "GET", ts.URL+"/api/account/info?uid=1", "", map[string]string{guardHeader: "1", scopeHeader: v})
+	}
+	for i, r := range up.received() {
+		if r.key != "trade-key" {
+			t.Errorf("第%d个: scope值不是ops，不该用ops密钥, got %s", i, r.key)
+		}
+	}
+}
+
+// 没配trade密钥：所有请求都用主密钥(跟以前一样)，不管有没有标ops
+func TestScope_SingleKeyUsedForEverythingWhenNoTradeKey(t *testing.T) {
+	ts, up := newKeyedServer(t, config{keyID: "ops-key", secret: "ops-secret-ops-secret-1"})
+	do(t, "GET", ts.URL+"/api/account/info?uid=1", "", guarded)
+	do(t, "POST", ts.URL+"/api/account/balance", `{}`, map[string]string{guardHeader: "1", scopeHeader: "ops"})
+	for i, r := range up.received() {
+		if r.key != "ops-key" || !r.sigOK {
+			t.Errorf("第%d个请求应该用主密钥并验签通过: %+v", i, r)
+		}
+	}
+}
+
+// WebSocket握手需要trade权限：配了trade密钥就用它，没配用主密钥
+func TestScope_WebSocketUsesTheTradeKey(t *testing.T) {
+	for name, tc := range map[string]struct {
+		cfg  config
+		want string
+	}{"两把密钥": {twoKeys, "trade-key"}, "一把密钥": {config{keyID: "ops-key", secret: "ops-secret-ops-secret-1"}, "ops-key"}} {
+		t.Run(name, func(t *testing.T) {
+			ts, up := newKeyedServer(t, tc.cfg)
+			h := http.Header{}
+			h.Set("Origin", ts.URL)
+			conn, _, err := websocket.DefaultDialer.Dial("ws"+strings.TrimPrefix(ts.URL, "http")+"/ws", h)
+			if err != nil {
+				t.Fatal(err)
+			}
+			conn.Close()
+			time.Sleep(50 * time.Millisecond)
+			var ws *keyedReq
+			all := up.received()
+			for i := range all {
+				if all[i].path == "/ws" {
+					ws = &all[i]
+				}
+			}
+			if ws == nil || ws.key != tc.want || !ws.sigOK {
+				t.Fatalf("WS握手应该用%s签名: %+v", tc.want, ws)
+			}
+		})
 	}
 }

@@ -14,6 +14,18 @@ function num(v, dp = 2) {
   if (s.includes('.')) s = s.replace(/0+$/, '').replace(/\.$/, '');
   return s === '-0' ? '0' : s;
 }
+// 固定小数位数，末尾的0也显示(2666.60，不是2666.6)。num()会把末尾的0去掉，只用在没有固定精度的场合
+function fixed(v, dp) {
+  if (v === null || v === undefined || v === '') return '-';
+  const n = Number(v);
+  if (!Number.isFinite(n)) return String(v);
+  const t = n.toFixed(dp);
+  return t.replace(/^-(0(\.0*)?)$/, '$1');
+}
+// 价格按合约的价格精度(priceScale)、数量按数量精度(baseCoinScale)显示，取自/contract/list；查不到合约时退回2位/4位
+function contractOf(sym) { return (state.contracts || []).find((c) => c.symbol === sym) || null; }
+function px(v, sym) { const c = contractOf(sym || state.symbol); return fixed(v, c && c.priceScale != null ? c.priceScale : 2); }
+function qty(v, sym) { const c = contractOf(sym || state.symbol); return fixed(v, c && c.baseCoinScale != null ? c.baseCoinScale : 4); }
 const signCls = (v) => (Number(v) > 0 ? 'up' : Number(v) < 0 ? 'down' : '');
 const fmtTime = (ms) => (ms ? new Date(Number(ms)).toLocaleString('zh-CN', { hour12: false }) : '-');
 const fmtClock = (ms) => new Date(Number(ms)).toLocaleTimeString('zh-CN', { hour12: false });
@@ -72,13 +84,14 @@ $('apiLog').addEventListener('click', (ev) => {
 });
 
 // ---------- 调后端(经代理签名转发) ----------
-async function call(prefix, method, path, body, { quiet = false, write = false } = {}) {
+async function call(prefix, method, path, body, { quiet = false, write = false, ops = false } = {}) {
   const t0 = performance.now();
   let json;
   try {
     const r = await fetch(prefix + path, {
       method,
-      headers: { 'X-Sim-Client': '1', 'Content-Type': 'application/json' },
+      // ops=true表示这是运营类接口，代理用ops密钥签名；其余用trade密钥，跟合作方的用法一致
+      headers: { 'X-Sim-Client': '1', 'Content-Type': 'application/json', ...(ops ? { 'X-Sim-Scope': 'ops' } : {}) },
       body: body !== undefined ? JSON.stringify(body) : undefined,
     });
     json = await r.json();
@@ -128,6 +141,7 @@ async function loadDetail() {
   const maxLev = tiers.length ? Math.max(...tiers.map((t) => t.maxLeverage)) : '';
   $('levHint').textContent = maxLev ? `最大 ${maxLev}x` : '';
   $('amtUnit').textContent = state.symbol.replace(/USDT$/, '');
+  refreshInputHints();
 }
 async function refreshTicker() {
   state.ticker = data(await api('GET', '/market/ticker?symbol=' + state.symbol, undefined, { quiet: true }), null);
@@ -143,11 +157,11 @@ function renderTicker() {
     return `${String(Math.floor(s / 3600)).padStart(2, '0')}:${String(Math.floor((s % 3600) / 60)).padStart(2, '0')}:${String(s % 60).padStart(2, '0')}`;
   })() : '-';
   $('ticker').innerHTML =
-    `<div><span>最新价</span><b class="big ${chg === null ? '' : signCls(chg)}">${num(t.lastPrice, 2)}</b></div>` +
-    `<div><span>标记价</span><b>${num(t.markPrice, 2)}</b></div>` +
-    `<div><span>指数价</span><b>${num(t.indexPrice, 2)}</b></div>` +
+    `<div><span>最新价</span><b class="big ${chg === null ? '' : signCls(chg)}">${px(t.lastPrice)}</b></div>` +
+    `<div><span>标记价</span><b>${px(t.markPrice)}</b></div>` +
+    `<div><span>指数价</span><b>${px(t.indexPrice)}</b></div>` +
     `<div><span>24h 涨跌</span><b class="${chg === null ? '' : signCls(chg)}">${chg === null ? '-' : (chg > 0 ? '+' : '') + chg.toFixed(2) + '%'}</b></div>` +
-    `<div><span>24h 最高/最低</span><b>${num(t.high24h, 2)} / ${num(t.low24h, 2)}</b></div>` +
+    `<div><span>24h 最高/最低</span><b>${px(t.high24h)} / ${px(t.low24h)}</b></div>` +
     `<div><span>24h 成交量</span><b>${num(t.volume24h, 3)}</b></div>` +
     `<div><span>预估资金费率 / 倒计时</span><b>${f.estimatedRate === undefined ? '-' : (Number(f.estimatedRate) * 100).toFixed(4) + '%'} / ${countdown}</b></div>` +
     scenarioBadge();
@@ -170,12 +184,12 @@ function renderBook() {
   const bids = (state.depth.bids || []).slice(0, 12);
   const max = Math.max(1e-9, ...asks.map((l) => Number(l.volume)), ...bids.map((l) => Number(l.volume)));
   const row = (cls, l) => `<div class="book-row ${cls}" data-price="${esc(l.price)}"><div class="bar" style="width:${(Number(l.volume) / max * 100).toFixed(0)}%"></div>` +
-    `<span class="p">${num(l.price, 2)}</span><span class="v">${num(l.volume, 4)}</span><span class="c">${l.count}</span></div>`;
+    `<span class="p">${px(l.price)}</span><span class="v">${qty(l.volume)}</span><span class="c">${l.count}</span></div>`;
   const last = state.ticker && state.ticker.lastPrice;
   $('book').innerHTML =
     `<div class="book-head"><span>价格</span><span class="v">数量</span><span class="c">笔数</span></div>` +
     `<div class="book-asks">${asks.slice().reverse().map((l) => row('ask', l)).join('')}</div>` +
-    `<div class="book-mid">${last === null || last === undefined ? '-' : num(last, 2)}</div>` +
+    `<div class="book-mid">${last === null || last === undefined ? '-' : px(last)}</div>` +
     `<div class="book-bids">${bids.map((l) => row('bid', l)).join('')}</div>`;
 }
 $('book').addEventListener('click', (ev) => {
@@ -184,7 +198,7 @@ $('book').addEventListener('click', (ev) => {
 });
 function renderTrades() {
   $('recentTrades').innerHTML = state.trades.slice(0, 40).map((t) =>
-    `<div class="trade-row"><span class="${t.takerSide === 'buy' ? 'up' : 'down'}">${num(t.price, 2)}</span><span class="v">${num(t.volume, 4)}</span><span class="c">${fmtClock(t.createTime)}</span></div>`).join('');
+    `<div class="trade-row"><span class="${t.takerSide === 'buy' ? 'up' : 'down'}">${px(t.price)}</span><span class="v">${qty(t.volume)}</span><span class="c">${fmtClock(t.createTime)}</span></div>`).join('');
 }
 
 // ---------- K线(canvas) ----------
@@ -212,7 +226,7 @@ function drawChart() {
   for (let i = 0; i <= 4; i++) {
     const p = lo + ((hi - lo) * i) / 4, yy = y(p);
     c.beginPath(); c.moveTo(0, yy); c.lineTo(plotW, yy); c.stroke();
-    c.fillText(num(p, 2), plotW + 6, yy + 4);
+    c.fillText(px(p), plotW + 6, yy + 4);
   }
   ks.forEach((k, i) => {
     const o = Number(k.open), cl = Number(k.close), up = cl >= o;
@@ -229,7 +243,7 @@ function drawChart() {
   const ly = y(Number(last.close));
   c.strokeStyle = '#f0b90b'; c.setLineDash([4, 3]);
   c.beginPath(); c.moveTo(0, ly); c.lineTo(plotW, ly); c.stroke(); c.setLineDash([]);
-  c.fillStyle = '#f0b90b'; c.fillText(num(last.close, 2), plotW + 6, ly + 4);
+  c.fillStyle = '#f0b90b'; c.fillText(px(last.close), plotW + 6, ly + 4);
   c.fillStyle = '#848e9c';
   const step = Math.max(1, Math.floor(ks.length / 6));
   for (let i = 0; i < ks.length; i += step) c.fillText(new Date(Number(ks[i].openTime)).toLocaleTimeString('zh-CN', { hour12: false, hour: '2-digit', minute: '2-digit' }), i * bw, h - 4);
@@ -240,6 +254,9 @@ function upsertKline(k) {
   const i = ks.findIndex((x) => x.openTime === k.openTime);
   if (i >= 0) ks[i] = k;
   else if (!ks.length || k.openTime > ks[ks.length - 1].openTime) { ks.push(k); if (ks.length > 120) ks.shift(); }
+  // 最新价 = 当前这一根K线的收盘价。K线来自币安时就是币安的最新价，不用我们自己成交的价格
+  // (成交少的时候最后一笔成交价会停很久，跟币安差很多)
+  if (state.ticker && ks.length && ks[ks.length - 1].openTime === k.openTime) { state.ticker.lastPrice = k.close; renderTicker(); renderBook(); }
   drawChart();
 }
 function buildIntervals() {
@@ -276,9 +293,9 @@ function renderAccount() {
   if (!a) { $('acctInfo').innerHTML = '<div class="muted" style="grid-column:1/3">选择或新建一个账户</div>'; $('acctStatus').innerHTML = ''; return; }
   $('acctStatus').innerHTML = `<span class="badge ${a.status === 'frozen' ? 'frozen' : ''}">${a.status === 'frozen' ? '已冻结' : '正常'}</span>`;
   const items = [
-    ['权益', num(a.equity, 4), ''], ['可用余额', num(a.available, 4), ''],
-    ['仓位保证金', num(a.positionMargin, 4), ''], ['挂单冻结', num(a.frozenMargin, 4), ''],
-    ['未实现盈亏', num(a.totalUnrealizedPnl, 4), signCls(a.totalUnrealizedPnl)], ['信用额度', num(a.credit, 4), ''],
+    ['权益', fixed(a.equity, 4), ''], ['可用余额', fixed(a.available, 4), ''],
+    ['仓位保证金', fixed(a.positionMargin, 4), ''], ['挂单冻结', fixed(a.frozenMargin, 4), ''],
+    ['未实现盈亏', fixed(a.totalUnrealizedPnl, 4), signCls(a.totalUnrealizedPnl)], ['信用额度', fixed(a.credit, 4), ''],
     ['轮次', a.round, ''], ['投保', a.isInsured ? '是' : '否', ''],
   ];
   $('acctInfo').innerHTML = items.map(([k, v, cls]) => `<div><span>${k}</span><b class="${cls}">${v}</b></div>`).join('');
@@ -305,14 +322,14 @@ $('btnNewAcct').addEventListener('click', async () => {
   if (r.code !== 200) return;
   if (!state.accounts.includes(uid)) { state.accounts.push(uid); saveAccounts(); }
   renderAccountSelect();
-  if (Number(v[1]) > 0) await api('POST', '/account/balance', { uid, amount: v[1], requestId: rid('dep') }, { write: true });
+  if (Number(v[1]) > 0) await api('POST', '/account/balance', { uid, amount: v[1], requestId: rid('dep') }, { write: true, ops: true });
   await selectUid(uid); renderAccountSelect();
 });
 $('btnDeposit').addEventListener('click', async () => {
   if (!state.uid) return toast('先选择账户', '', true);
   const v = await modal('充值 / 扣减', [{ label: '金额 (USDT，负数=扣减)', value: '10000', inputmode: 'decimal' }]);
   if (!v) return;
-  await api('POST', '/account/balance', { uid: state.uid, amount: v[0], requestId: rid('dep') }, { write: true });
+  await api('POST', '/account/balance', { uid: state.uid, amount: v[0], requestId: rid('dep') }, { write: true, ops: true });
   refreshAccount();
 });
 
@@ -329,14 +346,65 @@ function setType(t) {
   state.type = t;
   document.querySelectorAll('#typeSeg button').forEach((b) => b.classList.toggle('active', b.dataset.type === t));
   $('fPrice').disabled = t === 'market';
-  $('fPrice').placeholder = t === 'market' ? '按对手盘成交' : '';
+  refreshInputHints();
   $('btnLast').disabled = t === 'market';
   updateEst();
 }
 $('actionSeg').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setAction(b.dataset.action); });
 $('typeSeg').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setType(b.dataset.type); });
-$('btnLast').addEventListener('click', () => { if (state.ticker && state.ticker.lastPrice) { $('fPrice').value = num(state.ticker.lastPrice, 8); updateEst(); } });
+$('btnLast').addEventListener('click', () => { if (state.ticker && state.ticker.lastPrice) { $('fPrice').value = px(state.ticker.lastPrice); updateEst(); } });
 ['fPrice', 'fAmount', 'fLev'].forEach((id) => $(id).addEventListener('input', updateEst));
+// ---------- 下单输入按合约规则约束 ----------
+// 跟合作方的前端一样：位数、步长、最小/最大量全部取自 /contract/detail(priceScale、baseCoinScale、priceTick、volumeStep、
+// minVolume、maxVolume)，不写死。priceTick/volumeStep是0表示服务端不校验，这时输入精度按priceScale/baseCoinScale。
+// 十进制字符串按整数运算判断"是不是步长的整数倍"，不经过浮点数，避免0.1+0.2这类误差
+function decimalsOf(str) { const t = String(str).replace(/0+$/, ''); const i = t.indexOf('.'); return i < 0 ? 0 : t.length - i - 1; }
+// 十进制字符串 -> 放大10^dp的BigInt；不是非负十进制数、或小数位数超过dp(末尾的0不算)返回null
+function scaled(str, dp) {
+  const m = /^(\d+)(?:\.(\d+))?$/.exec(String(str).trim());
+  if (!m) return null;
+  const frac = (m[2] || '').replace(/0+$/, '');
+  return frac.length > dp ? null : BigInt(m[1] + frac.padEnd(dp, '0'));
+}
+function unitStr(scale) { return scale > 0 ? '0.' + '0'.repeat(scale - 1) + '1' : '1'; }
+// 价格/数量的步长：配置了priceTick/volumeStep就用它，否则是最小的一位小数(10^-scale)
+function priceStepOf(d) { return d && Number(d.priceTick) > 0 ? String(d.priceTick) : unitStr(d ? d.priceScale : 2); }
+function qtyStepOf(d) { return d && Number(d.volumeStep) > 0 ? String(d.volumeStep) : unitStr(d ? d.baseCoinScale : 3); }
+// 校验一个数是不是符合位数和步长；返回错误说明，合法返回空串
+function checkStep(label, str, scale, step) {
+  const dp = Math.max(scale, decimalsOf(step));
+  if (scaled(str, scale) === null) return Number.isNaN(Number(str)) ? `${label}不合法` : `${label}最多${scale}位小数`;
+  const v = scaled(str, dp), st = scaled(step, dp);
+  if (v === null || st === null || st === 0n) return `${label}不合法`;
+  return v % st === 0n ? '' : `${label}必须是${step}的整数倍`;
+}
+// 下单前的输入校验(不发请求)。price传null表示市价单。d是/contract/detail的返回，没有就不校验(交给服务端)
+function validateOrderInput(d, amount, price) {
+  if (!d) return '';
+  let err = checkStep('数量', amount, d.baseCoinScale, qtyStepOf(d));
+  if (err) return err;
+  const dp = Math.max(d.baseCoinScale, decimalsOf(d.minVolume), decimalsOf(d.maxVolume));
+  const v = scaled(amount, dp);
+  if (Number(d.minVolume) > 0 && v < scaled(d.minVolume, dp)) return `数量不能小于最小下单量${d.minVolume}`;
+  if (Number(d.maxVolume) > 0 && v > scaled(d.maxVolume, dp)) return `数量不能超过单笔上限${d.maxVolume}`;
+  if (price !== null) {
+    err = checkStep('价格', price, d.priceScale, priceStepOf(d));
+    if (err) return err;
+  }
+  return '';
+}
+// 数量向下取到步长的整数倍，返回固定位数的字符串(百分比按钮用)
+function floorQty(amt, d) {
+  const step = Number(qtyStepOf(d));
+  const n = Math.floor(amt / step + 1e-9);
+  return fixed(n * step, d ? d.baseCoinScale : 3);
+}
+// 输入框的提示：步长和最小量
+function refreshInputHints() {
+  const d = state.detail;
+  $('fAmount').placeholder = d ? `步长 ${qtyStepOf(d)} · 最小 ${d.minVolume}` : '';
+  $('fPrice').placeholder = state.type === 'market' ? '按对手盘成交' : (d ? `步长 ${priceStepOf(d)}` : '');
+}
 function refPrice() {
   if (state.type === 'limit' && Number($('fPrice').value) > 0) return Number($('fPrice').value);
   const t = state.ticker || {};
@@ -347,8 +415,8 @@ function updateEst() {
   if (!(amt > 0) || !(p > 0)) { $('est').textContent = ''; return; }
   const notional = amt * p;
   const taker = state.detail ? Number(state.detail.takerFee) : 0.0005;
-  $('est').innerHTML = `名义价值 ${num(notional, 2)} USDT<br>` +
-    (state.action === 'open' && lev > 0 ? `所需保证金 ≈ ${num(notional / lev, 2)} USDT<br>` : '') + `taker 手续费 ≈ ${num(notional * taker, 4)} USDT`;
+  $('est').innerHTML = `名义价值 ${fixed(notional, 2)} USDT<br>` +
+    (state.action === 'open' && lev > 0 ? `所需保证金 ≈ ${fixed(notional / lev, 2)} USDT<br>` : '') + `taker 手续费 ≈ ${fixed(notional * taker, 4)} USDT`;
 }
 function buildPct() {
   $('pct').innerHTML = [25, 50, 75, 100].map((p) => `<button type="button" class="mini" data-p="${p}">${p}%</button>`).join('');
@@ -361,7 +429,7 @@ $('pct').addEventListener('click', (e) => {
   let amt;
   if (state.action === 'open') amt = (Number(state.account.available) * lev * p) / price;
   else { const pos = state.positions.filter((x) => x.symbol === state.symbol && Number(x.volume) > 0); amt = pos.length ? Number(pos[0].volume) * p : 0; }
-  $('fAmount').value = (Math.floor(amt * 1000) / 1000).toString(); updateEst();
+  $('fAmount').value = floorQty(amt, state.detail); updateEst();
 });
 
 async function placeOrder(side) {
@@ -374,6 +442,8 @@ async function placeOrder(side) {
     if (!(Number(price) > 0)) return toast('价格不合法', '', true);
     body.price = price;
   }
+  const bad = validateOrderInput(state.detail, amount, state.type === 'limit' ? body.price : null);
+  if (bad) return toast('不符合合约规则', bad, true);
   await api('POST', '/order/add', body, { write: true });
   refreshAccount();
 }
@@ -391,23 +461,65 @@ function roleOf(t) {
   return (isBuyer ? '买方' : '卖方') + (maker ? ' · maker' : ' · taker');
 }
 const cols = {
-  positions: [['合约', (p) => p.symbol], ['方向', (p) => `<span class="${p.side === 'long' ? 'up' : 'down'}">${p.side === 'long' ? '多' : '空'}</span>`], ['数量', (p) => num(p.volume, 4), 1], ['开仓均价', (p) => num(p.avgEntryPrice, 2), 1],
-    ['标记价', (p) => num(p.markPrice, 2), 1], ['未实现盈亏', (p) => `<span class="${signCls(p.unrealizedPnl)}">${num(p.unrealizedPnl, 4)}</span>`, 1], ['回报率', (p) => `<span class="${signCls(p.roe)}">${(Number(p.roe) * 100).toFixed(2)}%</span>`, 1],
-    ['保证金', (p) => num(p.positionMargin, 4), 1], ['杠杆', (p) => p.leverage + 'x', 1], ['强平价(估)', (p) => num(p.liquidationPrice, 2), 1], ['状态', (p) => (p.status === 'liquidating' ? '<span class="down">强平中</span>' : p.status)],
+  positions: [['合约', (p) => p.symbol], ['方向', (p) => `<span class="${p.side === 'long' ? 'up' : 'down'}">${p.side === 'long' ? '多' : '空'}</span>`], ['数量', (p) => qty(p.volume, p.symbol), 1], ['开仓均价', (p) => px(p.avgEntryPrice, p.symbol), 1],
+    ['标记价', (p) => px(p.markPrice, p.symbol), 1], ['未实现盈亏(USDT)', (p) => `<span class="${signCls(p.unrealizedPnl)}">${fixed(p.unrealizedPnl, 4)}</span>`, 1], ['回报率', (p) => `<span class="${signCls(p.roe)}">${(Number(p.roe) * 100).toFixed(2)}%</span>`, 1],
+    ['保证金(USDT)', (p) => fixed(p.positionMargin, 4), 1], ['杠杆', (p) => p.leverage + 'x', 1], ['强平价(估)', (p) => px(p.liquidationPrice, p.symbol), 1], ['状态', (p) => (p.status === 'liquidating' ? '<span class="down">强平中</span>' : p.status)],
     ['', (p) => `<button class="mini" data-act="closePos" data-sym="${p.symbol}" data-side="${p.side}" data-vol="${p.volume}">市价平仓</button> <button class="mini" data-act="lev" data-sym="${p.symbol}" data-side="${p.side}" data-lev="${p.leverage}">杠杆</button>`]],
-  orders: [['委托号', (o) => o.orderId], ['合约', (o) => o.symbol], ['方向', (o) => sideAction(o)], ['类型', (o) => o.type], ['价格', (o) => num(o.price, 2), 1], ['数量', (o) => num(o.amount, 4), 1],
-    ['已成交', (o) => num(o.tradedAmount, 4), 1], ['冻结保证金', (o) => num(o.frozenMargin, 4), 1], ['状态', (o) => o.status + (o.liquidation ? ' (强平)' : '')], ['时间', (o) => fmtTime(o.createTime)],
+  orders: [['委托号', (o) => o.orderId], ['合约', (o) => o.symbol], ['方向', (o) => sideAction(o)], ['类型', (o) => o.type], ['价格', (o) => px(o.price, o.symbol), 1], ['数量', (o) => qty(o.amount, o.symbol), 1],
+    ['已成交', (o) => qty(o.tradedAmount, o.symbol), 1], ['冻结保证金(USDT)', (o) => fixed(o.frozenMargin, 4), 1], ['状态', (o) => o.status + (o.liquidation ? ' (强平)' : '')], ['时间', (o) => fmtTime(o.createTime)],
     ['', (o) => `<button class="mini" data-act="cancel" data-id="${o.orderId}">撤单</button>`]],
-  conditional: [['委托号', (o) => o.orderId], ['合约', (o) => o.symbol], ['方向', (o) => sideAction(o)], ['触发条件', (o) => `标记价 ${o.triggerDirection === 'gte' ? '≥' : '≤'} ${num(o.triggerPrice, 2)}`], ['类型', (o) => o.type],
-    ['价格', (o) => (o.type === 'market' ? '-' : num(o.price, 2)), 1], ['数量', (o) => num(o.amount, 4), 1], ['冻结保证金', (o) => num(o.frozenMargin, 4), 1], ['状态', (o) => o.status],
+  conditional: [['委托号', (o) => o.orderId], ['合约', (o) => o.symbol], ['方向', (o) => sideAction(o)], ['触发条件', (o) => `标记价 ${o.triggerDirection === 'gte' ? '≥' : '≤'} ${px(o.triggerPrice, o.symbol)}`], ['类型', (o) => o.type],
+    ['价格', (o) => (o.type === 'market' ? '-' : px(o.price, o.symbol)), 1], ['数量', (o) => qty(o.amount, o.symbol), 1], ['冻结保证金(USDT)', (o) => fixed(o.frozenMargin, 4), 1], ['状态', (o) => o.status],
     ['', (o) => (o.status === 'pending' ? `<button class="mini" data-act="cancelCond" data-id="${o.orderId}">撤销</button>` : '')]],
-  orderHistory: [['委托号', (o) => o.orderId], ['合约', (o) => o.symbol], ['方向', (o) => sideAction(o)], ['类型', (o) => o.type], ['价格', (o) => num(o.price, 2), 1], ['数量', (o) => num(o.amount, 4), 1],
-    ['已成交', (o) => num(o.tradedAmount, 4), 1], ['成交均价', (o) => num(o.avgDealPrice, 2), 1], ['状态', (o) => o.status + (o.liquidation ? ' (强平)' : '')], ['时间', (o) => fmtTime(o.createTime)]],
-  trades: [['成交号', (t) => t.tradeId], ['合约', (t) => t.symbol], ['价格', (t) => num(t.price, 2), 1], ['数量', (t) => num(t.volume, 4), 1], ['我的角色', (t) => roleOf(t)], ['时间', (t) => fmtTime(t.createTime)]],
-  transactions: [['流水号', (t) => t.id], ['类型', (t) => t.type], ['合约/币种', (t) => t.symbol], ['金额', (t) => `<span class="${signCls(t.amount)}">${num(t.amount, 6)}</span>`, 1], ['备注(requestId)', (t) => esc(t.requestId || '')], ['时间', (t) => fmtTime(t.createTime)]],
-  liquidations: [['委托号', (o) => o.orderId], ['合约', (o) => o.symbol], ['方向', (o) => sideAction(o)], ['委托价', (o) => num(o.price, 2), 1], ['数量', (o) => num(o.amount, 4), 1], ['已成交', (o) => num(o.tradedAmount, 4), 1], ['成交均价', (o) => num(o.avgDealPrice, 2), 1], ['状态', (o) => o.status], ['时间', (o) => fmtTime(o.createTime)]],
+  orderHistory: [['委托号', (o) => o.orderId], ['合约', (o) => o.symbol], ['方向', (o) => sideAction(o)], ['类型', (o) => o.type], ['价格', (o) => px(o.price, o.symbol), 1], ['数量', (o) => qty(o.amount, o.symbol), 1],
+    ['已成交', (o) => qty(o.tradedAmount, o.symbol), 1], ['成交均价', (o) => px(o.avgDealPrice, o.symbol), 1], ['状态', (o) => o.status + (o.liquidation ? ' (强平)' : '')], ['时间', (o) => fmtTime(o.createTime)]],
+  trades: [['成交号', (t) => t.tradeId], ['合约', (t) => t.symbol], ['价格', (t) => px(t.price, t.symbol), 1], ['数量', (t) => qty(t.volume, t.symbol), 1], ['我的角色', (t) => roleOf(t)], ['时间', (t) => fmtTime(t.createTime)]],
+  transactions: [['流水号', (t) => t.id], ['类型', (t) => t.type], ['合约/币种', (t) => t.symbol], ['金额(USDT)', (t) => `<span class="${signCls(t.amount)}">${fixed(t.amount, 6)}</span>`, 1], ['备注(requestId)', (t) => esc(t.requestId || '')], ['时间', (t) => fmtTime(t.createTime)]],
+  liquidations: [['委托号', (o) => o.orderId], ['合约', (o) => o.symbol], ['方向', (o) => sideAction(o)], ['委托价', (o) => px(o.price, o.symbol), 1], ['数量', (o) => qty(o.amount, o.symbol), 1], ['已成交', (o) => qty(o.tradedAmount, o.symbol), 1], ['成交均价', (o) => px(o.avgDealPrice, o.symbol), 1], ['状态', (o) => o.status], ['时间', (o) => fmtTime(o.createTime)]],
 };
 const tabData = { positions: () => state.positions, orders: () => state.orders };
+
+// ---- 标记价变了，在页面上重算持仓和账户的盈亏 ----
+// 服务端只在下单/成交/撤单/强平这些事件发生时才推一次持仓和账户，标记价变化不会触发。所以标记价推送到了以后，
+// 持仓行的标记价、未实现盈亏、回报率和账户面板的未实现盈亏、权益要在页面上按新的标记价重算，不然要等下一次
+// 5秒的REST刷新才动。公式跟服务端一致(model.Position.UnrealizedPnl、PositionService.Views)：
+// 多头=(标记价-开仓均价)*数量，空头反过来；回报率=未实现盈亏/仓位保证金；权益的变化量=未实现盈亏总和的变化量。
+// 纯函数，直接改传进来的对象，返回有没有变化；下一次服务端推送或REST刷新会用服务端算好的值整体覆盖
+function recomputeForMark(positions, account, symbol, markStr) {
+  const mark = Number(markStr);
+  if (!(mark > 0)) return false;
+  let delta = 0;
+  let changed = false;
+  for (const p of positions || []) {
+    if (p.symbol !== symbol || !(Number(p.volume) > 0)) continue;
+    const entry = Number(p.avgEntryPrice);
+    const vol = Number(p.volume);
+    const margin = Number(p.positionMargin);
+    const pnl = (p.side === 'long' ? mark - entry : entry - mark) * vol;
+    delta += pnl - (Number(p.unrealizedPnl) || 0);
+    p.markPrice = markStr;
+    p.unrealizedPnl = String(pnl);
+    if (margin > 0) p.roe = String(pnl / margin);
+    changed = true;
+  }
+  if (changed && account) {
+    account.totalUnrealizedPnl = String((Number(account.totalUnrealizedPnl) || 0) + delta);
+    account.equity = String((Number(account.equity) || 0) + delta);
+  }
+  return changed;
+}
+// 只更新持仓表里标记价、未实现盈亏、回报率这三格，不重建整张表：重建会把每秒一次的刷新和用户点"市价平仓"抢在一起，点击可能被吞掉
+function patchPositionCells() {
+  if (state.tab !== 'positions') return;
+  const trs = document.querySelectorAll('#tabBody tbody tr');
+  const rows = tabData.positions();
+  if (trs.length !== rows.length) { renderTab(); return; }
+  const def = cols.positions;
+  rows.forEach((p, i) => {
+    const tds = trs[i].children;
+    for (const c of [4, 5, 6]) tds[c].innerHTML = def[c][1](p);
+  });
+}
 const tabCache = {};
 const tabPath = {
   conditional: () => `/order/conditional/current?uid=${state.uid}`,
@@ -483,13 +595,13 @@ $('tabBody').addEventListener('click', async (e) => {
 $('btnOps').addEventListener('click', () => $('drawer').classList.toggle('hidden'));
 $('btnCloseDrawer').addEventListener('click', () => $('drawer').classList.add('hidden'));
 const needUid = () => { if (!state.uid) { toast('先选择账户', '', true); return false; } return true; };
-$('opsFreeze').addEventListener('click', async () => { if (needUid()) { await api('POST', '/account/status', { uid: state.uid, status: 'frozen', reason: $('opsReason').value }, { write: true }); setTimeout(refreshAccount, 600); } });
-$('opsUnfreeze').addEventListener('click', async () => { if (needUid()) { await api('POST', '/account/status', { uid: state.uid, status: 'active', reason: $('opsReason').value }, { write: true }); refreshAccount(); } });
-$('opsGrant').addEventListener('click', async () => { if (needUid()) { await api('POST', '/account/credit', { uid: state.uid, amount: $('opsCredit').value.trim(), requestId: rid('credit') }, { write: true }); refreshAccount(); } });
-$('opsWithdrawBtn').addEventListener('click', async () => { if (needUid()) { await api('POST', '/account/balance', { uid: state.uid, amount: '-' + $('opsWithdraw').value.trim().replace(/^-/, ''), requestId: rid('wd') }, { write: true }); refreshAccount(); } });
-$('opsInsuredBtn').addEventListener('click', async () => { if (needUid()) { await api('POST', '/account/insured', { uid: state.uid, insured: $('opsInsured').checked }, { write: true }); refreshAccount(); } });
+$('opsFreeze').addEventListener('click', async () => { if (needUid()) { await api('POST', '/account/status', { uid: state.uid, status: 'frozen', reason: $('opsReason').value }, { write: true, ops: true }); setTimeout(refreshAccount, 600); } });
+$('opsUnfreeze').addEventListener('click', async () => { if (needUid()) { await api('POST', '/account/status', { uid: state.uid, status: 'active', reason: $('opsReason').value }, { write: true, ops: true }); refreshAccount(); } });
+$('opsGrant').addEventListener('click', async () => { if (needUid()) { await api('POST', '/account/credit', { uid: state.uid, amount: $('opsCredit').value.trim(), requestId: rid('credit') }, { write: true, ops: true }); refreshAccount(); } });
+$('opsWithdrawBtn').addEventListener('click', async () => { if (needUid()) { await api('POST', '/account/balance', { uid: state.uid, amount: '-' + $('opsWithdraw').value.trim().replace(/^-/, ''), requestId: rid('wd') }, { write: true, ops: true }); refreshAccount(); } });
+$('opsInsuredBtn').addEventListener('click', async () => { if (needUid()) { await api('POST', '/account/insured', { uid: state.uid, insured: $('opsInsured').checked }, { write: true, ops: true }); refreshAccount(); } });
 $('opsRoundClose').addEventListener('click', async () => { if (needUid() && state.account) { await api('POST', '/account/round/close', { uid: state.uid, round: state.account.round }, { write: true }); setTimeout(refreshAccount, 1500); } });
-$('opsIndexBtn').addEventListener('click', async () => { await api('POST', '/index-price', { symbol: state.symbol, price: $('opsIndex').value.trim() }, { write: true }); refreshTicker(); });
+$('opsIndexBtn').addEventListener('click', async () => { await api('POST', '/index-price', { symbol: state.symbol, price: $('opsIndex').value.trim() }, { write: true, ops: true }); refreshTicker(); });
 
 // ---------- 系统做市(币安行情) ----------
 const maker = { available: false, status: null };
@@ -586,9 +698,12 @@ function onWsMessage(m) {
   // 切换合约/周期/账户之后，还在路上的旧频道消息不能画到新的图表上
   if (!wantedChannels().has(ch)) return;
   if (ch.startsWith('depth:')) { state.depth = m.data; renderBook(); }
-  else if (ch.startsWith('trade:')) { state.trades.unshift(m.data); state.trades = state.trades.slice(0, 40); renderTrades(); if (state.ticker) { state.ticker.lastPrice = m.data.price; renderTicker(); renderBook(); } }
+  else if (ch.startsWith('trade:')) { state.trades.unshift(m.data); state.trades = state.trades.slice(0, 40); renderTrades(); }
   else if (ch.startsWith('kline:')) upsertKline(m.data);
-  else if (ch.startsWith('markprice:')) { if (state.ticker) { state.ticker.markPrice = m.data.price; renderTicker(); } }
+  else if (ch.startsWith('markprice:')) {
+    if (state.ticker) { state.ticker.markPrice = m.data.price; renderTicker(); }
+    if (recomputeForMark(state.positions, state.account, ch.slice('markprice:'.length), m.data.price)) { renderAccount(); patchPositionCells(); }
+  }
   else if (ch.startsWith('user:')) {
     const s = m.data || {};
     if (s.account) state.account = s.account;

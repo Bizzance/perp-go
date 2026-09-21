@@ -30,15 +30,21 @@ var webFS embed.FS
 // 而这个代理不响应预检，所以别的网站的页面没法借用户的浏览器去调这个持有ops密钥的代理
 const guardHeader = "X-Sim-Client"
 
+// 页面标明这次调用是运营类接口(充值、冻结、发额度、设投保、设指数价)的请求头，值为"ops"。合作方的交易后端用trade密钥、
+// 运营用ops密钥，所以这里也一样：标了ops的用ops密钥签名，其余的用trade密钥(配置了的话)。由页面(而不是代理)决定，
+// 这样页面选错密钥、或者服务端把某个接口的权限范围分错了，都会直接返回forbidden暴露出来。这个头不转发给后端
+const scopeHeader = "X-Sim-Scope"
+
 type server struct {
-	cfg    config
-	signer signer
-	client *http.Client
-	maker  *maker // 没配币安地址时为nil
+	cfg         config
+	signer      signer // 主密钥(ops)：没配trade密钥时所有请求都用它
+	tradeSigner signer // trade密钥，keyID为空表示没配
+	client      *http.Client
+	maker       *maker // 没配币安地址时为nil
 }
 
 func newServer(cfg config) *server {
-	s := &server{cfg: cfg, signer: signer{keyID: cfg.keyID, secret: cfg.secret}, client: &http.Client{Timeout: 20 * time.Second, CheckRedirect: noRedirect}}
+	s := &server{cfg: cfg, signer: signer{keyID: cfg.keyID, secret: cfg.secret}, tradeSigner: signer{keyID: cfg.tradeKeyID, secret: cfg.tradeSecret}, client: &http.Client{Timeout: 20 * time.Second, CheckRedirect: noRedirect}}
 	if cfg.binanceURL != "" {
 		mc := defaultMakerConfig()
 		if cfg.makerSymbols != "" {
@@ -59,6 +65,14 @@ func newServer(cfg config) *server {
 		s.maker = newMaker(mc, &apiClient{base: cfg.apiURL, signer: s.signer, http: &http.Client{Timeout: 15 * time.Second, CheckRedirect: noRedirect}}, newBinanceClient(cfg.binanceURL))
 	}
 	return s
+}
+
+// 这次请求用哪把密钥签名：页面标了ops的用主密钥；否则配置了trade密钥就用它，没配就还是主密钥
+func (s *server) signerFor(r *http.Request) signer {
+	if r.Header.Get(scopeHeader) == "ops" || s.tradeSigner.keyID == "" {
+		return s.signer
+	}
+	return s.tradeSigner
 }
 
 // 不跟随重定向：请求带着签名头，跟着重定向去了别的地址就把签名(和API Key)送出去了；后端本来也不会重定向
@@ -190,7 +204,7 @@ func (s *server) forward(base, strip string) http.Handler {
 		if ct := r.Header.Get("Content-Type"); ct != "" {
 			req.Header.Set("Content-Type", ct)
 		}
-		for k, v := range s.signer.headers(r.Method, target.EscapedPath(), target.RawQuery, body) {
+		for k, v := range s.signerFor(r).headers(r.Method, target.EscapedPath(), target.RawQuery, body) {
 			req.Header[k] = v
 		}
 		resp, err := s.client.Do(req)
@@ -278,7 +292,8 @@ func (s *server) ws(w http.ResponseWriter, r *http.Request) {
 	}
 	defer browser.Close()
 
-	up, resp, err := websocket.DefaultDialer.Dial(wsURL(s.cfg.apiURL)+"/ws", s.signer.headers("GET", "/ws", "", nil))
+	// /ws需要trade权限，没配trade密钥时用主密钥
+	up, resp, err := websocket.DefaultDialer.Dial(wsURL(s.cfg.apiURL)+"/ws", s.signerFor(r).headers("GET", "/ws", "", nil))
 	if err != nil {
 		msg := "连不上后端WebSocket: " + err.Error()
 		if resp != nil {
