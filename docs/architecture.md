@@ -30,6 +30,9 @@
     - 条件单触发扫描（`ConditionalOrderService.ScanOnce`）
     - （撮合本身是事件驱动的，不是定时任务）
 
+另有一个独立的 **orderbook-sync** 进程（[orderbook-sync.md](orderbook-sync.md)）：把币安的订单簿同步进我们的订单簿、并把币安的指数价推给contract-api，
+它只通过contract-api的HTTP接口工作（用系统账户挂单撤单、推指数价），不直接碰数据库和Kafka。
+
 contract-api是无状态的，可以直接多开实例。contract-engine的"状态"是内存订单簿——进程
 重启不会丢挂单，启动时会从MySQL重建（见 [order-book-recovery.md](order-book-recovery.md)），
 也支持按symbol静态分片到多个实例分摊撮合负载（见 [engine-sharding.md](engine-sharding.md)），

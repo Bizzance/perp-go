@@ -18,7 +18,7 @@
 |-------------------|------|-------------------------------------------------------------------|
 | `contract-api`    | 7001 | 对外接口 + WebSocket网关，无状态，可多实例                        |
 | `contract-engine` | 7002 | 撮合/风控/条件单/资金费率，**有状态**（订单簿在内存），默认单实例 |
-| `index-feeder`    | 7003 | 指数价喂价：从币安/OKX/Bybit取指数价取中位数，推给api。**生产必须部署**。7003是状态和健康检查端口（不映射到宿主机），见 [index-feeder.md](index-feeder.md) |
+| `orderbook-sync`  | 无   | 订单簿同步：把币安的订单簿和指数价同步进我们系统，用户下单的对手方就是系统。**生产必须部署**，见 [orderbook-sync.md](orderbook-sync.md) |
 | MySQL 8.x         | 3306 | 用`sql/schema.sql`初始化                                          |
 | Redis             | 6379 | 标记价、指数价、分布式锁、WS推送                                  |
 | Kafka             | 9092 | 下单/撤单/结束本轮事件                                            |
@@ -147,7 +147,7 @@ cp deploy/.env.prod.example deploy/.env      # 把所有 CHANGE_ME 换成真实�
 | `PERP_MARK_REQUIRE_INDEX`     | `true`=没有指数价就不产生标记价，**生产必须设**；false 时没喂过指数价的合约标记价退回最新成交价，可被自成交操纵 | `false`                          |
 | `PERP_MARK_MAX_INDEX_AGE_SEC` | 指数价多久没更新算断供（标记价冻结、强平/资金费率/条件单暂停）                                                  | `30`                             |
 | `PERP_MARK_MAX_DEVIATION`     | 标记价相对指数价的最大偏离比例                                                                                  | `0.01`                           |
-| `FEEDER_*`（喂价器读取，不是应用读取）| 喂价器的密钥、合约、来源、阈值，见 [index-feeder.md](index-feeder.md) | 见文档 |
+| `BOOKSYNC_*`（orderbook-sync读取，不是应用读取）| 密钥、合约、同步档数、间隔、币安数据过期时间，见 [orderbook-sync.md](orderbook-sync.md) | 见文档 |
 | `PERP_MARK_BASIS_WINDOW_SEC`  | 盘口基差取多长时间窗口的平均                                                                                    | `60`                             |
 | `PERP_INDEX_MAX_JUMP`         | `POST /index-price`服务端跳变保护：一次推送变动超过这个比例，新价位要持续几秒才承认。**生产建议设`0.05`**，测试环境留空 | 空（不校验）                     |
 | `PERP_INDEX_JUMP_CONFIRM_SEC` | 超过上面阈值的新价位要持续多少秒才承认                                                                          | `3`                              |
@@ -174,12 +174,13 @@ make compose-prod-up      # 等价于 docker compose --env-file deploy/.env -f d
   网关和这台机器通网时再改成内网地址， **不要绑 `0.0.0.0` 直接暴露到公网**
 - [ ] **网关没有改写路径、查询串、请求体**（签名覆盖这三样，改写会让签名对不上）
 - [ ] 限流和 IP 白名单还没做（见 auth-design.md"还没做"），需要的话先在网关层做
-- [ ] **标记价的指数价来源已经接好**：`PERP_MARK_REQUIRE_INDEX=true`，并且 index-feeder 在跑（`COMPOSE_PROFILES=feeder`，
-  `PERP_API_KEYS` 里加了一把 `feeder:<secret>:ops`，`FEEDER_API_KEY_ID`/`FEEDER_API_SECRET` 填对，见
-  [index-feeder.md](index-feeder.md)）。超过 30 秒没喂价强平会暂停。不开 `PERP_MARK_REQUIRE_INDEX` 的话没喂过指数价的合约
-  标记价退回最新成交价，两个账户对敲一笔就能推动别人的强平线，见 [mark-price.md](mark-price.md)
-- [ ] **指数价的服务端跳变保护已开**：`PERP_INDEX_MAX_JUMP=0.05`（`.env.prod.example`已经设了），并且喂价器的健康检查
-  （容器 `healthy`，或 `GET :7003/health`）接进了监控告警，见 [index-feeder.md](index-feeder.md)"状态和健康检查"
+- [ ] **订单簿和指数价来源已经接好**：`PERP_MARK_REQUIRE_INDEX=true`，并且 orderbook-sync 在跑（`COMPOSE_PROFILES=booksync`，
+  `PERP_API_KEYS` 里加了一把 `booksync:<secret>:trade|ops`，`BOOKSYNC_API_KEY_ID`/`BOOKSYNC_API_SECRET` 填对，见
+  [orderbook-sync.md](orderbook-sync.md)）。没有它订单簿是空的，没有指数价就没有标记价（市价单、强平都不能用）；超过 30 秒没喂价强平会暂停。
+  不开 `PERP_MARK_REQUIRE_INDEX` 的话没喂过指数价的合约标记价退回最新成交价，两个账户对敲一笔就能推动别人的强平线，见 [mark-price.md](mark-price.md)。
+  **部署地区要能稳定访问币安的行情接口**（部分地区返回 451）
+- [ ] **指数价的服务端跳变保护已开**：`PERP_INDEX_MAX_JUMP=0.05`（`.env.prod.example`已经设了）；orderbook-sync 日志里的
+  `[ERROR] 币安数据已经超过…撤掉全部挂单、暂停报价` 接进了告警（此时订单簿是空的），见 [orderbook-sync.md](orderbook-sync.md)
 - [ ] MySQL、Redis 密码已经覆盖默认值
 - [ ] MySQL、Redis、Kafka 只对应用所在网络开放，不暴露公网
 - [ ] `deploy/.env` 没有提交到 git

@@ -152,7 +152,7 @@ def call(method, url, key, secret, body=b""):
 密钥通过环境变量`PERP_API_KEYS`注入，`contract-api`和`contract-engine`读同一份：
 
 ```
-PERP_API_KEYS=partner-a:<secret>:trade|ops,feeder:<secret>:ops
+PERP_API_KEYS=partner-a:<secret>:trade|ops,booksync:<secret>:trade|ops
 ```
 
 - 格式 `id:secret:范围`，多把用逗号分隔，范围用 `|` 分隔
