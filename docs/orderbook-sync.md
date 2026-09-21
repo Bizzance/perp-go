@@ -85,7 +85,7 @@
 | `BOOKSYNC_UID_BASE`      | 9000000                | 系统账户的uid，占2个（买盘账户、卖盘账户）                            |
 | `BOOKSYNC_BALANCE`       | 1000000000             | 系统账户的余额（USDT），低于一半时自动补到这个数                      |
 | `BOOKSYNC_LEVERAGE`      | 5                      | 系统挂单的杠杆。全部保证金分档里最低的最大杠杆是5，用5在哪个档位都不会被拒 |
-| `BOOKSYNC_KLINE_INTERVAL_SEC` | 2                  | K线每隔多少秒同步一次最近几根                                         |
+| `BOOKSYNC_KLINE_INTERVAL_SEC` | 2                  | K线每隔多少秒同步一次最近几根；设0=不同步K线（contract-api没设`external`时用，否则每次都被拒绝） |
 | `BOOKSYNC_KLINE_BACKFILL` | 500                    | 启动时（和断了很久之后）每个周期最多补多少根历史，上限1500            |
 | `BOOKSYNC_BINANCE_URL`   | `https://fapi.binance.com` | 币安合约行情地址                                                  |
 

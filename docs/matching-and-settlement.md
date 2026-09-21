@@ -39,7 +39,9 @@
 5. LIMIT单：价格是否符合`price_tick`最小变动单位
 6. **价格保护带**（只对开仓单生效）：委托价格不能偏离参考价（标记价格，缺失则退回指数
    价格）超过`price_protection_ratio`，防止胖手指和"吃单价"钻空子——详见下面单独一节
-7. 数量是否满足`min_volume`/`max_volume`/`volume_step`
+7. 数量：传`amount`（币的数量）直接用；传`marginAmount`（保证金USDT）就先换算成数量（`marginAmount × 杠杆 ÷ 价格`向下取到
+   `base_coin_scale`位，限价单用委托价、市价单用标记价，两个都传时`marginAmount`优先，见 [api.md](api.md)"按USDT下单怎么换算"）。
+   然后校验是否满足`min_volume`/`max_volume`/`volume_step`（市价单也校验数量，只是不校验价格）
 8. 开仓单： **保证金分档杠杆校验**（`LockService`按`uid+symbol+side`串行化），见
    [risk-limit-tiers.md](risk-limit-tiers.md)
 9. 开仓单：`FreezeMargin`

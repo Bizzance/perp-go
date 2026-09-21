@@ -38,7 +38,8 @@ cmd/
 internal/
   api/          HTTP handler层。router.go是核心交易链路（下单/撤单/条件单/杠杆/账户）的
                 实现，共享同一套校验辅助函数；extra.go是合作方对接用的查询类/批量类接口
-                （合约信息、行情、单笔委托查询、批量撤单、资金流水、强平记录）；errors.go
+                （合约信息、行情、单笔委托查询、批量撤单、资金流水、强平记录）；kline_sync.go
+                是orderbook-sync推币安K线用的`POST /kline/sync`；errors.go
                 是错误码常量和统一的失败响应；params.go是分页参数和requestId校验；
                 engine_server.go是contract-engine自己暴露的/depth查询接口；ws_server.go是
                 WS升级入口
@@ -59,6 +60,10 @@ internal/
   config/       环境变量加载，全部可调参数（扫描间隔、超时阈值、node id等）集中在这里
   db/           MySQL连接
   events/       Kafka消息体struct（下单/撤单/结束本轮三种事件）
+
+tools/sim-client/  模拟客户端：Go代理(给请求签名)加内嵌的交易页面，按合作方的方式只用公开接口对接，
+                页面按合约接口给的精度/步长校验输入，见sim-client.md
+e2e/            端到端测试(`make test-e2e`)，起真实的api/engine后从HTTP走到成交，见testing.md
 
 deploy/         容器化部署：Dockerfile、docker-compose.yml(+deps叠加层)、环境变量模板，见deployment.md
 ```
@@ -230,6 +235,7 @@ group id做fan-out、应用层按symbol过滤。详见 [engine-sharding.md](engi
 - **只有全仓，没有逐仓**：`CLAUDE.md`项目说明里的范围决策，不是缺功能。
 - **很多`coins`表字段"0=不限制"**：`max_volume`/`price_tick`/`volume_step`/
   `funding_rate_cap`都是这个约定，看到代码里"等于0就跳过这个校验"不要误判成bug。
+  种子数据里BTC/ETH的`price_tick`/`volume_step`已经配了具体值，新加的合约不配就是不校验。
 - **`repo`层方法名字看起来像在做业务判断（比如`FreezeSpillToCredit`）**：这是因为
   这个系统的原子性保证下沉到了SQL语句本身（模式2），repo方法不是薄封装，方法名对应
   的是"一个具体的原子资金动作"，业务层（service）只负责按顺序调用、判断返回值。

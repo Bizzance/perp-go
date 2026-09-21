@@ -10,7 +10,7 @@ U本位永续合约交易系统，MVP阶段。文档按主题拆分，方便单�
 - [order-book.md](order-book.md) —— 订单簿数据结构、自成交保护、深度查询
 - [order-book-recovery.md](order-book-recovery.md) —— 订单簿的进程重启恢复机制
 - [engine-sharding.md](engine-sharding.md) —— engine横向扩展（按symbol静态分片）
-- [kline.md](kline.md) —— K线聚合
+- [kline.md](kline.md) —— K线：来源（生产只用币安的，本地可用我们自己的成交）、`POST /kline/sync`、聚合规则
 - [websocket.md](websocket.md) —— WebSocket实时推送
 - [message-dedup.md](message-dedup.md) —— Kafka消息级去重
 - [conditional-orders.md](conditional-orders.md) —— 条件单（止盈止损/条件开仓）
