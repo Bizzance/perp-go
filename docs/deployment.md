@@ -147,7 +147,8 @@ cp deploy/.env.prod.example deploy/.env      # 把所有 CHANGE_ME 换成真实�
 | `PERP_MARK_REQUIRE_INDEX`     | `true`=没有指数价就不产生标记价，**生产必须设**；false 时没喂过指数价的合约标记价退回最新成交价，可被自成交操纵 | `false`                          |
 | `PERP_MARK_MAX_INDEX_AGE_SEC` | 指数价多久没更新算断供（标记价冻结、强平/资金费率/条件单暂停）                                                  | `30`                             |
 | `PERP_MARK_MAX_DEVIATION`     | 标记价相对指数价的最大偏离比例                                                                                  | `0.01`                           |
-| `BOOKSYNC_*`（orderbook-sync读取，不是应用读取）| 密钥、合约、同步档数、间隔、币安数据过期时间，见 [orderbook-sync.md](orderbook-sync.md) | 见文档 |
+| `BOOKSYNC_*`（orderbook-sync读取，不是应用读取）| 密钥、合约、同步档数、间隔、币安数据过期时间、K线同步，见 [orderbook-sync.md](orderbook-sync.md) | 见文档 |
+| `PERP_KLINE_SOURCE`           | K线来源，api 和 engine **必须一样**：`trades`=用我们自己的成交生成K线；`external`=K线只来自币安（orderbook-sync 同步）。**生产用 orderbook-sync 必须设 `external`**，否则 K 线同步被拒绝、K 线是空的，见 [kline.md](kline.md) | `trades`                         |
 | `PERP_MARK_BASIS_WINDOW_SEC`  | 盘口基差取多长时间窗口的平均                                                                                    | `60`                             |
 | `PERP_INDEX_MAX_JUMP`         | `POST /index-price`服务端跳变保护：一次推送变动超过这个比例，新价位要持续几秒才承认。**生产建议设`0.05`**，测试环境留空 | 空（不校验）                     |
 | `PERP_INDEX_JUMP_CONFIRM_SEC` | 超过上面阈值的新价位要持续多少秒才承认                                                                          | `3`                              |
@@ -179,6 +180,8 @@ make compose-prod-up      # 等价于 docker compose --env-file deploy/.env -f d
   [orderbook-sync.md](orderbook-sync.md)）。没有它订单簿是空的，没有指数价就没有标记价（市价单、强平都不能用）；超过 30 秒没喂价强平会暂停。
   不开 `PERP_MARK_REQUIRE_INDEX` 的话没喂过指数价的合约标记价退回最新成交价，两个账户对敲一笔就能推动别人的强平线，见 [mark-price.md](mark-price.md)。
   **部署地区要能稳定访问币安的行情接口**（部分地区返回 451）
+- [ ] **K 线来源设成了 `external`**：`PERP_KLINE_SOURCE=external`（`.env.prod.example`已经设了），api 和 engine 读同一个变量。K 线和 24h 统计
+  是币安的数据，成交量是币安全市场的、不是我们平台的；**把币安的行情数据再分发给合作方是否合规，需要你或法务确认**
 - [ ] **指数价的服务端跳变保护已开**：`PERP_INDEX_MAX_JUMP=0.05`（`.env.prod.example`已经设了）；orderbook-sync 日志里的
   `[ERROR] 币安数据已经超过…撤掉全部挂单、暂停报价` 接进了告警（此时订单簿是空的），见 [orderbook-sync.md](orderbook-sync.md)
 - [ ] MySQL、Redis 密码已经覆盖默认值

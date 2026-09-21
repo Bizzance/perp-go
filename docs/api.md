@@ -75,6 +75,7 @@ X-Signature  HMAC-SHA256(secret, timestamp\nnonce\nMETHOD\npath\nrawQuery\nsha25
 | `idempotency_conflict`  | 400  | 同一个`requestId`已经用于一笔**参数不同**的请求。是调用方误用（同一个键复用到了另一笔请求），换一个新的`requestId` |
 | `round_mismatch`        | 400  | `POST /account/round/close`指定的`round`大于账户当前轮数                                  |
 | `account_frozen`        | 400  | 账户已被冻结，不能开仓、创建条件开仓单、修改杠杆（平仓、撤单、查询仍可用），见`POST /account/status` |
+| `kline_source_not_external` | 400  | `POST /kline/sync`只在K线来源是外部行情（`PERP_KLINE_SOURCE=external`）时可用，当前不是，一根都没写 |
 | `index_price_jump`      | 400  | `POST /index-price`的指数价相对当前值跳变超过服务端阈值，**没有写入**。新价位持续几秒后会被承认，继续按周期推即可，不是故障，见该接口说明 |
 | `auth_missing`          | 401  | 缺鉴权请求头，或者 nonce/时间戳格式不对                                                   |
 | `auth_expired`          | 401  | 时间戳不在前后 30 秒内。检查合作方服务器的时钟是否同步（NTP）                             |
@@ -609,7 +610,23 @@ GET /order/detail?uid=10001&requestId=order-20260919-0001
 
 ### `GET /contract/list`
 
-全部可交易的合约及交易规则。
+全部可交易的合约及交易规则。**每个合约都带价格/数量的精度信息**，前端展示和下单输入靠它，不用写死：
+
+| 字段            | 用途                                                                                                  |
+|-----------------|-------------------------------------------------------------------------------------------------------|
+| `priceScale`    | **价格显示几位小数**。固定显示这么多位，末尾的0也显示（BTCUSDT是1位：`81255.0`，不是`81255`）          |
+| `baseCoinScale` | **数量显示几位小数**，同样固定位数（BTCUSDT是3位：`0.040`；ETHUSDT是2位：`4.20`）                      |
+| `priceTick`     | 价格最小变动单位，下单输入框的步进。**`0`表示不校验**，此时输入精度按`priceScale`                       |
+| `volumeStep`    | 数量步长。**`0`表示不校验**，此时输入精度按`baseCoinScale`                                             |
+| `minVolume` / `maxVolume` | 单笔最小/最大下单量，`maxVolume`为`0`表示不限                                                |
+
+价格、数量在接口里都是字符串；返回值末尾可能没有0（`"81255"`），要按`priceScale`/`baseCoinScale`补齐后再显示。
+
+这些配置存在数据库的`coins`表里，每个合约各自配置，改了下一次请求就生效。种子数据里`priceTick`/`volumeStep`配成跟位数一致（BTCUSDT价格步进0.1、
+数量步长0.001；ETHUSDT价格步进0.01、数量步长0.01）。下单（`POST /order/add`）和创建条件单按它们校验：限价单价格和条件单触发价必须是`priceTick`的整数倍
+（`price_tick_invalid`），数量必须是`volumeStep`的整数倍、不低于`minVolume`、不超过`maxVolume`（`volume_out_of_range`），错误提示里带着具体的步长。
+市价单不校验价格。已经建过库的环境要手动更新一次：
+`UPDATE coins SET price_tick=0.1, volume_step=0.001 WHERE symbol='BTCUSDT'; UPDATE coins SET price_tick=0.01, volume_step=0.01 WHERE symbol='ETHUSDT';`
 
 ### `GET /contract/detail?symbol=BTCUSDT`
 
@@ -621,7 +638,7 @@ GET /order/detail?uid=10001&requestId=order-20260919-0001
   "data": {
     "symbol": "BTCUSDT", "baseCoinScale": 3, "priceScale": 1, "enable": true,
     "makerFee": "0.0002", "takerFee": "0.0005",
-    "priceTick": "0", "volumeStep": "0", "minVolume": "0.001", "maxVolume": "0",
+    "priceTick": "0.1", "volumeStep": "0.001", "minVolume": "0.001", "maxVolume": "0",
     "fundingIntervalHours": 8, "fundingRateCap": "0.0075", "fundingImpactNotional": "10000", "priceProtectionRatio": "0.05",
     "tiers": [
       { "symbol": "BTCUSDT", "tier": 1, "maxNotional": "50000", "maintenanceMarginRate": "0.004", "maintenanceAmount": "0", "maxLeverage": 125 },
@@ -633,8 +650,8 @@ GET /order/detail?uid=10001&requestId=order-20260919-0001
 
 | 字段                          | 说明                                                                                          |
 |-------------------------------|-----------------------------------------------------------------------------------------------|
-| `baseCoinScale` / `priceScale`| 数量 / 价格的小数位数                                                                         |
-| `priceTick` / `volumeStep`    | 最小变动价位 / 数量步长。**`0`表示不限制**（本系统里这类配置统一 0=不限）                     |
+| `baseCoinScale` / `priceScale`| 数量 / 价格的小数位数，**前端展示按这个位数固定显示**（末尾的0也显示）                        |
+| `priceTick` / `volumeStep`    | 最小变动价位 / 数量步长（下单输入的步进）。**`0`表示不限制**（本系统里这类配置统一 0=不限），此时输入精度按上一行的位数 |
 | `minVolume` / `maxVolume`     | 单笔最小/最大下单量，`maxVolume`为`0`表示不限                                                 |
 | `makerFee` / `takerFee`       | 手续费率                                                                                      |
 | `fundingIntervalHours`        | 资金费率结算周期（小时）                                                                      |
@@ -657,8 +674,9 @@ GET /order/detail?uid=10001&requestId=order-20260919-0001
 ```
 
 - 没有对应数据的字段是`null`（比如合约从没成交过），**不是0**——0是合法价格，区分不了
-- `lastPrice`是最新一笔成交价；`markPrice`是标记价，由指数价、盘口基差、最新成交价取中位数得出，**不等于**最新成交价，
-  见 [mark-price.md](mark-price.md)
+- `lastPrice`：K线来自币安（`PERP_KLINE_SOURCE=external`，生产）时是最近一根1分钟K线的收盘价，即币安的最新价；
+  否则是最新一笔成交价。`markPrice`是标记价，由指数价、盘口基差、最新成交价取中位数得出，**不等于**最新成交价，
+  见 [mark-price.md](mark-price.md)、[kline.md](kline.md)
 - `indexPrice`是外部行情源喂进来的指数价格（`POST /index-price`）
 - **24h统计口径**：最近24根1小时K线聚合（含当前还没走完的这一根），实际时间窗口在23~24小时之间，不是严格滚动的24小时
 - `change24h`是小数比例（`0.0265`=+2.65%）
@@ -676,7 +694,8 @@ GET /order/detail?uid=10001&requestId=order-20260919-0001
 
 ### `GET /kline?symbol=BTCUSDT&interval=1m&limit=200`
 
-详细设计见 [kline.md](kline.md)。`interval`见"枚举"，`limit`默认200。按开盘时间**升序**（从旧到新）：
+详细设计见 [kline.md](kline.md)。`interval`见"枚举"，`limit`默认200。按开盘时间**升序**（从旧到新）。
+生产环境的K线**来自币安**（成交量和成交笔数是币安全市场的，不是我们平台的），我们自己的成交不写K线：
 
 ```json
 { "code": 200, "message": "success",
@@ -703,6 +722,19 @@ GET /order/detail?uid=10001&requestId=order-20260919-0001
   "data": [ { "id": 9, "symbol": "BTCUSDT", "fundingTime": 1789776000000, "rate": "-0.0075",
               "markPrice": "20000", "indexPrice": "60000", "createTime": 1789776041204 } ] }
 ```
+
+### `POST /kline/sync`（运营接口）
+
+外部行情源（orderbook-sync）推送某个合约某个周期的一批K线，整根覆盖已有的同一根，写入后把变了的K线推给WebSocket订阅者。
+**只在`PERP_KLINE_SOURCE=external`时可用**，否则返回`kline_source_not_external`。一次1到200根，整批校验，任何一根不合法整批拒绝。
+详见 [kline.md](kline.md)。
+
+```json
+{ "symbol": "BTCUSDT", "interval": "1m",
+  "candles": [ { "openTime": 1789783200000, "open": "59000", "high": "59100", "low": "58900", "close": "59050", "volume": "12.5", "tradeCount": 320 } ] }
+```
+
+响应`{"written": 1, "changed": 1}`：写入的根数、其中真的变了（新建或值不同）的根数。
 
 ### `POST /index-price`（运营接口）
 

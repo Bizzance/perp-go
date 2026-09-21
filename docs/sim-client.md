@@ -5,6 +5,30 @@
 
 它不是产品，不进生产镜像，代码在`tools/sim-client/`。生产环境把币安订单簿同步进来的是另一个进程 **orderbook-sync**（[orderbook-sync.md](orderbook-sync.md)）：
 同样把币安的盘口挂进我们的订单簿，但价格数量原样同步、没有行情情景偏移和对敲，币安数据过期会撤光挂单。两者用同一段系统账户uid，不能同时跑。
+**K线来源**：用模拟客户端自己的做市（`-maker`，靠对敲成交画K线）时保持默认的`PERP_KLINE_SOURCE=trades`；用orderbook-sync时设`external`，
+K线、24h统计、最新价都是币安的，页面上的最新价跟着K线收盘价走，不再用我们自己成交的价格。
+**持仓盈亏实时重算**：服务端不会因为标记价变化推送持仓，页面收到`markprice`推送后自己按新标记价重算持仓行的标记价、未实现盈亏、回报率和账户面板的
+未实现盈亏、权益（`app.js`的`recomputeForMark`，公式跟服务端一致），下一次服务端推送或5秒一次的REST刷新会用服务端的值覆盖。
+
+## 原则：按合作方对接的方式做
+
+模拟客户端就是"第一个合作方"：**只通过公开的对接接口拿数据、做事**，不走任何后门。这样合作方以后遇到的问题，我们能提前在这里测出来。具体做法：
+
+- 价格/数量显示几位小数取自`GET /contract/list`的`priceScale`/`baseCoinScale`，末尾的0也显示；最大杠杆取自`/contract/detail`的分档；手续费取自它的`takerFee`，都不写死
+- 下单输入按`/contract/detail`的规则约束：位数不超过`priceScale`/`baseCoinScale`，是`priceTick`/`volumeStep`的整数倍，不小于`minVolume`、不超过`maxVolume`
+  （`priceTick`/`volumeStep`是0时按位数）。判断整数倍用整数运算，不经过浮点数。百分比按钮也按数量步长取整。这曾经出过问题：百分比按钮写死了3位小数，
+  ETH的数量精度是2位，下出了`88.931`这样的数量，而服务端当时没配步长、照收了
+- 持仓盈亏不随标记价推送，页面订阅`markprice`频道自己重算，跟合作方要做的一样，见 [websocket.md](websocket.md)
+- 深度走contract-engine自己的`/depth`（合作方也是这样），私有数据走签名的REST和WebSocket
+
+**跟真实对接还有的差别**（发现了要么补上，要么写在这里）：
+
+- 代理默认只用一把密钥，同时有`trade`和`ops`权限，这时"某个接口的权限范围分错了"测不出来。**再配一把只有`trade`的密钥就能跟合作方一样分开用**：
+  `PERP_API_KEYS=partner-a:密钥:trade|ops,partner-trade:另一个密钥:trade`，`make sim-client`会自动识别（也可以手动设`SIM_TRADE_KEY_ID`/`SIM_TRADE_KEY_SECRET`）。
+  之后交易类请求（下单、查询、深度、WebSocket、结束本轮）用`trade`密钥，页面标了运营的请求（充值、提现、发额度、设投保、冻结/解冻、设指数价）用`ops`密钥，
+  由页面用请求头`X-Sim-Scope: ops`声明，代理据此选密钥、不转发这个头。页面选错密钥，或者服务端把某个接口的权限范围分错，会直接返回`forbidden`
+- 金额和盈亏的计算用了JS的浮点数，合作方应该用十进制库；显示够用，但不能拿它验证精度问题
+- `/sim/*`是测试专用（做市、行情情景），合作方没有
 
 ## 为什么需要一层代理
 
