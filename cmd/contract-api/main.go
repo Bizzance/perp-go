@@ -74,6 +74,9 @@ func main() {
 	auth := api.NewAuth(cfg.AuthDisabled, cfg.APIKeys, rdb)
 
 	srv := api.NewServer(accountSvc, positionSvc, coinRepo, orderRepo, conditionalOrderRepo, tradeRepo, klineRepo, markPriceSvc, fundingSvc, producer, hub, lockSvc, txRepo, auth)
+	// K线来源是外部行情(PERP_KLINE_SOURCE=external)时，POST /kline/sync写入后要把变了的K线推给WebSocket订阅者，
+	// 走的是跟engine同一个Redis频道
+	srv.WithKlineSync(cfg.KlineSource == "external", service.NewPushService(rdb, accountSvc, positionSvc, orderRepo))
 
 	// 收到SIGTERM/SIGINT(docker stop、滚动发布都会发)先停止接收新连接、等在途请求处理完再退出，
 	// 而不是被直接杀掉——下单请求可能正处在"已冻结保证金、还没落库/发Kafka"这一步。WebSocket

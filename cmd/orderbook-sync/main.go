@@ -1,6 +1,6 @@
 // orderbook-sync：把币安的订单簿和行情同步进我们系统。定时拉币安合约的深度，用两个系统账户在我们的
 // 订单簿里挂出一模一样的价格和数量，用户下单吃的就是这些挂单，对手方就是系统，没有做市商；
-// 同时把币安的指数价推给contract-api，标记价靠它做锚。
+// 同时把币安的指数价推给contract-api（标记价靠它做锚），把币安的K线推给contract-api（合作方拿到的K线就是币安的）。
 // 币安数据拉不到超过一段时间，撤掉全部挂单、暂停报价，见docs/orderbook-sync.md。
 package main
 
@@ -34,6 +34,9 @@ func main() {
 		Leverage:   int(envInt("BOOKSYNC_LEVERAGE", 5)),
 		Balance:    envOr("BOOKSYNC_BALANCE", "1000000000"),
 		StaleAfter: time.Duration(envInt("BOOKSYNC_STALE_SEC", 10)) * time.Second,
+		// 币安K线：每2秒同步一次最近几根(只推变了的)，启动时补500根历史(币安接口上限1500)
+		KlineEvery:    time.Duration(envInt("BOOKSYNC_KLINE_INTERVAL_SEC", 2)) * time.Second,
+		KlineBackfill: int(envInt("BOOKSYNC_KLINE_BACKFILL", 500)),
 	}
 	bn := &booksync.Binance{BaseURL: strings.TrimRight(envOr("BOOKSYNC_BINANCE_URL", "https://fapi.binance.com"), "/"), Client: &http.Client{Timeout: 5 * time.Second}}
 	s, err := booksync.New(cfg, apiURL, keyID, secret, bn)
@@ -43,8 +46,8 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	log.Printf("orderbook-sync启动: api=%s symbols=%v 每侧%d档 间隔%s 币安数据%s没更新就撤单 系统账户uid=%d/%d",
-		apiURL, symbols, cfg.Levels, cfg.Interval, cfg.StaleAfter, cfg.BaseUID, cfg.BaseUID+1)
+	log.Printf("orderbook-sync启动: api=%s symbols=%v 每侧%d档 间隔%s 币安数据%s没更新就撤单 系统账户uid=%d/%d K线每%s同步一次(启动补%d根)",
+		apiURL, symbols, cfg.Levels, cfg.Interval, cfg.StaleAfter, cfg.BaseUID, cfg.BaseUID+1, cfg.KlineEvery, cfg.KlineBackfill)
 	s.Run(ctx)
 	log.Println("orderbook-sync退出，系统挂单已撤")
 }

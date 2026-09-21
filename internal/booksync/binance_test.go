@@ -106,3 +106,56 @@ func TestBinanceIndexPrice(t *testing.T) {
 		})
 	}
 }
+
+func TestBinanceKlines(t *testing.T) {
+	t.Run("解析：开盘时间、开高低收、成交量、成交笔数原样", func(t *testing.T) {
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			if r.URL.Path != "/fapi/v1/klines" || r.URL.Query().Get("symbol") != "BTCUSDT" || r.URL.Query().Get("interval") != "1m" || r.URL.Query().Get("limit") != "2" {
+				t.Errorf("请求不对: %s", r.URL)
+			}
+			_, _ = io.WriteString(w, `[[1700000000000,"81000.10","81010.50","80995.00","81005.25","12.345",1700000059999,"1000000.5",321,"6.1","500000.2","0"],
+				[1700000060000,"81005.25","81020.00","81001.10","81015.70","0.5",1700000119999,"40000.1",7,"0.2","16000","0"]]`)
+		}))
+		defer srv.Close()
+		b := &Binance{BaseURL: srv.URL, Client: srv.Client()}
+		cs, err := b.Klines(context.Background(), "BTCUSDT", "1m", 2)
+		if err != nil || len(cs) != 2 {
+			t.Fatalf("cs=%v err=%v", cs, err)
+		}
+		c := cs[0]
+		if c.OpenTime != 1700000000000 || c.Open.String() != "81000.1" || c.High.String() != "81010.5" || c.Low.String() != "80995" ||
+			c.Close.String() != "81005.25" || c.Volume.String() != "12.345" || c.Trades != 321 {
+			t.Fatalf("第一根解析不对: %+v", c)
+		}
+		if cs[1].OpenTime != 1700000060000 || cs[1].Trades != 7 {
+			t.Fatalf("第二根解析不对: %+v", cs[1])
+		}
+	})
+	bad := map[string]string{
+		"被地区屏蔽(451)": "451",
+		"不是JSON":     `<html>`,
+		"不是数组":       `{"code":-1121}`,
+		"列数不够":       `[[1700000000000,"1","2","3","4","5"]]`,
+		"开盘时间不是数字":   `[["x","1","2","3","4","5",0,"0",1]]`,
+		"开盘时间是0":     `[[0,"1","2","3","4","5",0,"0",1]]`,
+		"价格不是字符串":    `[[1700000000000,1,"2","3","4","5",0,"0",1]]`,
+		"价格解析不出来":    `[[1700000000000,"abc","2","3","4","5",0,"0",1]]`,
+		"成交笔数不是数字":   `[[1700000000000,"1","2","3","4","5",0,"0","x"]]`,
+	}
+	for name, body := range bad {
+		t.Run("异常："+name, func(t *testing.T) {
+			srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if body == "451" {
+					w.WriteHeader(451)
+					return
+				}
+				_, _ = io.WriteString(w, body)
+			}))
+			defer srv.Close()
+			b := &Binance{BaseURL: srv.URL, Client: srv.Client()}
+			if _, err := b.Klines(context.Background(), "BTCUSDT", "1m", 2); err == nil {
+				t.Fatal("应该报错")
+			}
+		})
+	}
+}

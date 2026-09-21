@@ -106,8 +106,22 @@ func (s *Server) marketTicker(c *gin.Context) {
 		fail(c, 500, err.Error())
 		return
 	}
-	if len(latest) > 0 {
+	recent, err := s.klines.FindRecent(ctx, symbol, model.Kline1m, 1)
+	if err != nil {
+		fail(c, 500, err.Error())
+		return
+	}
+	// 最新价的来源：K线来自外部行情(币安)时，用最近一根1分钟K线的收盘价，也就是币安的最新价——我们自己成交少的时候
+	// 最后一笔成交价会停很久，跟币安差很多；K线来自我们自己的成交时用最新成交价。另一个没有数据时退回到有的那个，都没有就是null
+	switch {
+	case s.klineExternal && len(recent) > 0:
+		p := recent[0].Close
+		t.LastPrice = &p
+	case len(latest) > 0:
 		t.LastPrice = &latest[0].Price
+	case len(recent) > 0:
+		p := recent[0].Close
+		t.LastPrice = &p
 	}
 	klines, err := s.klines.FindRecent(ctx, symbol, model.Kline1h, 24)
 	if err != nil {

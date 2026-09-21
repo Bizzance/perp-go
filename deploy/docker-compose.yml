@@ -28,6 +28,9 @@ x-common-env: &common-env
   # CONFIRM_SEC秒才承认。留空=不校验(测试环境、模拟客户端会故意大幅改价)，生产设成0.05，见docs/mark-price.md
   PERP_INDEX_MAX_JUMP: ${PERP_INDEX_MAX_JUMP:-}
   PERP_INDEX_JUMP_CONFIRM_SEC: ${PERP_INDEX_JUMP_CONFIRM_SEC:-}
+  # K线的来源，api和engine必须一样：留空/trades=用我们自己的成交生成K线(默认)；external=K线只来自币安
+  # (orderbook-sync同步，POST /kline/sync)，我们自己的成交不再写K线。用orderbook-sync时设external，见docs/kline.md
+  PERP_KLINE_SOURCE: ${PERP_KLINE_SOURCE:-}
 
 services:
   # 有状态：订单簿在内存里，重启时从MySQL重建。默认单实例，同一个symbol的订单簿只能在
@@ -53,7 +56,7 @@ services:
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${ENGINE_PORT:-7002}:7002"
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7002/health"]
+      test: [ "CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7002/health" ]
       interval: 10s
       timeout: 3s
       retries: 6
@@ -82,7 +85,7 @@ services:
     ports:
       - "${BIND_ADDR:-127.0.0.1}:${API_PORT:-7001}:7001"
     healthcheck:
-      test: ["CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7001/health"]
+      test: [ "CMD", "wget", "-q", "-O", "/dev/null", "http://127.0.0.1:7001/health" ]
       interval: 10s
       timeout: 3s
       retries: 6
@@ -99,7 +102,7 @@ services:
   # 需要一把同时有trade和ops权限的密钥(建系统账户、挂单撤单、给系统账户充值)，BOOKSYNC_API_KEY_ID/BOOKSYNC_API_SECRET
   # 要跟PERP_API_KEYS里的一把对上。退出时要撤掉全部系统挂单，所以留够退出时间
   booksync:
-    profiles: ["booksync"]
+    profiles: [ "booksync" ]
     image: perp-go/booksync:${IMAGE_TAG:-latest}
     build:
       context: ..
@@ -121,6 +124,8 @@ services:
       BOOKSYNC_UID_BASE: ${BOOKSYNC_UID_BASE:-}
       BOOKSYNC_BALANCE: ${BOOKSYNC_BALANCE:-}
       BOOKSYNC_LEVERAGE: ${BOOKSYNC_LEVERAGE:-}
+      BOOKSYNC_KLINE_INTERVAL_SEC: ${BOOKSYNC_KLINE_INTERVAL_SEC:-}
+      BOOKSYNC_KLINE_BACKFILL: ${BOOKSYNC_KLINE_BACKFILL:-}
     depends_on:
       api:
         condition: service_healthy

@@ -348,7 +348,7 @@ func TestRealRouters_EveryRouteDeclaresAScope(t *testing.T) {
 	check("contract-engine", engineAuth, engineRoutes)
 
 	// 运营类接口必须是ops，不能因为漏改被降成trade
-	for _, p := range []string{"/account/balance", "/account/credit", "/account/insured", "/index-price"} {
+	for _, p := range []string{"/account/balance", "/account/credit", "/account/insured", "/index-price", "/kline/sync"} {
 		if got := auth.routeScopes["POST "+p]; got != ScopeOps {
 			t.Errorf("POST %s 必须是ops权限, got %q", p, got)
 		}

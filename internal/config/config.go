@@ -42,6 +42,11 @@ type Config struct {
 	IndexMaxJump     float64       // PERP_INDEX_MAX_JUMP，一次推送相对当前指数价的变动超过这个比例就要等确认
 	IndexJumpConfirm time.Duration // PERP_INDEX_JUMP_CONFIRM_SEC，新价位要持续多久才承认
 
+	// K线的来源，PERP_KLINE_SOURCE：trades=用我们自己的成交更新K线(默认)；external=K线只来自外部行情
+	// (orderbook-sync从币安同步，POST /kline/sync)，我们自己的成交不再写K线，见docs/kline.md。
+	// contract-api和contract-engine必须配成一样的
+	KlineSource string
+
 	// EngineSymbols 这个contract-engine实例负责撮合的symbol列表，来自PERP_ENGINE_SYMBOLS
 	// (逗号分隔，如"BTCUSDT,ETHUSDT")。nil(没设这个环境变量)=负责全部symbol，这是单实例
 	// 部署的默认行为，不需要额外配置。见docs/engine-sharding.md
@@ -211,7 +216,17 @@ func Load(defaultNodeID uint64) Config {
 		IndexMaxJump:              envFloat("PERP_INDEX_MAX_JUMP", 0),
 		IndexJumpConfirm:          time.Duration(envInt("PERP_INDEX_JUMP_CONFIRM_SEC", 3)) * time.Second,
 		EngineSymbols:             parseEngineSymbols(os.Getenv("PERP_ENGINE_SYMBOLS")),
+		KlineSource:               klineSource(),
 	}
+}
+
+// 读PERP_KLINE_SOURCE，没设是trades；写错了直接退出——悄悄退回默认值会让K线来源和预期不一样
+func klineSource() string {
+	v := envOr("PERP_KLINE_SOURCE", "trades")
+	if v != "trades" && v != "external" {
+		log.Fatalf("PERP_KLINE_SOURCE不合法(只能是trades或external): %q", v)
+	}
+	return v
 }
 
 func parseEngineSymbols(raw string) []string {

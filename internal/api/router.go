@@ -43,6 +43,21 @@ type Server struct {
 	lock              *service.LockService
 	txs               *repo.TxRepo
 	auth              *Auth
+
+	// POST /kline/sync：K线来源是外部行情(PERP_KLINE_SOURCE=external)时才接收；写入后把变化了的K线推给WebSocket订阅者
+	klineExternal bool
+	klinePub      klinePublisher
+}
+
+// 把一根K线推给订阅了这个symbol和周期的WebSocket客户端，生产里是*service.PushService
+type klinePublisher interface {
+	PublishKline(ctx context.Context, symbol string, k model.Kline)
+}
+
+// 打开POST /kline/sync。external=false(K线由我们自己的成交生成)时这个接口一律拒绝，避免两个来源的数据混在一起
+func (s *Server) WithKlineSync(external bool, pub klinePublisher) *Server {
+	s.klineExternal, s.klinePub = external, pub
+	return s
 }
 
 func NewServer(
@@ -106,6 +121,7 @@ func (s *Server) Router() *gin.Engine {
 	s.auth.Route(r, "GET", "/funding/rate", ScopeTrade, s.fundingRate)
 	s.auth.Route(r, "GET", "/funding/history", ScopeTrade, s.fundingHistory)
 	s.auth.Route(r, "GET", "/kline", ScopeTrade, s.kline)
+	s.auth.Route(r, "POST", "/kline/sync", ScopeOps, s.syncKlines)
 	s.auth.Route(r, "POST", "/index-price", ScopeOps, s.setIndexPrice)
 	s.auth.Route(r, "GET", "/ws", ScopeTrade, s.ws)
 	r.GET("/health", s.health)
@@ -697,7 +713,7 @@ func (s *Server) addOrder(c *gin.Context) {
 			return
 		}
 		if coin.PriceTick.Sign() > 0 && !price.Mod(coin.PriceTick).IsZero() {
-			failC(c, 400, ErrPriceTickInvalid, "price不符合最小变动单位")
+			failC(c, 400, ErrPriceTickInvalid, fmt.Sprintf("price必须是最小变动单位%s的整数倍", coin.PriceTick))
 			return
 		}
 		// 价格保护带：只对开仓单生效，防止两类问题——①用户瞎填价格导致的胖手指交易 ②故意报
@@ -743,15 +759,15 @@ func (s *Server) addOrder(c *gin.Context) {
 		return
 	}
 	if coin.MinVolume.Sign() > 0 && amount.LessThan(coin.MinVolume) {
-		failC(c, 400, ErrVolumeOutOfRange, "数量低于该合约最小下单量")
+		failC(c, 400, ErrVolumeOutOfRange, fmt.Sprintf("数量不能低于该合约最小下单量%s", coin.MinVolume))
 		return
 	}
 	if coin.MaxVolume.Sign() > 0 && amount.GreaterThan(coin.MaxVolume) {
-		failC(c, 400, ErrVolumeOutOfRange, "数量超出该合约最大下单量")
+		failC(c, 400, ErrVolumeOutOfRange, fmt.Sprintf("数量不能超过该合约单笔上限%s", coin.MaxVolume))
 		return
 	}
 	if coin.VolumeStep.Sign() > 0 && !amount.Mod(coin.VolumeStep).IsZero() {
-		failC(c, 400, ErrVolumeOutOfRange, "数量不符合最小步长")
+		failC(c, 400, ErrVolumeOutOfRange, fmt.Sprintf("数量必须是步长%s的整数倍", coin.VolumeStep))
 		return
 	}
 
@@ -1022,7 +1038,7 @@ func (s *Server) addConditionalOrder(c *gin.Context) {
 		return
 	}
 	if coin.PriceTick.Sign() > 0 && !req.TriggerPrice.Mod(coin.PriceTick).IsZero() {
-		failC(c, 400, ErrPriceTickInvalid, "triggerPrice不符合最小变动单位")
+		failC(c, 400, ErrPriceTickInvalid, fmt.Sprintf("triggerPrice必须是最小变动单位%s的整数倍", coin.PriceTick))
 		return
 	}
 	// referencePrice/hasReference：标记价格优先、缺失退回指数价格，跟addOrder用的是
@@ -1043,7 +1059,7 @@ func (s *Server) addConditionalOrder(c *gin.Context) {
 			return
 		}
 		if coin.PriceTick.Sign() > 0 && !price.Mod(coin.PriceTick).IsZero() {
-			failC(c, 400, ErrPriceTickInvalid, "price不符合最小变动单位")
+			failC(c, 400, ErrPriceTickInvalid, fmt.Sprintf("price必须是最小变动单位%s的整数倍", coin.PriceTick))
 			return
 		}
 	}
@@ -1076,15 +1092,15 @@ func (s *Server) addConditionalOrder(c *gin.Context) {
 		return
 	}
 	if coin.MinVolume.Sign() > 0 && amount.LessThan(coin.MinVolume) {
-		failC(c, 400, ErrVolumeOutOfRange, "数量低于该合约最小下单量")
+		failC(c, 400, ErrVolumeOutOfRange, fmt.Sprintf("数量不能低于该合约最小下单量%s", coin.MinVolume))
 		return
 	}
 	if coin.MaxVolume.Sign() > 0 && amount.GreaterThan(coin.MaxVolume) {
-		failC(c, 400, ErrVolumeOutOfRange, "数量超出该合约最大下单量")
+		failC(c, 400, ErrVolumeOutOfRange, fmt.Sprintf("数量不能超过该合约单笔上限%s", coin.MaxVolume))
 		return
 	}
 	if coin.VolumeStep.Sign() > 0 && !amount.Mod(coin.VolumeStep).IsZero() {
-		failC(c, 400, ErrVolumeOutOfRange, "数量不符合最小步长")
+		failC(c, 400, ErrVolumeOutOfRange, fmt.Sprintf("数量必须是步长%s的整数倍", coin.VolumeStep))
 		return
 	}
 

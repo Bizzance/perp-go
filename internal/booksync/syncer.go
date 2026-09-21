@@ -20,6 +20,7 @@ import (
 	"github.com/shopspring/decimal"
 
 	"perp-go/internal/api"
+	"perp-go/internal/model"
 )
 
 type Config struct {
@@ -33,6 +34,10 @@ type Config struct {
 	// 币安数据超过这么久没拉成功，就撤掉这个合约的全部挂单、暂停报价：过期的报价留在订单簿里，
 	// 谁比我们更早看到币安的价格，谁就能按旧价成交
 	StaleAfter time.Duration
+	// 把币安的K线同步进我们系统(POST /kline/sync)：每KlineEvery同步一次最近几根，第一次(和很久没成功之后)补最多
+	// KlineBackfill根历史。KlineEvery<=0表示不同步K线。要求contract-api和engine都配了PERP_KLINE_SOURCE=external
+	KlineEvery    time.Duration
+	KlineBackfill int
 }
 
 func (c Config) validate() error {
@@ -43,6 +48,8 @@ func (c Config) validate() error {
 		return errors.New("BaseUID必须大于0")
 	case c.Levels <= 0:
 		return errors.New("Levels必须大于0")
+	case c.KlineBackfill < 0 || c.KlineBackfill > maxKlineLimit:
+		return fmt.Errorf("KlineBackfill必须在0到%d之间", maxKlineLimit)
 	case c.Interval <= 0 || c.StaleAfter <= 0:
 		return errors.New("Interval和StaleAfter必须大于0")
 	case c.Leverage <= 0:
@@ -65,6 +72,10 @@ type symState struct {
 	stopped       bool      // 已经因为币安数据过期撤了全部挂单
 	lastWarn      time.Time
 	lastIndexWarn time.Time
+
+	// K线同步用，只被K线的那个goroutine读写
+	lastKlineWarn time.Time
+	klineSynced   map[model.KlineInterval]time.Time // 每个周期上一次成功同步的时间
 }
 
 type Syncer struct {
@@ -98,7 +109,7 @@ func New(cfg Config, apiURL, keyID, secret string, bn *Binance) (*Syncer, error)
 		contracts: map[string]contractInfo{}, states: map[string]*symState{},
 	}
 	for _, sym := range cfg.Symbols {
-		s.states[sym] = &symState{}
+		s.states[sym] = &symState{klineSynced: map[model.KlineInterval]time.Time{}}
 	}
 	s.startedAt = s.now()
 	return s, nil
@@ -111,6 +122,9 @@ func (s *Syncer) askUID() uint64 { return s.cfg.BaseUID + 1 }
 func (s *Syncer) Run(ctx context.Context) {
 	t := time.NewTicker(s.cfg.Interval)
 	defer t.Stop()
+	// K线同步单独一个goroutine：每轮要拉币安六个周期再逐个推给contract-api，耗时不能拖慢盘口同步
+	klinesDone := make(chan struct{})
+	go func() { defer close(klinesDone); s.runKlines(ctx) }()
 	s.Step(ctx)
 	for {
 		select {
@@ -118,12 +132,86 @@ func (s *Syncer) Run(ctx context.Context) {
 			cctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 			defer cancel()
 			s.CancelAll(cctx)
+			<-klinesDone
 			return
 		case <-t.C:
 			s.Step(ctx)
 		}
 	}
 }
+
+// 定时同步K线，直到ctx结束
+func (s *Syncer) runKlines(ctx context.Context) {
+	if s.cfg.KlineEvery <= 0 {
+		return
+	}
+	t := time.NewTicker(s.cfg.KlineEvery)
+	defer t.Stop()
+	s.SyncKlines(ctx)
+	for {
+		select {
+		case <-ctx.Done():
+			return
+		case <-t.C:
+			s.SyncKlines(ctx)
+		}
+	}
+}
+
+// 同步一轮K线：每个合约、每个周期把币安最近的几根推给contract-api。第一次同步补KlineBackfill根历史；
+// 之后每次只拉"距离上次成功同步过去了多少根、再多2根"(至少3根，最多KlineBackfill根)，这样币安或我们的api
+// 中间断了一阵，恢复后会自动把断的那段补上，不用重启
+func (s *Syncer) SyncKlines(ctx context.Context) {
+	for _, sym := range s.cfg.Symbols {
+		st := s.states[sym]
+		for _, interval := range model.AllKlineIntervals {
+			if err := s.syncKline(ctx, sym, interval, st); err != nil {
+				s.warn(&st.lastKlineWarn, "[WARN] 同步币安K线失败, symbol=%s interval=%s: %v", sym, interval, err)
+			}
+		}
+	}
+}
+
+func (s *Syncer) syncKline(ctx context.Context, sym string, interval model.KlineInterval, st *symState) error {
+	limit := s.cfg.KlineBackfill
+	if last, ok := st.klineSynced[interval]; ok {
+		step := model.KlineIntervalMillis[interval]
+		missed := int(s.now().Sub(last).Milliseconds()/step) + 3
+		limit = min(max(missed, 3), s.cfg.KlineBackfill)
+	}
+	if limit <= 0 {
+		return nil // KlineBackfill配成0：不同步
+	}
+	candles, err := s.bn.Klines(ctx, sym, string(interval), limit)
+	if err != nil {
+		return err
+	}
+	if len(candles) == 0 {
+		return nil
+	}
+	rows := make([]map[string]any, len(candles))
+	for i, c := range candles {
+		rows[i] = map[string]any{"openTime": c.OpenTime, "open": c.Open.String(), "high": c.High.String(), "low": c.Low.String(),
+			"close": c.Close.String(), "volume": c.Volume.String(), "tradeCount": c.Trades}
+	}
+	// 分批推：一次请求的体积有上限(64KB)，补几百根历史时一批推不完。从旧到新，中途失败的话已经推过的不用回滚
+	// (整根覆盖，重推结果不变)，klineSynced不更新，下一轮重新补
+	for start := 0; start < len(rows); start += klineChunk {
+		end := min(start+klineChunk, len(rows))
+		if _, err := s.api.call(ctx, "POST", "/kline/sync", map[string]any{"symbol": sym, "interval": string(interval), "candles": rows[start:end]}); err != nil {
+			var e *apiError
+			if errors.As(err, &e) && e.code == "kline_source_not_external" {
+				return fmt.Errorf("contract-api不接收K线同步，contract-api和contract-engine都要设置PERP_KLINE_SOURCE=external: %w", err)
+			}
+			return err
+		}
+	}
+	st.klineSynced[interval] = s.now()
+	return nil
+}
+
+// 一次POST /kline/sync最多推多少根，不能超过contract-api的上限(同样受请求体大小限制)
+const klineChunk = 200
 
 // 跑一轮：账户和合约参数没准备好就先准备，然后每个合约并行同步一次
 func (s *Syncer) Step(ctx context.Context) {

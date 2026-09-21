@@ -155,3 +155,19 @@ func TestLoad_IndexJumpSettings(t *testing.T) {
 		t.Fatalf("设置的值没生效: max=%v confirm=%v", got.IndexMaxJump, got.IndexJumpConfirm)
 	}
 }
+
+// K线来源：没设是trades(用我们自己的成交生成K线)；external表示K线只来自外部行情。写错了会直接退出(log.Fatal测不了，不覆盖)
+func TestLoad_KlineSource(t *testing.T) {
+	t.Setenv("PERP_KLINE_SOURCE", "")
+	if got := Load(0).KlineSource; got != "trades" {
+		t.Fatalf("默认应该是trades, got %q", got)
+	}
+	t.Setenv("PERP_KLINE_SOURCE", "external")
+	if got := Load(0).KlineSource; got != "external" {
+		t.Fatalf("got %q", got)
+	}
+	t.Setenv("PERP_KLINE_SOURCE", "trades")
+	if got := Load(0).KlineSource; got != "trades" {
+		t.Fatalf("got %q", got)
+	}
+}

@@ -89,6 +89,68 @@ func (b *Binance) IndexPrice(ctx context.Context, symbol string) (decimal.Decima
 	return p, nil
 }
 
+// 币安的一根K线(开高低收、成交量、成交笔数都是币安全市场的，不是我们平台的)
+type Candle struct {
+	OpenTime int64 // 毫秒
+	Open     decimal.Decimal
+	High     decimal.Decimal
+	Low      decimal.Decimal
+	Close    decimal.Decimal
+	Volume   decimal.Decimal
+	Trades   int64
+}
+
+// 币安K线接口一次最多返回的根数
+const maxKlineLimit = 1500
+
+// 拉这个合约某个周期最近limit根K线，按开盘时间升序，最后一根是还没走完的当前这一根。
+// interval是币安的周期写法，跟我们的一样(1m/5m/15m/1h/4h/1d)
+func (b *Binance) Klines(ctx context.Context, symbol, interval string, limit int) ([]Candle, error) {
+	body, err := b.get(ctx, fmt.Sprintf("/fapi/v1/klines?symbol=%s&interval=%s&limit=%d", symbol, interval, limit))
+	if err != nil {
+		return nil, err
+	}
+	var rows [][]json.RawMessage
+	if err := json.Unmarshal(body, &rows); err != nil {
+		return nil, fmt.Errorf("币安K线响应不是JSON数组: %w", err)
+	}
+	out := make([]Candle, 0, len(rows))
+	for _, r := range rows {
+		c, err := parseCandle(r)
+		if err != nil {
+			return nil, err
+		}
+		out = append(out, c)
+	}
+	return out, nil
+}
+
+// 币安的一行K线是数组：[开盘时间, 开, 高, 低, 收, 成交量, 收盘时间, 成交额, 成交笔数, ...]，价格和数量是字符串
+func parseCandle(r []json.RawMessage) (Candle, error) {
+	if len(r) < 9 {
+		return Candle{}, fmt.Errorf("币安返回的K线格式不对(只有%d列)", len(r))
+	}
+	var c Candle
+	if err := json.Unmarshal(r[0], &c.OpenTime); err != nil || c.OpenTime <= 0 {
+		return Candle{}, fmt.Errorf("币安返回的K线开盘时间不合法: %s", r[0])
+	}
+	for i, dst := range []*decimal.Decimal{&c.Open, &c.High, &c.Low, &c.Close, &c.Volume} {
+		var s string
+		if err := json.Unmarshal(r[i+1], &s); err != nil {
+			return Candle{}, fmt.Errorf("币安返回的K线数值不是字符串: %s", r[i+1])
+		}
+		d, err := decimal.NewFromString(s)
+		if err != nil {
+			return Candle{}, fmt.Errorf("币安返回的K线数值不合法: %q", s)
+		}
+		*dst = d
+	}
+	if err := json.Unmarshal(r[8], &c.Trades); err != nil {
+		return Candle{}, fmt.Errorf("币安返回的K线成交笔数不合法: %s", r[8])
+	}
+	return c, nil
+}
+
 func (b *Binance) get(ctx context.Context, path string) ([]byte, error) {
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, b.BaseURL+path, nil)
 	if err != nil {

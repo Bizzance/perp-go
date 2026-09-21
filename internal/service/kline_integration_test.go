@@ -222,3 +222,24 @@ func TestKline_FillUpdatesKlinesThroughEngine(t *testing.T) {
 		mustKline(t, k, "65000", "65000", "65000", "65000", "0.1", 1)
 	}
 }
+
+// K线来源是外部行情时，我们自己的成交不再更新K线：RecordTrade什么都不写、返回nil(没有可推送的数据)，
+// 不然同一根K线会被我们的成交价和外部数据混在一起
+func TestKline_ExternalSourceIgnoresOwnTrades(t *testing.T) {
+	ks, r := newKlineSvc(t)
+	ks.WithExternalSource(true)
+	if rows := ks.RecordTrade(context.Background(), "BTCUSDT", decimal.RequireFromString("100"), decimal.RequireFromString("1"), klineT0); rows != nil {
+		t.Fatalf("外部来源时RecordTrade应该返回nil, got %v", rows)
+	}
+	for _, iv := range model.AllKlineIntervals {
+		got, err := r.FindRecent(context.Background(), "BTCUSDT", iv, 10)
+		if err != nil || len(got) != 0 {
+			t.Fatalf("%s: 外部来源时不该有我们自己成交生成的K线: %v %v", iv, got, err)
+		}
+	}
+	// 切回trades又能写(默认行为不变)
+	ks.WithExternalSource(false)
+	if rows := ks.RecordTrade(context.Background(), "BTCUSDT", decimal.RequireFromString("100"), decimal.RequireFromString("1"), klineT0); len(rows) != len(model.AllKlineIntervals) {
+		t.Fatalf("trades来源应该照常写六个周期, got %d", len(rows))
+	}
+}

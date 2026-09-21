@@ -14,10 +14,19 @@ import (
 // 挂在EngineService.settleOneFill后面，跟成交结算走同一个调用路径，见docs/kline.md
 type KlineService struct {
 	klines *repo.KlineRepo
+	// K线的来源是外部行情(币安)：成交不再更新K线。两边都写的话，同一根K线会被我们的成交价和外部数据混在一起，
+	// 成交量还会先加后被覆盖回去
+	external bool
 }
 
 func NewKlineService(klines *repo.KlineRepo) *KlineService {
 	return &KlineService{klines: klines}
+}
+
+// external=true时RecordTrade什么都不做，K线只靠POST /kline/sync写入，见docs/kline.md
+func (s *KlineService) WithExternalSource(external bool) *KlineService {
+	s.external = external
+	return s
 }
 
 // 用一笔成交更新这个symbol全部周期(1m/5m/15m/1h/4h/1d)各自对应的那一根K线，
@@ -27,6 +36,9 @@ func NewKlineService(klines *repo.KlineRepo) *KlineService {
 // 返回值是写入后的最新六根K线(WS推送要用，一次FindByBuckets查完，不是再逐个周期查一次)，
 // UPSERT失败时返回nil，调用方要按"没有可推送的数据"处理，不能当空切片
 func (s *KlineService) RecordTrade(ctx context.Context, symbol string, price, volume decimal.Decimal, tradeTime int64) []model.Kline {
+	if s.external {
+		return nil
+	}
 	buckets := make([]repo.KlineBucket, len(model.AllKlineIntervals))
 	for i, interval := range model.AllKlineIntervals {
 		bucketMillis := model.KlineIntervalMillis[interval]

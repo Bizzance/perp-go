@@ -92,7 +92,10 @@ func main() {
 	settlementSvc := service.NewSettlementService(accountSvc, positionRepo, coinRepo, txRepo)
 	fundSvc := service.NewInsuranceFundService(fundRepo)
 	fundingSvc := service.NewFundingService(rdb, coinRepo, positionRepo, fundingRepo, accountSvc, txRepo, markPriceSvc)
-	klineSvc := service.NewKlineService(klineRepo)
+	klineSvc := service.NewKlineService(klineRepo).WithExternalSource(cfg.KlineSource == "external")
+	if cfg.KlineSource == "external" {
+		log.Printf("K线来源是外部行情(PERP_KLINE_SOURCE=external)：我们自己的成交不再更新K线，见docs/kline.md")
+	}
 	pushSvc := service.NewPushService(rdb, accountSvc, positionSvc, orderRepo)
 	lockSvc := service.NewLockService(rdb)
 

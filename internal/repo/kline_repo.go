@@ -75,6 +75,44 @@ func (r *KlineRepo) FindByBuckets(ctx context.Context, symbol string, buckets []
 	return rows, err
 }
 
+// 用外部行情的K线整根覆盖：存在就把开高低收、成交量、成交笔数都换成这一批的值(不是跟已有的合并)，不存在就新建。
+// 跟UpsertBatch的区别：那个是"一笔成交并进这根K线"(最高取GREATEST、成交量累加)，这个是"这根K线就是这样"，
+// 重复执行结果不变(幂等)。candles都是同一个symbol、同一个interval
+func (r *KlineRepo) ReplaceBatch(ctx context.Context, symbol string, interval model.KlineInterval, candles []model.Kline, updateTime int64) error {
+	if len(candles) == 0 {
+		return nil
+	}
+	var sb strings.Builder
+	sb.WriteString("INSERT INTO klines (symbol, `interval`, open_time, open, high, low, close, volume, trade_count, update_time) VALUES ")
+	args := make([]any, 0, len(candles)*10)
+	for i, k := range candles {
+		if i > 0 {
+			sb.WriteString(",")
+		}
+		sb.WriteString("(?, ?, ?, ?, ?, ?, ?, ?, ?, ?)")
+		args = append(args, symbol, interval, k.OpenTime, k.Open, k.High, k.Low, k.Close, k.Volume, k.TradeCount, updateTime)
+	}
+	sb.WriteString(" ON DUPLICATE KEY UPDATE " +
+		"open = VALUES(open), high = VALUES(high), low = VALUES(low), close = VALUES(close), " +
+		"volume = VALUES(volume), trade_count = VALUES(trade_count), update_time = VALUES(update_time)")
+	_, err := r.db.ExecContext(ctx, sb.String(), args...)
+	return err
+}
+
+// 这个symbol、这个周期里指定开盘时间的那几根K线(没有的不返回)，POST /kline/sync用它判断哪些K线真的变了
+func (r *KlineRepo) FindByOpenTimes(ctx context.Context, symbol string, interval model.KlineInterval, openTimes []int64) ([]model.Kline, error) {
+	if len(openTimes) == 0 {
+		return nil, nil
+	}
+	query, args, err := sqlx.In("SELECT * FROM klines WHERE symbol = ? AND `interval` = ? AND open_time IN (?)", symbol, interval, openTimes)
+	if err != nil {
+		return nil, err
+	}
+	var rows []model.Kline
+	err = r.db.SelectContext(ctx, &rows, query, args...)
+	return rows, err
+}
+
 // 最近limit根K线，按开盘时间升序返回(从旧到新，画图/回放的常见习惯)
 func (r *KlineRepo) FindRecent(ctx context.Context, symbol string, interval model.KlineInterval, limit int) ([]model.Kline, error) {
 	var rows []model.Kline
