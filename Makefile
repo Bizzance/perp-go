@@ -87,6 +87,9 @@ compose-test-up:
 
 # 连数据卷一起删掉，下次up会重新初始化数据库
 compose-test-down:
+	$(COMPOSE_TEST) down
+
+compose-test-down-v:
 	$(COMPOSE_TEST) down -v
 
 # 生产环境：只起两个应用服务，依赖走托管服务，需要先 cp deploy/.env.prod.example deploy/.env 并填好
