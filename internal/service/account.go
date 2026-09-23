@@ -12,17 +12,16 @@ import (
 	"perp-go/internal/repo"
 )
 
-var ErrInsufficientMargin = errors.New("可用余额不足，无法冻结保证金")
-
-// 账户不存在。合作方必须先调创建账户接口，其它接口不会替他们悄悄建——否则uid手误写错的
-// 充值会成功地充给一个没人认领的账户
-var ErrAccountNotFound = repo.ErrAccountNotFound
-
 var (
-	// ErrInsufficientBalance 合作方扣减账户余额(POST /account/balance负数)时available不够
+	ErrInsufficientMargin = errors.New("可用余额不足，无法冻结保证金")
+	// 账户不存在。合作方必须先调创建账户接口，其它接口不会替他们悄悄建
+	ErrAccountNotFound = repo.ErrAccountNotFound
+	// 合作方扣减账户余额(POST /account/balance负数)时available不够
 	ErrInsufficientBalance = repo.ErrInsufficientBalance
-	// ErrIdempotencyConflict 同一个requestId已经用于一笔参数不同的请求
+	// 同一个requestId已经用于一笔参数不同的请求
 	ErrIdempotencyConflict = repo.ErrIdempotencyConflict
+	// 账户本轮没有投保(is_insured=false)，不能发放信用额度——信用额度就是投保后的赔付，没投保就不该有这笔钱
+	ErrAccountNotInsured = errors.New("账户本轮没有投保，不能发放信用额度")
 )
 
 type AccountService struct {
@@ -32,7 +31,11 @@ type AccountService struct {
 }
 
 func NewAccountService(accounts *repo.AccountRepo, positions *PositionService, tx *repo.TxRepo) *AccountService {
-	return &AccountService{accounts: accounts, positions: positions, tx: tx}
+	return &AccountService{
+		accounts:  accounts,
+		positions: positions,
+		tx:        tx,
+	}
 }
 
 // 设置账户状态(冻结/解冻)，返回变更前的状态和这次有没有真的变化，幂等：已经是目标状态就不改
@@ -92,7 +95,11 @@ func (s *AccountService) AdjustBalance(ctx context.Context, uid uint64, amount d
 		kind = repo.FundOpWithdraw
 	}
 	return s.accounts.ApplyFundOp(ctx, repo.FundOp{
-		AccountID: acc.ID, UID: uid, Kind: kind, Amount: amount.Abs(), TxType: model.TxDeposit,
+		AccountID:   acc.ID,
+		UID:         uid,
+		Kind:        kind,
+		Amount:      amount.Abs(),
+		TxType:      model.TxDeposit,
 		RequestID:   requestID,
 		RequestHash: RequestFingerprint("balance", strconv.FormatUint(uid, 10), amount.String()),
 		Now:         time.Now().UnixMilli(),
@@ -288,8 +295,7 @@ func (s *AccountService) FindFreshCredit(ctx context.Context, uid uint64) (decim
 	return s.accounts.FindFreshCredit(ctx, account.ID)
 }
 
-// 合作方发放/追加信用额度(用户买保险后的赔付)，同一轮内可以多次调用、直接累加。requestId的
-// 语义同AdjustBalance——发额度是累加操作，重试不带幂等键会让信用额度翻倍
+// 合作方发放/追加信用额度(用户买保险后的赔付)，同一轮内可以多次调用、直接累加。
 func (s *AccountService) GrantCredit(ctx context.Context, uid uint64, amount decimal.Decimal, requestID string) (replayed bool, err error) {
 	if amount.Sign() <= 0 {
 		return false, errors.New("发放金额必须大于0")
@@ -301,8 +307,15 @@ func (s *AccountService) GrantCredit(ctx context.Context, uid uint64, amount dec
 	if account == nil {
 		return false, ErrAccountNotFound
 	}
+	if !account.IsInsured {
+		return false, ErrAccountNotInsured
+	}
 	return s.accounts.ApplyFundOp(ctx, repo.FundOp{
-		AccountID: account.ID, UID: uid, Kind: repo.FundOpGrantCredit, Amount: amount, TxType: model.TxCreditGrant,
+		AccountID:   account.ID,
+		UID:         uid,
+		Kind:        repo.FundOpGrantCredit,
+		Amount:      amount,
+		TxType:      model.TxCreditGrant,
 		RequestID:   requestID,
 		RequestHash: RequestFingerprint("credit", strconv.FormatUint(uid, 10), amount.String()),
 		Now:         time.Now().UnixMilli(),
@@ -361,17 +374,17 @@ func Equity(acc *model.Account, positionMargin, totalUnrealized decimal.Decimal)
 
 // 查询接口用：账户原始字段+现算的未实现盈亏/权益
 type AccountView struct {
-	UID                uint64          `json:"uid"`
-	IsInsured          bool            `json:"isInsured"`
-	Status             string          `json:"status"`
-	Round              uint64          `json:"round"`
-	Credit             decimal.Decimal `json:"credit"`
-	Available          decimal.Decimal `json:"available"`
-	FrozenMargin       decimal.Decimal `json:"frozenMargin"`
-	FrozenCredit       decimal.Decimal `json:"frozenCredit"`
-	PositionMargin     decimal.Decimal `json:"positionMargin"` // 全部持仓占用的保证金之和
-	TotalUnrealizedPnl decimal.Decimal `json:"totalUnrealizedPnl"`
-	Equity             decimal.Decimal `json:"equity"`
+	UID                uint64          `json:"uid"`                // uid
+	IsInsured          bool            `json:"isInsured"`          // 是否投保
+	Status             string          `json:"status"`             // 账户状态
+	Round              uint64          `json:"round"`              // 轮数
+	Credit             decimal.Decimal `json:"credit"`             // 信用额度
+	Available          decimal.Decimal `json:"available"`          // 可以余额
+	FrozenMargin       decimal.Decimal `json:"frozenMargin"`       // 冻结保证金
+	FrozenCredit       decimal.Decimal `json:"frozenCredit"`       // 冻结信用额度
+	PositionMargin     decimal.Decimal `json:"positionMargin"`     // 全部持仓占用的保证金之和
+	TotalUnrealizedPnl decimal.Decimal `json:"totalUnrealizedPnl"` // 未实现盈亏
+	Equity             decimal.Decimal `json:"equity"`             // 权益
 }
 
 func (s *AccountService) View(ctx context.Context, uid uint64) (*AccountView, error) {

@@ -72,7 +72,7 @@ func NewAuth(disabled bool, keys []config.APIKey, nonces NonceStore) *Auth {
 		a.keys[k.ID] = authKey{secret: []byte(k.Secret), scopes: sc}
 	}
 	if disabled {
-		log.Printf("[WARN] 接口鉴权已关闭(PERP_AUTH_DISABLED=true)，任何人都能调用全部接口，只能用于本地开发，绝对不能用在生产")
+		log.Printf("[WARN] API authentication is disabled (PERP_AUTH_DISABLED=true), anyone can call any endpoint; local development only, never use in production")
 	}
 	return a
 }
@@ -106,7 +106,7 @@ func (a *Auth) Middleware() gin.HandlerFunc {
 		}
 		// 请求体声明的长度超限直接拒绝，连读都不读。这个判断跟密钥无关，不会泄露密钥是否存在
 		if c.Request.ContentLength > maxAuthBodyBytes {
-			authFail(c, 400, ErrInvalidParam, "请求体太大")
+			authFail(c, 400, ErrInvalidParam, "request body too large")
 			return
 		}
 		keyID := c.GetHeader("X-Api-Key")
@@ -114,23 +114,23 @@ func (a *Auth) Middleware() gin.HandlerFunc {
 		nonce := c.GetHeader("X-Nonce")
 		sig := c.GetHeader("X-Signature")
 		if keyID == "" || tsStr == "" || nonce == "" || sig == "" || !nonceRegexp.MatchString(nonce) {
-			authFail(c, 401, ErrAuthMissing, "缺少鉴权请求头(X-Api-Key/X-Timestamp/X-Nonce/X-Signature)或格式不对")
+			authFail(c, 401, ErrAuthMissing, "missing auth headers (X-Api-Key/X-Timestamp/X-Nonce/X-Signature) or invalid format")
 			return
 		}
 		ts, err := strconv.ParseInt(tsStr, 10, 64)
 		if err != nil {
-			authFail(c, 401, ErrAuthMissing, "X-Timestamp必须是毫秒时间戳")
+			authFail(c, 401, ErrAuthMissing, "X-Timestamp must be a millisecond timestamp")
 			return
 		}
 		skew := a.now().Sub(time.UnixMilli(ts))
 		if skew > authWindow || skew < -authWindow {
-			authFail(c, 401, ErrAuthExpired, "时间戳不在允许的时间窗内(前后30秒)，请检查服务器时钟是否同步")
+			authFail(c, 401, ErrAuthExpired, "timestamp is outside the allowed window (\u00b130s), check whether the server clock is in sync")
 			return
 		}
 
 		body, err := readBody(c)
 		if err != nil {
-			authFail(c, 400, ErrInvalidParam, "请求体太大或读取失败")
+			authFail(c, 400, ErrInvalidParam, "request body too large or failed to read")
 			return
 		}
 
@@ -143,7 +143,7 @@ func (a *Auth) Middleware() gin.HandlerFunc {
 		}
 		expected := SignRequest(string(secret), tsStr, nonce, c.Request.Method, c.Request.URL.EscapedPath(), c.Request.URL.RawQuery, body)
 		if !hmac.Equal([]byte(expected), []byte(strings.ToLower(sig))) || !known {
-			authFail(c, 401, ErrAuthInvalidSignature, "签名不正确")
+			authFail(c, 401, ErrAuthInvalidSignature, "invalid signature")
 			return
 		}
 
@@ -151,24 +151,24 @@ func (a *Auth) Middleware() gin.HandlerFunc {
 		fresh, err := a.nonces.ClaimNonce(c.Request.Context(), "perpgo:auth:nonce:"+keyID+":"+nonce, 2*authWindow+5*time.Second)
 		if err != nil {
 			// 存储不可用时拒绝请求(失败关闭)，不能因为防重放存储挂了就放行
-			log.Printf("[ERROR] 鉴权记录nonce失败: %v", err)
-			authFail(c, 500, ErrInternal, "鉴权服务暂时不可用")
+			log.Printf("[ERROR] failed to record nonce: %v", err)
+			authFail(c, 500, ErrInternal, "auth service temporarily unavailable")
 			return
 		}
 		if !fresh {
-			authFail(c, 401, ErrAuthReplayed, "nonce已经使用过，每个请求必须使用新的nonce")
+			authFail(c, 401, ErrAuthReplayed, "nonce has already been used, every request must use a new nonce")
 			return
 		}
 		// 权限检查：路由必须声明过权限范围(默认拒绝)，并且这把密钥带这个范围
 		scope, declared := a.routeScopes[c.Request.Method+" "+c.FullPath()]
 		if !declared {
-			log.Printf("[ERROR] 路由 %s %s 没有声明权限范围，默认拒绝(新增接口要用Auth.Route注册)", c.Request.Method, c.FullPath())
-			authFail(c, 403, ErrForbidden, "该接口没有声明权限范围，默认拒绝")
+			log.Printf("[ERROR] route %s %s has no declared scope, denying by default (new endpoints must be registered via Auth.Route)", c.Request.Method, c.FullPath())
+			authFail(c, 403, ErrForbidden, "this endpoint has no declared scope, denying by default")
 			return
 		}
 		if !key.scopes[scope] {
-			log.Printf("[WARN] 密钥%s没有%s权限，拒绝 %s %s", keyID, scope, c.Request.Method, c.FullPath())
-			authFail(c, 403, ErrForbidden, "这把密钥没有调用该接口的权限")
+			log.Printf("[WARN] key %s lacks %s scope, denying %s %s", keyID, scope, c.Request.Method, c.FullPath())
+			authFail(c, 403, ErrForbidden, "this key does not have permission to call this endpoint")
 			return
 		}
 		c.Set(ctxAPIKeyID, keyID)

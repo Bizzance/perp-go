@@ -36,21 +36,21 @@ func TestMarginAmount_ConvertsToAmountByLeverageAndPrice(t *testing.T) {
 	data(t, order("m1", "limit", map[string]any{"price": "65000.0", "marginAmount": "650"}))
 	// 市价单：用标记价65000换算，同样是0.1
 	data(t, order("m2", "market", map[string]any{"marginAmount": "650"}))
-	// 两个都传：优先用marginAmount(amount=5被忽略)
-	data(t, order("m3", "limit", map[string]any{"price": "65000.0", "marginAmount": "650", "amount": "5"}))
+	// 两个都传：拒绝，不允许有歧义
+	requireErr(t, order("m3", "limit", map[string]any{"price": "65000.0", "marginAmount": "650", "amount": "5"}), 400, ErrInvalidParam)
 	// 向下取到数量精度(BTC是3位)：100 × 3 ÷ 65000.0 = 0.004615...，向下取成0.004
 	resp := e.post(t, "/order/add", map[string]any{"uid": uid, "symbol": testSymbol, "side": "long", "action": "open", "type": "limit",
 		"leverage": 3, "requestId": "m4", "price": "65000.0", "marginAmount": "100"})
 	data(t, resp)
 
 	got := e.currentAmounts(t, uid)
-	want := map[string]int{"0.1": 2, "0.004": 1} // 市价单立刻按盘口成交(测试里订单簿是空的，剩余撤销)，不在当前委托里
+	want := map[string]int{"0.1": 1, "0.004": 1} // 市价单立刻按盘口成交(测试里订单簿是空的，剩余撤销)，不在当前委托里
 	count := map[string]int{}
 	for _, a := range got {
 		count[a]++
 	}
-	if count["0.1"] < 2 || count["0.004"] != want["0.004"] {
-		t.Fatalf("当前委托的数量 = %v, want 至少两笔0.1(限价单和两个都传的那笔)和一笔0.004", got)
+	if count["0.1"] < 1 || count["0.004"] != want["0.004"] {
+		t.Fatalf("当前委托的数量 = %v, want 至少一笔0.1和一笔0.004", got)
 	}
 
 	// 保证金太小，换算出来数量是0：拒绝
@@ -61,4 +61,14 @@ func TestMarginAmount_ConvertsToAmountByLeverageAndPrice(t *testing.T) {
 	requireErr(t, order("m7", "limit", map[string]any{"price": "65000.0", "marginAmount": "0"}), 400, ErrInvalidParam)
 	// 换算出来的数量同样要符合最小量：保证金1 × 杠杆10 ÷ 65000.0 = 0.000153 -> 0.000，不足
 	requireErr(t, order("m8", "limit", map[string]any{"price": "65000.0", "marginAmount": "1"}), 400, ErrInvalidParam)
+}
+
+// 条件单创建接口跟/order/add共用同一套marginAmount/amount二选一校验，这里锁定"两个都传拒绝"这一条
+// (换算逻辑本身已经被上面那组测试覆盖，不重复验证)
+func TestMarginAmount_ConditionalOrderRejectsBothProvided(t *testing.T) {
+	e := newAPIEnv(t) // 标记价65000
+	uid := e.newAccount(t, 1, "100000")
+	requireErr(t, e.post(t, "/order/conditional/add", map[string]any{"uid": uid, "symbol": testSymbol, "side": "long",
+		"action": "open", "triggerPrice": "60000", "triggerDirection": "lte", "type": "limit", "price": "60000",
+		"leverage": 10, "marginAmount": "650", "amount": "5", "requestId": "co1"}), 400, ErrInvalidParam)
 }

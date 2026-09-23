@@ -40,8 +40,7 @@ const (
 	OrderStatusRejected        OrderStatus = "rejected"
 )
 
-// ActiveOrderStatuses 撮合引擎还需要继续处理的状态——扫描定时任务/撤单校验都用这个判断
-// "这笔委托还活着吗"
+// 撮合引擎还需要继续处理的状态——扫描定时任务/撤单校验都用这个判断"这笔委托还活着吗"
 var ActiveOrderStatuses = map[OrderStatus]bool{
 	OrderStatusOpen:            true,
 	OrderStatusPartiallyFilled: true,
@@ -120,20 +119,19 @@ type Account struct {
 }
 
 type Coin struct {
-	Symbol               string          `db:"symbol" json:"symbol"`
-	BaseCoinScale        int32           `db:"base_coin_scale" json:"baseCoinScale"`
-	PriceScale           int32           `db:"price_scale" json:"priceScale"`
-	Enable               bool            `db:"enable" json:"enable"`
-	MakerFee             decimal.Decimal `db:"maker_fee" json:"makerFee"`
-	TakerFee             decimal.Decimal `db:"taker_fee" json:"takerFee"`
-	PriceTick            decimal.Decimal `db:"price_tick" json:"priceTick"`
-	VolumeStep           decimal.Decimal `db:"volume_step" json:"volumeStep"`
-	MinVolume            decimal.Decimal `db:"min_volume" json:"minVolume"`
-	MaxVolume            decimal.Decimal `db:"max_volume" json:"maxVolume"`
-	FundingIntervalHours int32           `db:"funding_interval_hours" json:"fundingIntervalHours"`
-	FundingRateCap       decimal.Decimal `db:"funding_rate_cap" json:"fundingRateCap"`
-	// 资金费率溢价用的冲击名义金额(USDT)，见FundingService.SampleOnce。0=不采样，跟别的"0=不限制"字段不同
-	FundingImpactNotional decimal.Decimal `db:"funding_impact_notional" json:"fundingImpactNotional"`
+	Symbol                string          `db:"symbol" json:"symbol"`
+	BaseCoinScale         int32           `db:"base_coin_scale" json:"baseCoinScale"`
+	PriceScale            int32           `db:"price_scale" json:"priceScale"`
+	Enable                bool            `db:"enable" json:"enable"`
+	MakerFee              decimal.Decimal `db:"maker_fee" json:"makerFee"`
+	TakerFee              decimal.Decimal `db:"taker_fee" json:"takerFee"`
+	PriceTick             decimal.Decimal `db:"price_tick" json:"priceTick"`
+	VolumeStep            decimal.Decimal `db:"volume_step" json:"volumeStep"`
+	MinVolume             decimal.Decimal `db:"min_volume" json:"minVolume"`
+	MaxVolume             decimal.Decimal `db:"max_volume" json:"maxVolume"`
+	FundingIntervalHours  int32           `db:"funding_interval_hours" json:"fundingIntervalHours"`
+	FundingRateCap        decimal.Decimal `db:"funding_rate_cap" json:"fundingRateCap"`
+	FundingImpactNotional decimal.Decimal `db:"funding_impact_notional" json:"fundingImpactNotional"` // 资金费率溢价用的冲击名义金额(USDT)，见FundingService.SampleOnce。0=不采样，跟别的"0=不限制"字段不同
 	PriceProtectionRatio  decimal.Decimal `db:"price_protection_ratio" json:"priceProtectionRatio"`
 }
 
@@ -171,14 +169,8 @@ type Order struct {
 	Status       OrderStatus     `db:"status" json:"status"` // open/filled/partially_filled/canceled/rejected
 	CreateTime   int64           `db:"create_time" json:"createTime"`
 	UpdateTime   int64           `db:"update_time" json:"updateTime"`
-	// RequestID 合作方自己给这笔委托指定的幂等键(同一uid内唯一)，没传就是nil/NULL——用
-	// 指针而不是空字符串，是为了让数据库的(uid, request_id)唯一索引对没传的委托不生效
-	// (MySQL唯一索引允许多个NULL)。条件单触发后落到orders表的那笔委托不继承这个值，见
-	// docs/conditional-orders.md
-	RequestID *string `db:"request_id" json:"requestId,omitempty"`
-	// RequestHash 请求参数摘要，同一个requestId再次提交时用来判断参数是否跟第一次一致，
-	// 不对外暴露
-	RequestHash *string `db:"request_hash" json:"-"`
+	RequestID    *string         `db:"request_id" json:"requestId,omitempty"` // RequestID 合作方自己给这笔委托指定的幂等键(同一uid内唯一)，没传就是nil/NULL
+	RequestHash  *string         `db:"request_hash" json:"-"`                 // RequestHash 请求参数摘要，同一个requestId再次提交时用来判断参数是否跟第一次一致，不对外暴露
 }
 
 func (o *Order) RemainingAmount() decimal.Decimal {

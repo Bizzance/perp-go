@@ -205,14 +205,14 @@ func TestFundOpAndCloseRoundResultJSON(t *testing.T) {
 	if string(b) != `{"requestId":"r1","duplicate":true}` {
 		t.Errorf("got %s", b)
 	}
-	b, _ = json.Marshal(closeRoundResult{Round: 0, Status: "submitted"})
-	if string(b) != `{"round":0,"status":"submitted"}` {
-		t.Errorf("第一轮的round=0也必须序列化出来, got %s", b)
+	b, _ = json.Marshal(closeRoundResult{Round: 1, Status: "submitted"})
+	if string(b) != `{"round":1,"status":"submitted"}` {
+		t.Errorf("round字段必须序列化出来, got %s", b)
 	}
 }
 
 func TestCreateAccountResultJSON_FlattensAccountViewAndCreatedFlag(t *testing.T) {
-	view := &service.AccountView{UID: 10001, Round: 0}
+	view := &service.AccountView{UID: 10001, Round: 1}
 	b, _ := json.Marshal(createAccountResult{AccountView: view, Created: true})
 	var m map[string]any
 	if err := json.Unmarshal(b, &m); err != nil {

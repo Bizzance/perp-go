@@ -39,7 +39,7 @@ func (s *Server) syncKlines(c *gin.Context) {
 		return
 	}
 	if !s.klineExternal {
-		failC(c, 400, ErrKlineSourceNotExternal, "K线来源不是外部行情，这个接口不可用(需要设置PERP_KLINE_SOURCE=external)")
+		failC(c, 400, ErrKlineSourceNotExternal, "kline source is not external, this endpoint is unavailable (set PERP_KLINE_SOURCE=external)")
 		return
 	}
 	ctx := c.Request.Context()
@@ -49,15 +49,15 @@ func (s *Server) syncKlines(c *gin.Context) {
 		return
 	}
 	if coin == nil || !coin.Enable {
-		failC(c, 400, ErrSymbolNotFound, "合约不存在或已下架")
+		failC(c, 400, ErrSymbolNotFound, "contract does not exist or is disabled")
 		return
 	}
 	if !validKlineIntervals[req.Interval] {
-		fail(c, 400, "interval参数不合法")
+		fail(c, 400, "interval is invalid")
 		return
 	}
 	if len(req.Candles) == 0 || len(req.Candles) > maxKlineSyncBatch {
-		fail(c, 400, fmt.Sprintf("candles的数量必须在1到%d之间", maxKlineSyncBatch))
+		fail(c, 400, fmt.Sprintf("candles must contain between 1 and %d items", maxKlineSyncBatch))
 		return
 	}
 	candles, msg := validateKlineCandles(req.Symbol, req.Interval, req.Candles, time.Now().UnixMilli())
@@ -111,22 +111,22 @@ func validateKlineCandles(symbol string, interval model.KlineInterval, in []sync
 	out := make([]model.Kline, 0, len(in))
 	var prev int64 = -1
 	for i, k := range in {
-		bad := func(why string) ([]model.Kline, string) { return nil, fmt.Sprintf("candles[%d]%s", i, why) }
+		bad := func(why string) ([]model.Kline, string) { return nil, fmt.Sprintf("candles[%d]: %s", i, why) }
 		switch {
 		case k.OpenTime <= 0 || k.OpenTime%step != 0:
-			return bad("的openTime必须是这个周期的整点开盘时间(毫秒时间戳)")
+			return bad("openTime must be an aligned open time (ms) for this interval")
 		case k.OpenTime <= prev:
-			return bad("的openTime必须严格递增")
+			return bad("openTime must be strictly increasing")
 		case k.OpenTime > nowMs+step:
-			return bad("的openTime在未来")
+			return bad("openTime is in the future")
 		case k.Open.Sign() <= 0 || k.High.Sign() <= 0 || k.Low.Sign() <= 0 || k.Close.Sign() <= 0:
-			return bad("的开高低收必须大于0")
+			return bad("open/high/low/close must be greater than 0")
 		case k.High.LessThan(decimal.Max(k.Open, k.Close, k.Low)):
-			return bad("的最高价低于开盘价、收盘价或最低价")
+			return bad("high is lower than open, close, or low")
 		case k.Low.GreaterThan(decimal.Min(k.Open, k.Close)):
-			return bad("的最低价高于开盘价或收盘价")
+			return bad("low is higher than open or close")
 		case k.Volume.Sign() < 0:
-			return bad("的成交量不能为负")
+			return bad("volume cannot be negative")
 		}
 		prev = k.OpenTime
 		out = append(out, model.Kline{Symbol: symbol, Interval: interval, OpenTime: k.OpenTime,

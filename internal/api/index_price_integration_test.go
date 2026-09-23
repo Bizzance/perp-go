@@ -42,7 +42,7 @@ func TestSetIndexPrice_JumpGuardResponses(t *testing.T) {
 	resp := e.post(t, "/index-price", map[string]any{"symbol": testSymbol, "price": "90000"})
 	requireErr(t, resp, 400, ErrIndexPriceJump)
 	msg, _ := resp["message"].(string)
-	if !strings.Contains(msg, "61000") || !strings.Contains(msg, "0.0秒") {
+	if !strings.Contains(msg, "61000") || !strings.Contains(msg, "0.0s") {
 		t.Fatalf("message要带上当前指数价和已持续时间: %q", msg)
 	}
 	if index() != "61000" {
@@ -52,7 +52,7 @@ func TestSetIndexPrice_JumpGuardResponses(t *testing.T) {
 	clock.Add(2999)
 	resp = e.post(t, "/index-price", map[string]any{"symbol": testSymbol, "price": "90000"})
 	requireErr(t, resp, 400, ErrIndexPriceJump)
-	if msg, _ := resp["message"].(string); !strings.Contains(msg, "3.0秒") && !strings.Contains(msg, "2.9秒") {
+	if msg, _ := resp["message"].(string); !strings.Contains(msg, "3.0s") && !strings.Contains(msg, "2.9s") {
 		t.Fatalf("已持续约3秒: %q", msg)
 	}
 

@@ -324,17 +324,17 @@ func TestE2E_05_FreezeFlowSweepsOrdersAndBlocksNewOnes(t *testing.T) {
 func TestE2E_06_RoundCloseFlowThroughKafka(t *testing.T) {
 	e := loadEnv(t)
 	uid := e.newFundedAccount(t, "1000")
-	e.post(t, "/account/credit", map[string]any{"uid": uid, "amount": 500, "requestId": reqID()}).mustOK(t, "发信用额度")
 	e.post(t, "/account/insured", map[string]any{"uid": uid, "insured": true}).mustOK(t, "设投保")
+	e.post(t, "/account/credit", map[string]any{"uid": uid, "amount": 500, "requestId": reqID()}).mustOK(t, "发信用额度")
 	if ok, d := fieldIs(t, e.accountInfo(t, uid), "credit", "500"); !ok {
 		t.Fatalf("信用额度应该是500: %s", d)
 	}
 
-	e.post(t, "/account/round/close", map[string]any{"uid": uid, "round": 0}).mustOK(t, "结束本轮")
+	e.post(t, "/account/round/close", map[string]any{"uid": uid, "round": 1}).mustOK(t, "结束本轮")
 
-	eventually(t, "round推进到1、信用额度清零", 20*time.Second, func() (bool, string) {
+	eventually(t, "round推进到2、信用额度清零", 20*time.Second, func() (bool, string) {
 		acc := e.accountInfo(t, uid)
-		if acc["round"] != float64(1) {
+		if acc["round"] != float64(2) {
 			return false, fmt.Sprintf("round=%v", acc["round"])
 		}
 		if acc["isInsured"] != false {

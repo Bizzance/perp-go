@@ -74,7 +74,7 @@ func TestCloseRound_SettlesEverything(t *testing.T) {
 	mustDec(t, e.account(t, a).FrozenMargin, "900", "挂单+条件单冻结的保证金")
 
 	e.setMark(t, testSymbol, "66000")
-	if err := e.engine.CloseRound(ctx, a, 0); err != nil {
+	if err := e.engine.CloseRound(ctx, a, 1); err != nil {
 		t.Fatalf("CloseRound: %v", err)
 	}
 
@@ -105,15 +105,15 @@ func TestCloseRound_SettlesEverything(t *testing.T) {
 	mustDec(t, final.FrozenMargin, "0", "冻结保证金")
 	mustDec(t, final.Credit, "0", "信用额度清零")
 	mustDec(t, e.ledgerSum(t, a, model.TxRoundClose), "-500", "回收信用额度的流水")
-	if round, insured := e.roundState(t, a); round != 1 || insured {
-		t.Fatalf("round应该推进到1且投保状态复位, got round=%d insured=%v", round, insured)
+	if round, insured := e.roundState(t, a); round != 2 || insured {
+		t.Fatalf("round应该推进到2且投保状态复位, got round=%d insured=%v", round, insured)
 	}
 	if n := e.progressRows(t, a); n != 0 {
 		t.Fatalf("结束本轮完成后进度记录应该清理掉, got %d行", n)
 	}
 	// 对手方不受影响
 	mustDec(t, e.position(t, b, model.SideShort).Volume, "0.1", "对手方仓位不受影响")
-	if round, _ := e.roundState(t, b); round != 0 {
+	if round, _ := e.roundState(t, b); round != 1 {
 		t.Fatal("别的账户的round不能被推进")
 	}
 }
@@ -184,20 +184,20 @@ func TestCloseRound_MissingMarkPriceBlocksFinalizeUntilRetried(t *testing.T) {
 	e.openLongAgainst(t, a, b, eth, "3000", "1", "300")
 	e.clearMark(t, eth)
 
-	if err := e.engine.CloseRound(ctx, a, 0); err != nil {
+	if err := e.engine.CloseRound(ctx, a, 1); err != nil {
 		t.Fatalf("CloseRound: %v", err)
 	}
 
 	if p := e.positionOf(t, a, eth, model.SideLong); p.Volume.Sign() <= 0 {
 		t.Fatal("缺标记价格时仓位不应该被强平")
 	}
-	if round, _ := e.roundState(t, a); round != 0 {
+	if round, _ := e.roundState(t, a); round != 1 {
 		t.Fatalf("有仓位没处理完，round不能推进, got %d", round)
 	}
 	mustDec(t, e.account(t, a).Credit, "500", "round没推进，信用额度不能清零")
 
 	e.setMark(t, eth, "3100")
-	if err := e.engine.CloseRound(ctx, a, 0); err != nil {
+	if err := e.engine.CloseRound(ctx, a, 1); err != nil {
 		t.Fatalf("补上标记价格后重试: %v", err)
 	}
 	if p := e.positionOf(t, a, eth, model.SideLong); p.Volume.Sign() != 0 {
@@ -205,7 +205,7 @@ func TestCloseRound_MissingMarkPriceBlocksFinalizeUntilRetried(t *testing.T) {
 	}
 	// 盈利(3100-3000)*1=100
 	mustDec(t, e.ledgerSum(t, a, model.TxRealizedPnl), "100", "已实现盈亏")
-	if round, insured := e.roundState(t, a); round != 1 || insured {
+	if round, insured := e.roundState(t, a); round != 2 || insured {
 		t.Fatalf("重试后应该完成: round=%d insured=%v", round, insured)
 	}
 	mustDec(t, e.account(t, a).Credit, "0", "重试完成后信用额度清零")

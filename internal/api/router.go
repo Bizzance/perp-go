@@ -100,40 +100,40 @@ func (s *Server) Router() *gin.Engine {
 	// 发信用额度、设投保、喂指数价)，其余都是trade；没声明的路由默认拒绝。/health免鉴权，
 	// 用普通的r.GET注册，由中间件内部放行
 	r.Use(s.auth.Middleware())
-	s.auth.Route(r, "POST", "/account/create", ScopeTrade, s.createAccount)
-	s.auth.Route(r, "POST", "/account/balance", ScopeOps, s.adjustBalance)
-	s.auth.Route(r, "GET", "/account/info", ScopeTrade, s.accountInfo)
-	s.auth.Route(r, "POST", "/account/credit", ScopeOps, s.grantCredit)
-	s.auth.Route(r, "POST", "/account/insured", ScopeOps, s.setInsured)
-	s.auth.Route(r, "POST", "/account/status", ScopeOps, s.setAccountStatus)
-	s.auth.Route(r, "POST", "/account/round/close", ScopeTrade, s.closeRound)
-	s.auth.Route(r, "POST", "/order/add", ScopeTrade, s.addOrder)
-	s.auth.Route(r, "POST", "/order/cancel/:orderId", ScopeTrade, s.cancelOrder)
-	s.auth.Route(r, "GET", "/order/current", ScopeTrade, s.orderCurrent)
-	s.auth.Route(r, "GET", "/order/history", ScopeTrade, s.orderHistory)
-	s.auth.Route(r, "POST", "/order/conditional/add", ScopeTrade, s.addConditionalOrder)
-	s.auth.Route(r, "POST", "/order/conditional/cancel/:orderId", ScopeTrade, s.cancelConditionalOrder)
-	s.auth.Route(r, "GET", "/order/conditional/current", ScopeTrade, s.conditionalOrderCurrent)
-	s.auth.Route(r, "GET", "/order/conditional/history", ScopeTrade, s.conditionalOrderHistory)
-	s.auth.Route(r, "GET", "/position/current", ScopeTrade, s.positionCurrent)
-	s.auth.Route(r, "POST", "/position/leverage", ScopeTrade, s.setLeverage)
-	s.auth.Route(r, "GET", "/trade/history", ScopeTrade, s.tradeHistory)
-	s.auth.Route(r, "GET", "/funding/rate", ScopeTrade, s.fundingRate)
-	s.auth.Route(r, "GET", "/funding/history", ScopeTrade, s.fundingHistory)
-	s.auth.Route(r, "GET", "/kline", ScopeTrade, s.kline)
-	s.auth.Route(r, "POST", "/kline/sync", ScopeOps, s.syncKlines)
-	s.auth.Route(r, "POST", "/index-price", ScopeOps, s.setIndexPrice)
-	s.auth.Route(r, "GET", "/ws", ScopeTrade, s.ws)
-	r.GET("/health", s.health)
-	s.auth.Route(r, "GET", "/contract/list", ScopeTrade, s.contractList)
-	s.auth.Route(r, "GET", "/contract/detail", ScopeTrade, s.contractDetail)
-	s.auth.Route(r, "GET", "/market/ticker", ScopeTrade, s.marketTicker)
-	s.auth.Route(r, "GET", "/market/trades", ScopeTrade, s.marketTrades)
-	s.auth.Route(r, "GET", "/order/detail", ScopeTrade, s.orderDetail)
-	s.auth.Route(r, "POST", "/order/cancel-all", ScopeTrade, s.cancelAllOrders)
-	s.auth.Route(r, "GET", "/order/conditional/detail", ScopeTrade, s.conditionalOrderDetail)
-	s.auth.Route(r, "GET", "/account/transactions", ScopeTrade, s.accountTransactions)
-	s.auth.Route(r, "GET", "/liquidation/history", ScopeTrade, s.liquidationHistory)
+	s.auth.Route(r, "POST", "/account/create", ScopeTrade, s.createAccount)                             // 创建账户
+	s.auth.Route(r, "POST", "/account/balance", ScopeOps, s.adjustBalance)                              // 调整余额
+	s.auth.Route(r, "GET", "/account/info", ScopeTrade, s.accountInfo)                                  // 账户信息
+	s.auth.Route(r, "POST", "/account/credit", ScopeOps, s.grantCredit)                                 // 授信
+	s.auth.Route(r, "POST", "/account/insured", ScopeOps, s.setInsured)                                 // 开启/取消保险
+	s.auth.Route(r, "POST", "/account/status", ScopeOps, s.setAccountStatus)                            // 设置账户状态
+	s.auth.Route(r, "POST", "/account/round/close", ScopeTrade, s.closeRound)                           // 结束某轮
+	s.auth.Route(r, "POST", "/order/add", ScopeTrade, s.addOrder)                                       // 下单
+	s.auth.Route(r, "POST", "/order/cancel/:orderId", ScopeTrade, s.cancelOrder)                        // 取消订单
+	s.auth.Route(r, "GET", "/order/current", ScopeTrade, s.orderCurrent)                                // 活跃订单
+	s.auth.Route(r, "GET", "/order/history", ScopeTrade, s.orderHistory)                                // 历史委托
+	s.auth.Route(r, "POST", "/order/conditional/add", ScopeTrade, s.addConditionalOrder)                // 挂条件单
+	s.auth.Route(r, "POST", "/order/conditional/cancel/:orderId", ScopeTrade, s.cancelConditionalOrder) // 取消条件单
+	s.auth.Route(r, "GET", "/order/conditional/current", ScopeTrade, s.conditionalOrderCurrent)         // 活跃条件单
+	s.auth.Route(r, "GET", "/order/conditional/history", ScopeTrade, s.conditionalOrderHistory)         // 条件单历史委托
+	s.auth.Route(r, "GET", "/position/current", ScopeTrade, s.positionCurrent)                          // 仓位
+	s.auth.Route(r, "POST", "/position/leverage", ScopeTrade, s.setLeverage)                            // 调整杠杆
+	s.auth.Route(r, "GET", "/trade/history", ScopeTrade, s.tradeHistory)                                // 成交历史
+	s.auth.Route(r, "GET", "/funding/rate", ScopeTrade, s.fundingRate)                                  // 资金费率
+	s.auth.Route(r, "GET", "/funding/history", ScopeTrade, s.fundingHistory)                            // 资金费率历史
+	s.auth.Route(r, "GET", "/kline", ScopeTrade, s.kline)                                               // k线
+	s.auth.Route(r, "POST", "/kline/sync", ScopeOps, s.syncKlines)                                      // 同步k线
+	s.auth.Route(r, "POST", "/index-price", ScopeOps, s.setIndexPrice)                                  // 喂指数价
+	s.auth.Route(r, "GET", "/ws", ScopeTrade, s.ws)                                                     // websocket
+	r.GET("/health", s.health)                                                                          // 健康检查
+	s.auth.Route(r, "GET", "/contract/list", ScopeTrade, s.contractList)                                // 合约列表
+	s.auth.Route(r, "GET", "/contract/detail", ScopeTrade, s.contractDetail)                            // 合约详情
+	s.auth.Route(r, "GET", "/market/ticker", ScopeTrade, s.marketTicker)                                // 行情摘要
+	s.auth.Route(r, "GET", "/market/trades", ScopeTrade, s.marketTrades)                                // 最新成交
+	s.auth.Route(r, "GET", "/order/detail", ScopeTrade, s.orderDetail)                                  // 订单详情
+	s.auth.Route(r, "POST", "/order/cancel-all", ScopeTrade, s.cancelAllOrders)                         // 取消所有订单
+	s.auth.Route(r, "GET", "/order/conditional/detail", ScopeTrade, s.conditionalOrderDetail)           // 条件单详情
+	s.auth.Route(r, "GET", "/account/transactions", ScopeTrade, s.accountTransactions)                  // 用户流水
+	s.auth.Route(r, "GET", "/liquidation/history", ScopeTrade, s.liquidationHistory)                    // 强平历史
 	return r
 }
 
@@ -156,7 +156,7 @@ func parsePositiveIntQuery(c *gin.Context, name string, def int) (int, string) {
 	}
 	n, err := strconv.Atoi(v)
 	if err != nil || n <= 0 {
-		return 0, name + "参数不合法"
+		return 0, name + " is invalid"
 	}
 	return n, ""
 }
@@ -166,7 +166,7 @@ func parsePositiveIntQuery(c *gin.Context, name string, def int) (int, string) {
 func parseUID(c *gin.Context) (uint64, bool) {
 	uid, err := decimal.NewFromString(c.Query("uid"))
 	if err != nil || uid.Sign() <= 0 {
-		fail(c, 400, "uid参数不合法")
+		fail(c, 400, "uid is invalid")
 		return 0, false
 	}
 	return uint64(uid.IntPart()), true
@@ -192,17 +192,16 @@ func pageParams(c *gin.Context) (limit int, before uint64, ok bool) {
 // 决定要不要continue往下走，不用每个handler自己重复"解析失败就返回400"这几行
 func bindJSON(c *gin.Context, req any) bool {
 	if err := c.ShouldBindJSON(req); err != nil {
-		fail(c, 400, "请求参数不合法")
+		fail(c, 400, "invalid request parameters")
 		return false
 	}
 	return true
 }
 
 type adjustBalanceRequest struct {
-	UID    uint64          `json:"uid" binding:"required"`
-	Amount decimal.Decimal `json:"amount"`
-	// RequestID 必填的幂等键：充值/扣款重试不带幂等键会重复入账或重复扣款
-	RequestID string `json:"requestId"`
+	UID       uint64          `json:"uid" binding:"required"`
+	Amount    decimal.Decimal `json:"amount"`
+	RequestID string          `json:"requestId"` // RequestID 必填的幂等键：充值/扣款重试不带幂等键会重复入账或重复扣款
 }
 
 // 资金类接口(充值/扣款/发额度)的返回值，duplicate=true表示这个requestId之前已经处理过、
@@ -241,7 +240,7 @@ func (s *Server) loadAccount(c *gin.Context, uid uint64) *model.Account {
 		return nil
 	}
 	if account == nil {
-		failC(c, 400, ErrAccountNotFound, "账户不存在，请先调用 POST /account/create 创建")
+		failC(c, 400, ErrAccountNotFound, "account does not exist")
 		return nil
 	}
 	return account
@@ -252,7 +251,7 @@ func rejectIfFrozen(c *gin.Context, account *model.Account) bool {
 	if account.Status != model.AccountStatusFrozen {
 		return false
 	}
-	failC(c, 400, ErrAccountFrozen, "账户已冻结，不能开仓、创建条件开仓单或修改杠杆；平仓、撤单、查询仍可用")
+	failC(c, 400, ErrAccountFrozen, "account is frozen")
 	return true
 }
 
@@ -304,7 +303,7 @@ func (s *Server) adjustBalance(c *gin.Context) {
 		return
 	}
 	if req.Amount.IsZero() {
-		fail(c, 400, "amount不能为0")
+		fail(c, 400, "amount cannot be 0")
 		return
 	}
 	replayed, err := s.accounts.AdjustBalance(c.Request.Context(), req.UID, req.Amount, requestID)
@@ -329,10 +328,9 @@ func (s *Server) accountInfo(c *gin.Context) {
 }
 
 type grantCreditRequest struct {
-	UID    uint64          `json:"uid" binding:"required"`
-	Amount decimal.Decimal `json:"amount"`
-	// RequestID 必填的幂等键：发额度是累加操作，重试不带幂等键会让信用额度翻倍
-	RequestID string `json:"requestId"`
+	UID       uint64          `json:"uid" binding:"required"`
+	Amount    decimal.Decimal `json:"amount"`
+	RequestID string          `json:"requestId"` // RequestID 必填的幂等键：发额度是累加操作，重试不带幂等键会让信用额度翻倍
 }
 
 // 合作方发放/追加信用额度(用户买保险后的赔付)，同一轮内可以多次调用、直接累加
@@ -347,7 +345,7 @@ func (s *Server) grantCredit(c *gin.Context) {
 		return
 	}
 	if req.Amount.Sign() <= 0 {
-		fail(c, 400, "amount必须大于0")
+		fail(c, 400, "amount must be greater than 0")
 		return
 	}
 	replayed, err := s.accounts.GrantCredit(c.Request.Context(), req.UID, req.Amount, requestID)
@@ -377,10 +375,8 @@ func (s *Server) setInsured(c *gin.Context) {
 }
 
 type closeRoundRequest struct {
-	UID uint64 `json:"uid" binding:"required"`
-	// Round 必填，要结束的那一轮(GET /account/info返回的round)。用指针是因为第一轮的round就是0，
-	// 要区分"没传"和"传了0"。它同时是这个接口的幂等键：结束第N轮只会生效一次
-	Round *uint64 `json:"round"`
+	UID   uint64 `json:"uid" binding:"required"`
+	Round uint64 `json:"round" binding:"required"` // Round 必填，要结束的那一轮。轮数从1开始(0不是合法值)，required能直接拦住0。它同时是这个接口的幂等键：结束第N轮只会生效一次
 }
 
 type closeRoundResult struct {
@@ -400,22 +396,18 @@ func (s *Server) closeRound(c *gin.Context) {
 	if !bindJSON(c, &req) {
 		return
 	}
-	if req.Round == nil {
-		fail(c, 400, "round必填，取值是要结束的那一轮(GET /account/info返回的round)")
-		return
-	}
-	round := *req.Round
+	round := req.Round
 	account, err := s.accounts.Find(c.Request.Context(), req.UID)
 	if err != nil {
 		fail(c, 500, err.Error())
 		return
 	}
 	if account == nil {
-		failC(c, 400, ErrAccountNotFound, "账户不存在，请先调用 POST /account/create 创建")
+		failC(c, 400, ErrAccountNotFound, "account does not exist")
 		return
 	}
 	if round > account.Round {
-		failC(c, 400, ErrRoundMismatch, "round不能大于账户当前轮数")
+		failC(c, 400, ErrRoundMismatch, "round cannot be greater than the account's current round")
 		return
 	}
 	if round < account.Round {
@@ -424,6 +416,8 @@ func (s *Server) closeRound(c *gin.Context) {
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
+	// 发送关闭事件到kafka
 	evt := events.RoundCloseEvent{UID: req.UID, Round: round}
 	if err := s.producer.Publish(ctx, events.TopicRoundClose, strconv.FormatUint(req.UID, 10), evt); err != nil {
 		fail(c, 500, err.Error())
@@ -438,10 +432,10 @@ func (s *Server) closeRound(c *gin.Context) {
 // (addConditionalOrder)共用同一套校验规则，避免两边各写一份、以后改一边漏改另一边
 func validateSideAction(side model.Side, action model.OrderAction) string {
 	if side != model.SideLong && side != model.SideShort {
-		return "side参数不合法"
+		return "side is invalid"
 	}
 	if action != model.ActionOpen && action != model.ActionClose {
-		return "action参数不合法"
+		return "action is invalid"
 	}
 	return ""
 }
@@ -453,7 +447,7 @@ func resolveOrderType(reqType model.OrderType) (model.OrderType, string) {
 		orderType = model.OrderTypeLimit
 	}
 	if orderType != model.OrderTypeLimit && orderType != model.OrderTypeMarket {
-		return "", "type参数不合法"
+		return "", "type is invalid"
 	}
 	return orderType, ""
 }
@@ -475,7 +469,7 @@ func resolveLeverage(reqLeverage *decimal.Decimal) (decimal.Decimal, string) {
 	}
 	const maxSaneLeverage = 1000
 	if leverage.Sign() <= 0 || leverage.GreaterThan(decimal.NewFromInt(maxSaneLeverage)) || !leverage.IsInteger() {
-		return decimal.Zero, "leverage参数不合法"
+		return decimal.Zero, "leverage is invalid"
 	}
 	return leverage, ""
 }
@@ -533,19 +527,17 @@ func (s *Server) existingOpenNotional(ctx context.Context, uid uint64, symbol st
 }
 
 type addOrderRequest struct {
-	UID          uint64            `json:"uid" binding:"required"`
-	Symbol       string            `json:"symbol" binding:"required"`
-	Side         model.Side        `json:"side" binding:"required"`
-	Action       model.OrderAction `json:"action" binding:"required"`
-	Type         model.OrderType   `json:"type"`
-	Leverage     *decimal.Decimal  `json:"leverage"`
-	Price        decimal.Decimal   `json:"price"`
-	MarginAmount *decimal.Decimal  `json:"marginAmount"`
-	Amount       *decimal.Decimal  `json:"amount"`
-	ReduceOnly   bool              `json:"reduceOnly"`
-	// RequestID 合作方自己生成的幂等键：同一uid下重复提交同一个值不会产生第二笔委托，
-	// 直接返回第一次那笔的orderId(duplicate=true)，用来安全地重试超时的下单请求
-	RequestID string `json:"requestId"`
+	UID          uint64            `json:"uid" binding:"required"`    // UID
+	Symbol       string            `json:"symbol" binding:"required"` // 币种
+	Side         model.Side        `json:"side" binding:"required"`   // long/short
+	Action       model.OrderAction `json:"action" binding:"required"` // open/close
+	Type         model.OrderType   `json:"type"`                      // limit/market，默认值是limit
+	Leverage     *decimal.Decimal  `json:"leverage"`                  // 默认值是1
+	Price        decimal.Decimal   `json:"price"`                     // 限价单才填，市价单不用填
+	MarginAmount *decimal.Decimal  `json:"marginAmount"`              // 与Amount是二选一的关系
+	Amount       *decimal.Decimal  `json:"amount"`                    // 与MarginAmount是二选一的关系
+	ReduceOnly   bool              `json:"reduceOnly"`                // 默认值false
+	RequestID    string            `json:"requestId"`                 // RequestID 合作方自己生成的幂等键：同一uid下重复提交同一个值不会产生第二笔委托
 }
 
 // 下单/创建条件单成功的返回值。orderId是字符串(雪花ID超过JS安全整数范围)
@@ -598,12 +590,12 @@ func (s *Server) publishOrderSubmit(o *model.Order) error {
 // 委托会直接跳过，不会二次撮合
 func (s *Server) respondDuplicateOrder(c *gin.Context, existing *model.Order, requestHash string) {
 	if idempotencyConflict(existing.RequestHash, requestHash) {
-		failC(c, 400, ErrIdempotencyConflict, "requestId已经用于一笔参数不同的请求")
+		failC(c, 400, ErrIdempotencyConflict, "requestId has already been used for a request with different parameters")
 		return
 	}
 	if existing.Status == model.OrderStatusOpen && existing.TradedAmount.IsZero() {
 		if err := s.publishOrderSubmit(existing); err != nil {
-			failC(c, 500, ErrDispatchFailed, "委托已落库但发送到撮合引擎失败: "+err.Error())
+			failC(c, 500, ErrDispatchFailed, "order was saved but failed to dispatch to the matching engine: "+err.Error())
 			return
 		}
 	}
@@ -615,7 +607,7 @@ func (s *Server) respondDuplicateOrder(c *gin.Context, existing *model.Order, re
 // 普通委托那样补发
 func (s *Server) respondDuplicateConditional(c *gin.Context, existing *model.ConditionalOrder, requestHash string) {
 	if idempotencyConflict(existing.RequestHash, requestHash) {
-		failC(c, 400, ErrIdempotencyConflict, "requestId已经用于一笔参数不同的请求")
+		failC(c, 400, ErrIdempotencyConflict, "requestId has already been used for a request with different parameters")
 		return
 	}
 	ok(c, placeOrderResult{OrderID: existing.OrderID, RequestID: derefStr(existing.RequestID), Duplicate: true})
@@ -627,7 +619,7 @@ func (s *Server) rollbackFreeze(ctx context.Context, uid uint64, fr service.Free
 		return
 	}
 	if err := s.accounts.UnfreezeMargin(ctx, uid, fr.FromAvailable, fr.FromCredit); err != nil {
-		log.Printf("[ERROR] 回滚冻结保证金失败, uid=%d, available=%s, credit=%s: %v", uid, fr.FromAvailable, fr.FromCredit, err)
+		log.Printf("[ERROR] failed to roll back frozen margin, uid=%d, available=%s, credit=%s: %v", uid, fr.FromAvailable, fr.FromCredit, err)
 	}
 }
 
@@ -663,8 +655,13 @@ func (s *Server) addOrder(c *gin.Context) {
 		fail(c, 400, msg)
 		return
 	}
-	requestHash := service.RequestFingerprint("order", strconv.FormatUint(uid, 10), symbol, string(side), string(action),
-		string(orderType), req.Price.String(), decPtrStr(req.Amount), decPtrStr(req.MarginAmount),
+	requestHash := service.RequestFingerprint(
+		"order",
+		strconv.FormatUint(uid, 10), symbol, string(side),
+		string(action),
+		string(orderType), req.Price.String(),
+		decPtrStr(req.Amount),
+		decPtrStr(req.MarginAmount),
 		leverage.String(), strconv.FormatBool(req.ReduceOnly))
 	if requestID != "" {
 		existing, err := s.orders.FindByRequestID(c.Request.Context(), uid, requestID)
@@ -684,7 +681,7 @@ func (s *Server) addOrder(c *gin.Context) {
 
 	coin, err := s.coins.FindBySymbol(c.Request.Context(), symbol)
 	if err != nil || coin == nil || !coin.Enable {
-		failC(c, 400, ErrSymbolNotFound, "合约不存在或已下架")
+		failC(c, 400, ErrSymbolNotFound, "contract does not exist or is disabled")
 		return
 	}
 	// 只有MARKET单定价、开仓分档判断(含价格保护带，只对开仓生效)这两处要用标记价格，
@@ -709,11 +706,11 @@ func (s *Server) addOrder(c *gin.Context) {
 	if orderType == model.OrderTypeLimit {
 		price = req.Price
 		if price.Sign() <= 0 {
-			fail(c, 400, "限价单price参数不合法")
+			fail(c, 400, "price is invalid for a limit order")
 			return
 		}
 		if coin.PriceTick.Sign() > 0 && !price.Mod(coin.PriceTick).IsZero() {
-			failC(c, 400, ErrPriceTickInvalid, fmt.Sprintf("price必须是最小变动单位%s的整数倍", coin.PriceTick))
+			failC(c, 400, ErrPriceTickInvalid, fmt.Sprintf("price must be a multiple of the tick size %s", coin.PriceTick))
 			return
 		}
 		// 价格保护带：只对开仓单生效，防止两类问题——①用户瞎填价格导致的胖手指交易 ②故意报
@@ -727,13 +724,13 @@ func (s *Server) addOrder(c *gin.Context) {
 		if action == model.ActionOpen && hasReference && referencePrice.Sign() > 0 && coin.PriceProtectionRatio.Sign() > 0 {
 			deviation := price.Sub(referencePrice).Abs().Div(referencePrice)
 			if deviation.GreaterThan(coin.PriceProtectionRatio) {
-				failC(c, 400, ErrPriceOutOfRange, "委托价格偏离参考价过多")
+				failC(c, 400, ErrPriceOutOfRange, "order price deviates too far from the reference price")
 				return
 			}
 		}
 	} else {
 		if !hasMark {
-			failC(c, 400, ErrNoMarkPrice, "该合约暂无标记价格，市价单无法估算数量")
+			failC(c, 400, ErrNoMarkPrice, "this contract has no mark price yet")
 			return
 		}
 		price = mark
@@ -741,9 +738,12 @@ func (s *Server) addOrder(c *gin.Context) {
 
 	var amount decimal.Decimal
 	switch {
+	case req.MarginAmount != nil && req.Amount != nil:
+		fail(c, 400, "marginAmount and amount cannot be provided together")
+		return
 	case req.MarginAmount != nil:
 		if req.MarginAmount.Sign() <= 0 {
-			fail(c, 400, "marginAmount参数不合法")
+			fail(c, 400, "marginAmount is invalid")
 			return
 		}
 		notional := req.MarginAmount.Mul(leverage)
@@ -751,23 +751,23 @@ func (s *Server) addOrder(c *gin.Context) {
 	case req.Amount != nil:
 		amount = *req.Amount
 	default:
-		fail(c, 400, "必须传marginAmount或amount之一")
+		fail(c, 400, "either marginAmount or amount is required")
 		return
 	}
 	if amount.Sign() <= 0 {
-		fail(c, 400, "数量必须大于0")
+		fail(c, 400, "amount must be greater than 0")
 		return
 	}
 	if coin.MinVolume.Sign() > 0 && amount.LessThan(coin.MinVolume) {
-		failC(c, 400, ErrVolumeOutOfRange, fmt.Sprintf("数量不能低于该合约最小下单量%s", coin.MinVolume))
+		failC(c, 400, ErrVolumeOutOfRange, fmt.Sprintf("amount cannot be less than the minimum order size %s for this contract", coin.MinVolume))
 		return
 	}
 	if coin.MaxVolume.Sign() > 0 && amount.GreaterThan(coin.MaxVolume) {
-		failC(c, 400, ErrVolumeOutOfRange, fmt.Sprintf("数量不能超过该合约单笔上限%s", coin.MaxVolume))
+		failC(c, 400, ErrVolumeOutOfRange, fmt.Sprintf("amount cannot exceed the per-order limit %s for this contract", coin.MaxVolume))
 		return
 	}
 	if coin.VolumeStep.Sign() > 0 && !amount.Mod(coin.VolumeStep).IsZero() {
-		failC(c, 400, ErrVolumeOutOfRange, fmt.Sprintf("数量必须是步长%s的整数倍", coin.VolumeStep))
+		failC(c, 400, ErrVolumeOutOfRange, fmt.Sprintf("amount must be a multiple of the volume step %s", coin.VolumeStep))
 		return
 	}
 
@@ -813,10 +813,10 @@ func (s *Server) addOrder(c *gin.Context) {
 				return err
 			}
 			if tier == nil {
-				return newHTTPError(400, ErrTierNotConfigured, "该合约未配置保证金分档，暂不允许开仓")
+				return newHTTPError(400, ErrTierNotConfigured, "this contract has no risk limit tier configured, opening positions is not allowed")
 			}
 			if leverage.GreaterThan(decimal.NewFromInt(int64(tier.MaxLeverage))) {
-				return newHTTPError(400, ErrLeverageExceedsTier, "杠杆倍数超出当前仓位名义价值对应档位允许的范围")
+				return newHTTPError(400, ErrLeverageExceedsTier, "leverage exceeds the maximum allowed for the tier at the current position notional")
 			}
 			result, err := s.accounts.FreezeMargin(c.Request.Context(), uid, requiredMargin)
 			if err != nil {
@@ -880,7 +880,7 @@ func (s *Server) addOrder(c *gin.Context) {
 	}
 
 	if err := s.publishOrderSubmit(o); err != nil {
-		failC(c, 500, ErrDispatchFailed, "委托已落库但发送到撮合引擎失败: "+err.Error())
+		failC(c, 500, ErrDispatchFailed, "order was saved but failed to dispatch to the matching engine: "+err.Error())
 		return
 	}
 	ok(c, placeOrderResult{OrderID: orderID, RequestID: requestID})
@@ -898,26 +898,28 @@ func (s *Server) cancelOrder(c *gin.Context) {
 	uid := req.UID
 	orderID, err := decimal.NewFromString(c.Param("orderId"))
 	if err != nil {
-		fail(c, 400, "orderId不合法")
+		fail(c, 400, "orderId is invalid")
 		return
 	}
 	o, err := s.orders.FindByOrderID(c.Request.Context(), uint64(orderID.IntPart()))
 	if err != nil || o == nil || o.UID != uid {
-		failC(c, 400, ErrOrderNotFound, "委托单不存在")
+		failC(c, 400, ErrOrderNotFound, "order does not exist")
 		return
 	}
 	if !model.ActiveOrderStatuses[o.Status] {
-		failC(c, 400, ErrOrderNotCancelable, "委托单已完成或已取消")
+		failC(c, 400, ErrOrderNotCancelable, "order is already filled or canceled")
 		return
 	}
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
+
+	// 发送订单取消事件到kafka
 	evt := events.OrderCancelEvent{OrderID: o.OrderID, UID: uid, Symbol: o.Symbol}
 	if err := s.producer.Publish(ctx, events.TopicOrderCancel, o.Symbol, evt); err != nil {
 		fail(c, 500, err.Error())
 		return
 	}
-	ok(c, "撤单请求已提交")
+	ok(c, "cancel request submitted")
 }
 
 func (s *Server) orderCurrent(c *gin.Context) {
@@ -992,11 +994,11 @@ func (s *Server) addConditionalOrder(c *gin.Context) {
 		return
 	}
 	if req.TriggerDirection != model.TriggerGTE && req.TriggerDirection != model.TriggerLTE {
-		fail(c, 400, "triggerDirection参数不合法")
+		fail(c, 400, "triggerDirection is invalid")
 		return
 	}
 	if req.TriggerPrice.Sign() <= 0 {
-		fail(c, 400, "triggerPrice参数不合法")
+		fail(c, 400, "triggerPrice is invalid")
 		return
 	}
 	orderType, msg := resolveOrderType(req.Type)
@@ -1034,11 +1036,11 @@ func (s *Server) addConditionalOrder(c *gin.Context) {
 
 	coin, err := s.coins.FindBySymbol(c.Request.Context(), symbol)
 	if err != nil || coin == nil || !coin.Enable {
-		failC(c, 400, ErrSymbolNotFound, "合约不存在或已下架")
+		failC(c, 400, ErrSymbolNotFound, "contract does not exist or is disabled")
 		return
 	}
 	if coin.PriceTick.Sign() > 0 && !req.TriggerPrice.Mod(coin.PriceTick).IsZero() {
-		failC(c, 400, ErrPriceTickInvalid, fmt.Sprintf("triggerPrice必须是最小变动单位%s的整数倍", coin.PriceTick))
+		failC(c, 400, ErrPriceTickInvalid, fmt.Sprintf("triggerPrice must be a multiple of the tick size %s", coin.PriceTick))
 		return
 	}
 	// referencePrice/hasReference：标记价格优先、缺失退回指数价格，跟addOrder用的是
@@ -1055,11 +1057,11 @@ func (s *Server) addConditionalOrder(c *gin.Context) {
 	if orderType == model.OrderTypeLimit {
 		price = req.Price
 		if price.Sign() <= 0 {
-			fail(c, 400, "限价单price参数不合法")
+			fail(c, 400, "price is invalid for a limit order")
 			return
 		}
 		if coin.PriceTick.Sign() > 0 && !price.Mod(coin.PriceTick).IsZero() {
-			failC(c, 400, ErrPriceTickInvalid, fmt.Sprintf("price必须是最小变动单位%s的整数倍", coin.PriceTick))
+			failC(c, 400, ErrPriceTickInvalid, fmt.Sprintf("price must be a multiple of the tick size %s", coin.PriceTick))
 			return
 		}
 	}
@@ -1074,9 +1076,12 @@ func (s *Server) addConditionalOrder(c *gin.Context) {
 
 	var amount decimal.Decimal
 	switch {
+	case req.MarginAmount != nil && req.Amount != nil:
+		fail(c, 400, "marginAmount and amount cannot be provided together")
+		return
 	case req.MarginAmount != nil:
 		if req.MarginAmount.Sign() <= 0 {
-			fail(c, 400, "marginAmount参数不合法")
+			fail(c, 400, "marginAmount is invalid")
 			return
 		}
 		notional := req.MarginAmount.Mul(leverage)
@@ -1084,23 +1089,23 @@ func (s *Server) addConditionalOrder(c *gin.Context) {
 	case req.Amount != nil:
 		amount = *req.Amount
 	default:
-		fail(c, 400, "必须传marginAmount或amount之一")
+		fail(c, 400, "either marginAmount or amount is required")
 		return
 	}
 	if amount.Sign() <= 0 {
-		fail(c, 400, "数量必须大于0")
+		fail(c, 400, "amount must be greater than 0")
 		return
 	}
 	if coin.MinVolume.Sign() > 0 && amount.LessThan(coin.MinVolume) {
-		failC(c, 400, ErrVolumeOutOfRange, fmt.Sprintf("数量不能低于该合约最小下单量%s", coin.MinVolume))
+		failC(c, 400, ErrVolumeOutOfRange, fmt.Sprintf("amount cannot be less than the minimum order size %s for this contract", coin.MinVolume))
 		return
 	}
 	if coin.MaxVolume.Sign() > 0 && amount.GreaterThan(coin.MaxVolume) {
-		failC(c, 400, ErrVolumeOutOfRange, fmt.Sprintf("数量不能超过该合约单笔上限%s", coin.MaxVolume))
+		failC(c, 400, ErrVolumeOutOfRange, fmt.Sprintf("amount cannot exceed the per-order limit %s for this contract", coin.MaxVolume))
 		return
 	}
 	if coin.VolumeStep.Sign() > 0 && !amount.Mod(coin.VolumeStep).IsZero() {
-		failC(c, 400, ErrVolumeOutOfRange, fmt.Sprintf("数量必须是步长%s的整数倍", coin.VolumeStep))
+		failC(c, 400, ErrVolumeOutOfRange, fmt.Sprintf("amount must be a multiple of the volume step %s", coin.VolumeStep))
 		return
 	}
 
@@ -1130,10 +1135,10 @@ func (s *Server) addConditionalOrder(c *gin.Context) {
 				return err
 			}
 			if tier == nil {
-				return newHTTPError(400, ErrTierNotConfigured, "该合约未配置保证金分档，暂不允许开仓")
+				return newHTTPError(400, ErrTierNotConfigured, "this contract has no risk limit tier configured, opening positions is not allowed")
 			}
 			if leverage.GreaterThan(decimal.NewFromInt(int64(tier.MaxLeverage))) {
-				return newHTTPError(400, ErrLeverageExceedsTier, "杠杆倍数超出当前仓位名义价值对应档位允许的范围")
+				return newHTTPError(400, ErrLeverageExceedsTier, "leverage exceeds the maximum allowed for the tier at the current position notional")
 			}
 			result, err := s.accounts.FreezeMargin(c.Request.Context(), uid, requiredMargin)
 			if err != nil {
@@ -1203,9 +1208,9 @@ func (s *Server) addConditionalOrder(c *gin.Context) {
 		}
 		if frozen {
 			if err := s.cancelPendingConditional(c.Request.Context(), *co); err != nil {
-				log.Printf("[ERROR] 冻结竞态下撤销刚创建的条件开仓单失败, orderId=%d: %v", co.OrderID, err)
+				log.Printf("[ERROR] failed to cancel the just-created conditional open order during a freeze race, orderId=%d: %v", co.OrderID, err)
 			}
-			failC(c, 400, ErrAccountFrozen, "账户已冻结，不能创建条件开仓单")
+			failC(c, 400, ErrAccountFrozen, "account is frozen, cannot create a conditional open order")
 			return
 		}
 	}
@@ -1226,32 +1231,32 @@ func (s *Server) cancelConditionalOrder(c *gin.Context) {
 	}
 	orderID, err := decimal.NewFromString(c.Param("orderId"))
 	if err != nil {
-		fail(c, 400, "orderId不合法")
+		fail(c, 400, "orderId is invalid")
 		return
 	}
 	co, err := s.conditionalOrders.FindByOrderID(c.Request.Context(), uint64(orderID.IntPart()))
 	if err != nil || co == nil || co.UID != req.UID {
-		failC(c, 400, ErrOrderNotFound, "条件单不存在")
+		failC(c, 400, ErrOrderNotFound, "conditional order does not exist")
 		return
 	}
 	if co.Status != model.ConditionalStatusPending {
-		failC(c, 400, ErrOrderNotCancelable, "条件单已触发或已取消")
+		failC(c, 400, ErrOrderNotCancelable, "conditional order has already triggered or been canceled")
 		return
 	}
 	if err := s.cancelPendingConditional(c.Request.Context(), *co); err != nil {
 		if errors.Is(err, errConditionalNotPending) {
 			// 撤单请求跟engine那边的触发扫描并发竞争，扫描先一步赢了——这笔条件单已经变成了
 			// 真正的委托，不能再当"条件单撤销"处理，调用方该走普通撤单接口
-			failC(c, 400, ErrOrderNotCancelable, "条件单已触发，无法撤销")
+			failC(c, 400, ErrOrderNotCancelable, "conditional order has already triggered, cannot cancel")
 			return
 		}
 		fail(c, 500, err.Error())
 		return
 	}
-	ok(c, "条件单已撤销")
+	ok(c, "conditional order canceled")
 }
 
-var errConditionalNotPending = errors.New("条件单不是pending状态")
+var errConditionalNotPending = errors.New("conditional order is not in pending status")
 
 // 原子标记撤销并退回冻结保证金——单笔撤销和批量撤销共用。返回
 // errConditionalNotPending表示条件单已经不是pending(被并发的触发扫描抢先了)
@@ -1315,10 +1320,10 @@ func (s *Server) positionCurrent(c *gin.Context) {
 }
 
 type setLeverageRequest struct {
-	UID      uint64           `json:"uid" binding:"required"`
-	Symbol   string           `json:"symbol" binding:"required"`
-	Side     model.Side       `json:"side" binding:"required"`
-	Leverage *decimal.Decimal `json:"leverage"`
+	UID      uint64     `json:"uid" binding:"required"`
+	Symbol   string     `json:"symbol" binding:"required"`
+	Side     model.Side `json:"side" binding:"required"`
+	Leverage uint32     `json:"leverage" binding:"required"` // 必须是>=1的整数(uint32本身保证)，上限按tier.MaxLeverage校验
 }
 
 // 修改一个已有仓位的杠杆——只对已经有仓位的uid+symbol+side生效，这个系统里
@@ -1342,38 +1347,27 @@ func (s *Server) setLeverage(c *gin.Context) {
 		return
 	}
 	if req.Side != model.SideLong && req.Side != model.SideShort {
-		fail(c, 400, "side参数不合法")
+		fail(c, 400, "side is invalid")
 		return
 	}
-	if req.Leverage == nil {
-		fail(c, 400, "leverage参数必填")
-		return
-	}
-	leverage := *req.Leverage
-	const maxSaneLeverage = 1000
-	if leverage.Sign() <= 0 || leverage.GreaterThan(decimal.NewFromInt(maxSaneLeverage)) || !leverage.IsInteger() {
-		fail(c, 400, "leverage参数不合法")
-		return
-	}
+	leverage := decimal.NewFromInt(int64(req.Leverage))
 
 	uid, symbol, side := req.UID, req.Symbol, req.Side
 	ctx := c.Request.Context()
 
 	// 跟addOrder开仓路径共用同一把按uid+symbol+side的锁(service.OrderLockKey)——修改杠杆
-	// 和并发下单一样，都要读现有状态(这里是仓位名义价值)再决定后续动作，必须序列化，理由
-	// 见risk-limit-tiers.md"并发下单的原子性"一节，这里是同一个临界区问题在另一个入口
-	// 上的复现
+	// 和并发下单一样，都要读现有状态(这里是仓位名义价值)再决定后续动作，必须序列化
 	lockErr := s.lock.WithLock(ctx, service.OrderLockKey(uid, symbol, side), func() error {
 		p, err := s.positions.Find(ctx, uid, symbol, side)
 		if err != nil {
 			return err
 		}
 		if p == nil || p.Volume.Sign() <= 0 {
-			return newHTTPError(400, ErrPositionNotFound, "没有找到这个方向的持仓，不能修改杠杆")
+			return newHTTPError(400, ErrPositionNotFound, "no position found in this direction")
 		}
 		mark, hasMark := s.markPrice.Get(ctx, symbol)
 		if !hasMark {
-			return newHTTPError(400, ErrNoMarkPrice, "该合约暂无标记价格，无法校验杠杆")
+			return newHTTPError(400, ErrNoMarkPrice, "this contract has no mark price yet")
 		}
 		notional := p.Volume.Mul(mark)
 		tier, err := s.positions.TierFor(ctx, symbol, notional)
@@ -1381,10 +1375,10 @@ func (s *Server) setLeverage(c *gin.Context) {
 			return err
 		}
 		if tier == nil {
-			return newHTTPError(400, ErrTierNotConfigured, "该合约未配置保证金分档")
+			return newHTTPError(400, ErrTierNotConfigured, "this contract has no risk limit tier configured")
 		}
 		if leverage.GreaterThan(decimal.NewFromInt(int64(tier.MaxLeverage))) {
-			return newHTTPError(400, ErrLeverageExceedsTier, "杠杆倍数超出当前仓位名义价值对应档位允许的范围")
+			return newHTTPError(400, ErrLeverageExceedsTier, "leverage exceeds the maximum allowed for the tier at the current position notional")
 		}
 
 		newMargin := notional.Div(leverage)
@@ -1438,7 +1432,7 @@ func (s *Server) setLeverage(c *gin.Context) {
 		if !ok {
 			// 理论上不该发生(外层已经用同一把锁序列化了同一个uid+symbol+side的并发请求)，
 			// 防御性处理：仓位在读取之后到写入之前发生了变化
-			return newHTTPError(500, ErrInternal, "仓位状态发生变化，请重试")
+			return newHTTPError(500, ErrInternal, "position state changed, please retry")
 		}
 		return nil
 	})
@@ -1450,7 +1444,7 @@ func (s *Server) setLeverage(c *gin.Context) {
 	// adjustBalance/grantCredit这些contract-api自己的资金类接口一样没有WS推送——
 	// WS私有频道的推送只从contract-engine那边发出(见docs/websocket.md)，客户端这里
 	// 拿到的HTTP响应本身就是最新状态，不需要额外通知
-	ok(c, "杠杆修改成功")
+	ok(c, "leverage changed")
 }
 
 func (s *Server) tradeHistory(c *gin.Context) {
@@ -1474,7 +1468,7 @@ func (s *Server) fundingRate(c *gin.Context) {
 	symbol := c.Query("symbol")
 	coin, err := s.coins.FindBySymbol(c.Request.Context(), symbol)
 	if err != nil || coin == nil {
-		failC(c, 400, ErrSymbolNotFound, "合约不存在")
+		failC(c, 400, ErrSymbolNotFound, "contract does not exist")
 		return
 	}
 	now := service.NowMillis()
@@ -1496,12 +1490,12 @@ func (s *Server) kline(c *gin.Context) {
 	symbol := c.Query("symbol")
 	coin, err := s.coins.FindBySymbol(c.Request.Context(), symbol)
 	if err != nil || coin == nil {
-		failC(c, 400, ErrSymbolNotFound, "合约不存在")
+		failC(c, 400, ErrSymbolNotFound, "contract does not exist")
 		return
 	}
 	interval := model.KlineInterval(c.Query("interval"))
 	if !validKlineIntervals[interval] {
-		fail(c, 400, "interval参数不合法")
+		fail(c, 400, "interval is invalid")
 		return
 	}
 	limit, msg := parsePositiveIntQuery(c, "limit", 200)
@@ -1543,7 +1537,7 @@ func (s *Server) setIndexPrice(c *gin.Context) {
 		return
 	}
 	if req.Price.Sign() <= 0 {
-		fail(c, 400, "price参数不合法")
+		fail(c, 400, "price is invalid")
 		return
 	}
 	res, err := s.markPrice.PushIndexPrice(c.Request.Context(), req.Symbol, req.Price)
@@ -1554,8 +1548,7 @@ func (s *Server) setIndexPrice(c *gin.Context) {
 	if !res.Accepted {
 		// 不是喂价方的错，是保护在等这个新价位持续够久。真实的行情大幅变动会在几秒内被承认，
 		// 喂价方继续按周期推就行，不用特殊处理
-		failC(c, 400, ErrIndexPriceJump, fmt.Sprintf("指数价相对当前值%s的变动超过服务端阈值，暂不写入，新价位持续一段时间后才会被承认(已持续%.1f秒)",
-			res.Current, res.Waited.Seconds()))
+		failC(c, 400, ErrIndexPriceJump, fmt.Sprintf("index price change relative to the current value %s exceeds the server threshold, pending for %.1fs", res.Current, res.Waited.Seconds()))
 		return
 	}
 	ok(c, nil)

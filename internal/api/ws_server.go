@@ -21,7 +21,7 @@ var upgrader = websocket.Upgrader{
 func (s *Server) ws(c *gin.Context) {
 	conn, err := upgrader.Upgrade(c.Writer, c.Request, nil)
 	if err != nil {
-		log.Printf("[ERROR] WS升级失败: %v", err)
+		log.Printf("[ERROR] WS upgrade failed: %v", err)
 		return
 	}
 	client := ws.NewClient(conn, s.hub)

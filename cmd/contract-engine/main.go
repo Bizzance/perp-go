@@ -140,7 +140,7 @@ func main() {
 	conditionalOrderSvc := service.NewConditionalOrderService(conditionalOrderRepo, orderRepo, markPriceSvc, engineSvc)
 
 	// 订单簿镜像：把币安的订单簿直接镜像成系统账户(service.UID，固定值不需要配置)在撮合引擎里的
-	// 真实挂单，进程内直接调用，不经HTTP/Kafka/分布式锁，见docs/orderbook-sync.md。
+	// 真实挂单，进程内直接调用，不经HTTP/Kafka/分布式锁。
 	// MirrorSymbols为空(没配PERP_MIRROR_SYMBOLS)表示不开启，本地开发和大多数集成测试不需要
 	var mirrorSvc *service.MirrorService
 	if len(cfg.MirrorSymbols) > 0 {
@@ -156,7 +156,7 @@ func main() {
 			service.UID, cfg.MirrorSymbols, cfg.MirrorLevels, cfg.MirrorInterval, cfg.MirrorStaleAfter)
 	} else {
 		log.Printf("[WARN] 订单簿镜像没有开启(PERP_MIRROR_SYMBOLS没配)：没有其它挂单来源时，订单簿是空的，用户下单没有对手方。" +
-			"只能用于本地开发和测试，生产环境必须配置，见docs/orderbook-sync.md")
+			"只能用于本地开发和测试，生产环境必须配置")
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
@@ -283,7 +283,7 @@ func main() {
 		}
 	}()
 
-	// 引擎的HTTP端口(深度查询)同样要求鉴权，规则和contract-api一致，见docs/auth-design.md
+	// 引擎的HTTP端口(深度查询)同样要求鉴权，规则和contract-api一致
 	engineAuth := api.NewAuth(cfg.AuthDisabled, cfg.APIKeys, rdb)
 	engineSrv := api.NewEngineServer(matchingEngine, coinRepo, engineSvc.OwnsSymbol, engineAuth)
 	engineSrv.RefreshSymbols(ctx) // 启动时先同步刷一次，不然/depth接口刚起来那段时间缓存是空的、全部请求都会被当成"合约不存在"拒绝

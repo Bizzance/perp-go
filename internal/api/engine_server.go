@@ -23,8 +23,18 @@ type EngineServer struct {
 	auth           *Auth
 }
 
-func NewEngineServer(matchingEngine *matching.Engine, coins *repo.CoinRepo, ownsSymbol func(symbol string) bool, auth *Auth) *EngineServer {
-	s := &EngineServer{matchingEngine: matchingEngine, coins: coins, ownsSymbol: ownsSymbol, auth: auth}
+func NewEngineServer(
+	matchingEngine *matching.Engine,
+	coins *repo.CoinRepo,
+	ownsSymbol func(symbol string) bool,
+	auth *Auth,
+) *EngineServer {
+	s := &EngineServer{
+		matchingEngine: matchingEngine,
+		coins:          coins,
+		ownsSymbol:     ownsSymbol,
+		auth:           auth,
+	}
 	empty := map[string]bool{}
 	s.enabledSymbols.Store(&empty)
 	return s
@@ -38,7 +48,7 @@ func NewEngineServer(matchingEngine *matching.Engine, coins *repo.CoinRepo, owns
 func (s *EngineServer) RefreshSymbols(ctx context.Context) {
 	coins, err := s.coins.FindAllEnabled(ctx)
 	if err != nil {
-		log.Printf("[ERROR] 刷新symbol缓存失败: %v", err)
+		log.Printf("[ERROR] failed to refresh symbol cache: %v", err)
 		return
 	}
 	m := make(map[string]bool, len(coins))
@@ -66,7 +76,7 @@ func (s *EngineServer) health(c *gin.Context) {
 func (s *EngineServer) depth(c *gin.Context) {
 	symbol := c.Query("symbol")
 	if symbol == "" {
-		fail(c, 400, "symbol参数必填")
+		fail(c, 400, "symbol is required")
 		return
 	}
 	// 必须校验symbol存在——matching.Engine.BookFor对任何没见过的symbol字符串都会创建
@@ -74,14 +84,14 @@ func (s *EngineServer) depth(c *gin.Context) {
 	// 字符串会变成一个无限增长的内存占用点(每个不同symbol=一个永久Book)，等于一个开放的
 	// 内存膨胀入口，必须先挡掉不存在的symbol——用内存缓存校验(见RefreshSymbols)，不查DB
 	if !(*s.enabledSymbols.Load())[symbol] {
-		fail(c, 400, "合约不存在或已下架")
+		fail(c, 400, "contract does not exist or is disabled")
 		return
 	}
 	// 分片部署下这个实例可能根本不负责这个symbol——它的本地Book要么是空的、要么(重启
 	// 恢复时已经按ownedSymbols过滤过)压根没有这个symbol的条目，返回一个看起来"合法但是
 	// 空"的深度会误导调用方，不如直接明确拒绝，见docs/engine-sharding.md
 	if s.ownsSymbol != nil && !s.ownsSymbol(symbol) {
-		fail(c, 400, "这个实例不负责该symbol的撮合，请求路由到正确的分片")
+		fail(c, 400, "this instance does not own matching for this symbol, route the request to the correct shard")
 		return
 	}
 	levels, msg := parsePositiveIntQuery(c, "levels", matching.DefaultDepthLevels)

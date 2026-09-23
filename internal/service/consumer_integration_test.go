@@ -146,20 +146,20 @@ func TestConsumer_RoundCloseEventAdvancesRound(t *testing.T) {
 	uid := e.newAccount(t, 1, "10000")
 	e.setCredit(t, uid, "500", true)
 
-	if err := e.engine.HandleRoundClose(ctx, msgOf(t, events.TopicRoundClose, 1, events.RoundCloseEvent{UID: uid, Round: 0})); err != nil {
+	if err := e.engine.HandleRoundClose(ctx, msgOf(t, events.TopicRoundClose, 1, events.RoundCloseEvent{UID: uid, Round: 1})); err != nil {
 		t.Fatal(err)
 	}
-	if round, insured := e.roundState(t, uid); round != 1 || insured {
-		t.Fatalf("round应该推进到1且投保复位, got round=%d insured=%v", round, insured)
+	if round, insured := e.roundState(t, uid); round != 2 || insured {
+		t.Fatalf("round应该推进到2且投保复位, got round=%d insured=%v", round, insured)
 	}
 	mustDec(t, e.account(t, uid).Credit, "0", "信用额度清零")
 
 	// 过期的round(重复的结束请求)被忽略，不动新一轮
 	e.setCredit(t, uid, "200", true)
-	if err := e.engine.HandleRoundClose(ctx, msgOf(t, events.TopicRoundClose, 2, events.RoundCloseEvent{UID: uid, Round: 0})); err != nil {
+	if err := e.engine.HandleRoundClose(ctx, msgOf(t, events.TopicRoundClose, 2, events.RoundCloseEvent{UID: uid, Round: 1})); err != nil {
 		t.Fatal(err)
 	}
-	if round, _ := e.roundState(t, uid); round != 1 {
+	if round, _ := e.roundState(t, uid); round != 2 {
 		t.Fatalf("过期的round应该被忽略, got round=%d", round)
 	}
 	mustDec(t, e.account(t, uid).Credit, "200", "新一轮的信用额度不能被清")

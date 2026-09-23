@@ -49,7 +49,7 @@ func (s *Server) contractDetail(c *gin.Context) {
 		return
 	}
 	if coin == nil || !coin.Enable {
-		failC(c, 400, ErrSymbolNotFound, "合约不存在或已下架")
+		failC(c, 400, ErrSymbolNotFound, "contract does not exist or is disabled")
 		return
 	}
 	tiers, err := s.positions.Tiers(c.Request.Context(), symbol)
@@ -91,7 +91,7 @@ func (s *Server) marketTicker(c *gin.Context) {
 		return
 	}
 	if coin == nil || !coin.Enable {
-		failC(c, 400, ErrSymbolNotFound, "合约不存在或已下架")
+		failC(c, 400, ErrSymbolNotFound, "contract does not exist or is disabled")
 		return
 	}
 	t := ticker{Symbol: symbol}
@@ -157,7 +157,7 @@ func (s *Server) marketTrades(c *gin.Context) {
 		return
 	}
 	if coin == nil || !coin.Enable {
-		failC(c, 400, ErrSymbolNotFound, "合约不存在或已下架")
+		failC(c, 400, ErrSymbolNotFound, "contract does not exist or is disabled")
 		return
 	}
 	limit, before, ok2 := pageParams(c)
@@ -183,7 +183,7 @@ func parseOrderRef(c *gin.Context) (orderID uint64, requestID string, valid bool
 	if v := c.Query("orderId"); v != "" {
 		n, err := strconv.ParseUint(v, 10, 64)
 		if err != nil || n == 0 {
-			fail(c, 400, "orderId参数不合法")
+			fail(c, 400, "orderId is invalid")
 			return 0, "", false
 		}
 		return n, "", true
@@ -194,7 +194,7 @@ func parseOrderRef(c *gin.Context) (orderID uint64, requestID string, valid bool
 		return 0, "", false
 	}
 	if cid == "" {
-		fail(c, 400, "orderId和requestId必须传一个")
+		fail(c, 400, "either orderId or requestId is required")
 		return 0, "", false
 	}
 	return 0, cid, true
@@ -221,7 +221,7 @@ func (s *Server) orderDetail(c *gin.Context) {
 		return
 	}
 	if o == nil || o.UID != uid {
-		failC(c, 400, ErrOrderNotFound, "委托单不存在")
+		failC(c, 400, ErrOrderNotFound, "order does not exist")
 		return
 	}
 	ok(c, o)
@@ -248,7 +248,7 @@ func (s *Server) conditionalOrderDetail(c *gin.Context) {
 		return
 	}
 	if co == nil || co.UID != uid {
-		failC(c, 400, ErrOrderNotFound, "条件单不存在")
+		failC(c, 400, ErrOrderNotFound, "conditional order does not exist")
 		return
 	}
 	ok(c, co)
@@ -292,7 +292,7 @@ func (s *Server) cancelAllOrders(c *gin.Context) {
 			return
 		}
 		if coin == nil {
-			failC(c, 400, ErrSymbolNotFound, "合约不存在")
+			failC(c, 400, ErrSymbolNotFound, "contract does not exist")
 			return
 		}
 	}
@@ -366,11 +366,11 @@ func (s *Server) setAccountStatus(c *gin.Context) {
 		return
 	}
 	if req.Status != model.AccountStatusActive && req.Status != model.AccountStatusFrozen {
-		fail(c, 400, "status参数不合法，取值 active / frozen")
+		fail(c, 400, "status is invalid, must be active or frozen")
 		return
 	}
 	if len(req.Reason) > maxStatusReasonLen {
-		fail(c, 400, "reason最长255个字节")
+		fail(c, 400, "reason must be at most 255 bytes")
 		return
 	}
 	ctx := c.Request.Context()
@@ -379,7 +379,7 @@ func (s *Server) setAccountStatus(c *gin.Context) {
 	_, changed, err := s.accounts.SetStatus(ctx, req.UID, req.Status, req.Reason, operator)
 	if err != nil {
 		if errors.Is(err, service.ErrAccountNotFound) {
-			failC(c, 400, ErrAccountNotFound, "账户不存在，请先调用 POST /account/create 创建")
+			failC(c, 400, ErrAccountNotFound, "account does not exist, please create it first")
 			return
 		}
 		fail(c, 500, err.Error())
@@ -393,7 +393,7 @@ func (s *Server) setAccountStatus(c *gin.Context) {
 	if req.Status == model.AccountStatusFrozen {
 		if err := s.sweepOpenOrders(ctx, req.UID, &result); err != nil {
 			// 状态已经改成功了，只是清理没做完：返回失败让调用方重试(重试时changed=false，清理会重做)
-			fail(c, 500, "账户已冻结，但清理存量开仓挂单失败，请重试本接口: "+err.Error())
+			fail(c, 500, "account is frozen, but failed to clean up existing open orders, please retry this endpoint: "+err.Error())
 			return
 		}
 	}
@@ -441,8 +441,7 @@ var validTxTypes = map[string]bool{
 	model.TxFundingFee: true, model.TxCreditGrant: true, model.TxRoundClose: true,
 }
 
-// 资金流水(充值/扣减、手续费、已实现盈亏、资金费、信用额度发放、结束本轮
-// 回收等)，id倒序，type可选过滤。合作方对账用
+// 资金流水(充值/扣减、手续费、已实现盈亏、资金费、信用额度发放、结束本轮回收等)，id倒序，type可选过滤。合作方对账用
 func (s *Server) accountTransactions(c *gin.Context) {
 	uid, ok1 := s.parseAccountUID(c)
 	if !ok1 {
@@ -450,7 +449,7 @@ func (s *Server) accountTransactions(c *gin.Context) {
 	}
 	txType := c.Query("type")
 	if txType != "" && !validTxTypes[txType] {
-		fail(c, 400, "type参数不合法")
+		fail(c, 400, "type is invalid")
 		return
 	}
 	limit, before, ok2 := pageParams(c)

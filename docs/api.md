@@ -201,7 +201,7 @@ X-Signature  HMAC-SHA256(secret, timestamp\nnonce\nMETHOD\npath\nrawQuery\nsha25
 {
   "code": 200, "message": "success",
   "data": {
-    "uid": 10001, "isInsured": false, "status": "active", "round": 0,
+    "uid": 10001, "isInsured": false, "status": "active", "round": 1,
     "credit": "0", "available": "0", "frozenMargin": "0", "frozenCredit": "0",
     "positionMargin": "0", "totalUnrealizedPnl": "0", "equity": "0",
     "created": true
@@ -237,7 +237,7 @@ X-Signature  HMAC-SHA256(secret, timestamp\nnonce\nMETHOD\npath\nrawQuery\nsha25
 {
   "code": 200, "message": "success",
   "data": {
-    "uid": 990102, "isInsured": false, "status": "active", "round": 0,
+    "uid": 990102, "isInsured": false, "status": "active", "round": 1,
     "credit": "0", "available": "1115.6",
     "frozenMargin": "0", "frozenCredit": "0",
     "positionMargin": "500",
@@ -319,7 +319,7 @@ X-Signature  HMAC-SHA256(secret, timestamp\nnonce\nMETHOD\npath\nrawQuery\nsha25
 { "uid": 10001, "round": 3 }
 ```
 
-**`round`必填**：要结束的那一轮，取值是 `GET /account/info` 返回的`round`（第一轮是`0`）。它同时是这个接口的
+**`round`必填**：要结束的那一轮，取值是 `GET /account/info` 返回的`round`（第一轮是`1`，0不是合法值）。它同时是这个接口的
 幂等键：结束第3轮只会生效一次。没有它的话，超时重试会在账户已经进入第4轮之后又结束一次，把第4轮刚挂的单撤掉、
 刚开的仓强平、刚发的信用额度清零。
 

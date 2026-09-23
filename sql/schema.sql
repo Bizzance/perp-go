@@ -14,7 +14,7 @@ CREATE TABLE IF NOT EXISTS accounts (
   id             BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   uid            BIGINT UNSIGNED NOT NULL,
   is_insured     TINYINT(1) NOT NULL DEFAULT 0 COMMENT '是否投保：0-不投保，1-投保',
-  round          BIGINT UNSIGNED NOT NULL DEFAULT 0 COMMENT '轮数',
+  round          BIGINT UNSIGNED NOT NULL DEFAULT 1 COMMENT '轮数，从1开始(0不是合法值，POST /account/round/close的round用binding:"required"校验)',
   credit         DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT '信用额度余额，只能用于开仓保证金，不能转出/提现',
   available      DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT '可用余额，可能为负(全仓下用持仓浮盈当买力借出去的部分)',
   frozen_margin  DECIMAL(26,16) NOT NULL DEFAULT 0 COMMENT '挂单冻结保证金(来自available的部分)',
