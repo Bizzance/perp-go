@@ -77,6 +77,11 @@ func (s *LiquidationService) RiskScanOnce(ctx context.Context) {
 		return
 	}
 	for _, uid := range uids {
+		if uid == UID {
+			// 系统账户(镜像挂单用)代表系统自己的资金，不受强平约束，见
+			// AccountService.FreezeMargin对这个uid的特殊路径
+			continue
+		}
 		if err := s.checkAndLiquidate(ctx, uid); err != nil {
 			log.Printf("[ERROR] risk scan uid=%d failed: %v", uid, err)
 		}

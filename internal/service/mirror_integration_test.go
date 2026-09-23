@@ -58,14 +58,15 @@ func (f *fakeMirrorBinance) setDown(v bool) {
 	f.down = v
 }
 
-// 起一个接到真实引擎的MirrorService，Levels/Interval/Leverage/Balance/StaleAfter用测试常用的值。
-// 系统账户uid是固定值service.UID(不需要配置)，每个测试用自己独立的MySQL库，不会跟别的测试冲突
+// 起一个接到真实引擎的MirrorService，Levels/Interval/Leverage/StaleAfter用测试常用的值。
+// 系统账户uid是固定值service.UID(不需要配置、也不需要充值)，每个测试用自己独立的MySQL库，
+// 不会跟别的测试冲突
 func newMirrorEnv(t *testing.T, e *engineEnv, staleAfter time.Duration) (*service.MirrorService, *fakeMirrorBinance, uint64) {
 	t.Helper()
 	bn := newFakeMirrorBinance(t)
 	cfg := service.MirrorConfig{
 		Symbols: []string{testSymbol}, Levels: 2, Interval: time.Second,
-		Leverage: 5, Balance: "1000000", StaleAfter: staleAfter,
+		Leverage: 5, StaleAfter: staleAfter,
 	}
 	m, err := service.NewMirrorService(cfg, &binancefeed.Binance{BaseURL: bn.srv.URL, Client: bn.srv.Client()}, e.accounts, e.orders, e.coins, e.engine)
 	if err != nil {
@@ -89,7 +90,7 @@ func liveOrderPrices(t *testing.T, e *engineEnv, uid uint64, side model.Side) []
 	return out
 }
 
-// 第一轮：建好系统账户并充值，币安盘口的前2档原样镜像成真实挂单(数量按合约精度3位取整)，
+// 第一轮：建好系统账户(不需要充值)，币安盘口的前2档原样镜像成真实挂单(数量按合约精度3位取整)，
 // 买盘/卖盘都进同一个账户，方向分别是long/short
 func TestMirror_PlacesRestingOrdersMatchingBinanceDepth(t *testing.T) {
 	e := newEngineEnv(t)
@@ -108,8 +109,78 @@ func TestMirror_PlacesRestingOrdersMatchingBinanceDepth(t *testing.T) {
 		t.Fatalf("订单簿深度应该反映镜像挂单: %+v", depth)
 	}
 	acc := e.account(t, uid)
-	if acc.Balance.Sign() <= 0 && acc.FrozenMargin.Sign() <= 0 {
-		t.Fatalf("系统账户应该已经建好并充值: %+v", acc)
+	// 系统账户不需要充值：balance一直是0，锁定的保证金全部来自FreezeMargin对这个uid的
+	// 无条件冻结路径(不检查balance够不够)
+	mustDec(t, acc.Balance, "0", "系统账户不需要充值")
+	if acc.FrozenMargin.Sign() <= 0 {
+		t.Fatalf("系统账户应该已经建好、挂单已经锁定保证金: %+v", acc)
+	}
+}
+
+// 系统账户代表系统自己的资金，视为无限：即使balance从来没有充值过、frozen_margin远超
+// balance(自由余额深度为负)，FreezeMargin对这个uid依然无条件成功——这是修复"镜像挂单
+// 被真实成交吃掉之后，系统账户余额耗尽、某一侧订单簿再也补不上"这个历史问题的核心行为
+func TestMirror_PlaceOrderSucceedsRegardlessOfBalance(t *testing.T) {
+	e := newEngineEnv(t)
+	ctx := context.Background()
+	uid := service.UID
+	if _, _, err := e.accounts.Create(ctx, uid); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 5; i++ {
+		if _, err := e.accounts.FreezeMargin(ctx, uid, decimalOf(t, "1000000")); err != nil {
+			t.Fatalf("第%d次冻结不应该失败: %v", i+1, err)
+		}
+	}
+	acc := e.account(t, uid)
+	mustDec(t, acc.Balance, "0", "系统账户balance从来没有充值过")
+	mustDec(t, acc.FrozenMargin, "5000000", "累计冻结的保证金远超balance，自由余额是深度负数")
+}
+
+// 系统账户不受强平约束：即使它名下的仓位浮亏巨大、权益远低于任何强平线，
+// LiquidationService.RiskScanOnce也不会对它做任何事
+func TestMirror_SystemAccountNeverLiquidated(t *testing.T) {
+	e := newEngineEnv(t)
+	ctx := context.Background()
+	uid := service.UID
+	if _, _, err := e.accounts.Create(ctx, uid); err != nil {
+		t.Fatal(err)
+	}
+	other := e.newAccount(t, 1, "10000")
+
+	// 系统账户空头0.1@65000，标记价拉到极高，制造巨额浮亏。保证金走FreezeMargin对这个uid
+	// 的无条件冻结路径(balance从来没充值过)
+	freeze, err := e.accounts.FreezeMargin(ctx, uid, decimalOf(t, "650"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UnixMilli()
+	sell := &model.Order{
+		OrderID: e.id(), UID: uid, Symbol: testSymbol, Side: model.SideShort, Action: model.ActionOpen,
+		Type: model.OrderTypeLimit, Price: decimalOf(t, "65000"), Amount: decimalOf(t, "0.1"),
+		FrozenMargin: freeze.FromAvailable, FrozenCredit: freeze.FromCredit, Leverage: 10,
+		Status: model.OrderStatusOpen, CreateTime: now, UpdateTime: now,
+	}
+	if err := e.orders.Insert(ctx, sell); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.engine.SubmitOrder(ctx, sell, 1); err != nil {
+		t.Fatal(err)
+	}
+	buy := e.insertOrder(t, other, orderOpts{side: model.SideLong, action: model.ActionOpen, price: "65000", amount: "0.1", margin: "650"})
+	if err := e.engine.SubmitOrder(ctx, buy, 2); err != nil {
+		t.Fatal(err)
+	}
+	e.setMark(t, testSymbol, "10000000")
+
+	e.liq.RiskScanOnce(ctx)
+
+	p := e.position(t, uid, model.SideShort)
+	if p.Status != model.PositionStatusNormal || p.Volume.Sign() <= 0 {
+		t.Fatalf("系统账户的仓位不应该被强平: %+v", p)
+	}
+	if n := len(e.liquidationOrders(t, uid)); n != 0 {
+		t.Fatalf("系统账户不应该挂出强平单, got %d", n)
 	}
 }
 

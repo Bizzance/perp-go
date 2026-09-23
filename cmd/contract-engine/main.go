@@ -147,7 +147,7 @@ func main() {
 		mirrorBinance := &binancefeed.Binance{BaseURL: strings.TrimRight(cfg.MirrorBinanceURL, "/"), Client: &http.Client{Timeout: 5 * time.Second}}
 		mirrorSvc, err = service.NewMirrorService(service.MirrorConfig{
 			Symbols: cfg.MirrorSymbols, Levels: cfg.MirrorLevels, Interval: cfg.MirrorInterval,
-			Leverage: cfg.MirrorLeverage, Balance: cfg.MirrorBalance, StaleAfter: cfg.MirrorStaleAfter,
+			Leverage: cfg.MirrorLeverage, StaleAfter: cfg.MirrorStaleAfter,
 		}, mirrorBinance, accountSvc, orderRepo, coinRepo, engineSvc)
 		if err != nil {
 			log.Fatalf("订单簿镜像配置不合法: %v", err)

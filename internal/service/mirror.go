@@ -26,7 +26,6 @@ type MirrorConfig struct {
 	Levels   int           // 每侧镜像币安盘口的前多少档
 	Interval time.Duration // 每一轮的间隔
 	Leverage int           // 镜像挂单的杠杆。全部保证金分档里最低的最大杠杆是5，用5在哪个档位都不会被拒
-	Balance  string        // 系统账户的余额(USDT)，低于一半时补到这个数——这个账户不对外暴露，余额只是保证FreezeMargin总够用
 	// 币安数据超过这么久没拉成功，就撤掉这个合约的全部镜像挂单、暂停报价：过期的报价留在订单簿里，
 	// 谁比我们更早看到币安的价格，谁就能按旧价成交
 	StaleAfter time.Duration
@@ -42,9 +41,6 @@ func (c MirrorConfig) validate() error {
 		return errors.New("Interval和StaleAfter必须大于0")
 	case c.Leverage <= 0:
 		return errors.New("Leverage必须大于0")
-	}
-	if b, err := decimal.NewFromString(c.Balance); err != nil || b.Sign() <= 0 {
-		return fmt.Errorf("Balance不合法: %q", c.Balance)
 	}
 	return nil
 }
@@ -150,20 +146,12 @@ func (m *MirrorService) Step(ctx context.Context) {
 	wg.Wait()
 }
 
-// 建好系统账户(已经存在就是no-op)、余额低于一半时补到配置的数、查好每个合约的数量精度和最小下单量
+// 建好系统账户(已经存在就是no-op)、查好每个合约的数量精度和最小下单量。系统账户不需要
+// 充值/维护余额——AccountService.FreezeMargin对这个uid有无条件成功的特殊路径，
+// balance/credit只是跟着真实成交自然变化的记账值，不影响能不能挂单
 func (m *MirrorService) ensureReady(ctx context.Context) error {
 	if _, _, err := m.accounts.Create(ctx, UID); err != nil {
 		return fmt.Errorf("创建系统账户%d: %w", UID, err)
-	}
-	view, err := m.accounts.View(ctx, UID)
-	if err != nil {
-		return fmt.Errorf("查系统账户%d: %w", UID, err)
-	}
-	bal, _ := decimal.NewFromString(m.cfg.Balance)
-	if view.Balance.Sub(view.FrozenMargin).LessThan(bal.Div(decimal.NewFromInt(2))) {
-		if _, err := m.accounts.AdjustBalance(ctx, UID, bal, fmt.Sprintf("mirror-topup-%d", m.now().UnixNano())); err != nil {
-			return fmt.Errorf("给系统账户%d充值: %w", UID, err)
-		}
 	}
 	for _, sym := range m.cfg.Symbols {
 		coin, err := m.coins.FindBySymbol(ctx, sym)

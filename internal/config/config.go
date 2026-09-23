@@ -54,13 +54,13 @@ type Config struct {
 
 	// 订单簿镜像(service.MirrorService，contract-engine进程内部直接调用账户/撮合服务把币安
 	// 订单簿镜像成系统账户的真实挂单，不经HTTP/Kafka/分布式锁)，见docs/orderbook-sync.md。
-	// 系统账户uid是固定值(service.UID)，不需要配置。MirrorSymbols为空(没设PERP_MIRROR_SYMBOLS)
-	// 表示不开启，本地开发/大多数集成测试不需要；生产环境必须配置
+	// 系统账户uid是固定值(service.UID)，不需要配置，也不需要配置/维护它的余额——它的
+	// FreezeMargin永远无条件成功，见AccountService.FreezeMargin。MirrorSymbols为空
+	// (没设PERP_MIRROR_SYMBOLS)表示不开启，本地开发/大多数集成测试不需要；生产环境必须配置
 	MirrorSymbols    []string
 	MirrorLevels     int
 	MirrorInterval   time.Duration
 	MirrorLeverage   int
-	MirrorBalance    string
 	MirrorStaleAfter time.Duration
 	MirrorBinanceURL string
 
@@ -233,7 +233,6 @@ func Load(defaultNodeID uint64) Config {
 		MirrorLevels:              int(envInt("PERP_MIRROR_LEVELS", 50)),
 		MirrorInterval:            time.Duration(envInt("PERP_MIRROR_INTERVAL_MS", 1000)) * time.Millisecond,
 		MirrorLeverage:            int(envInt("PERP_MIRROR_LEVERAGE", 5)),
-		MirrorBalance:             envOr("PERP_MIRROR_BALANCE", "1000000000"),
 		MirrorStaleAfter:          time.Duration(envInt("PERP_MIRROR_STALE_SEC", 10)) * time.Second,
 		MirrorBinanceURL:          envOr("PERP_MIRROR_BINANCE_URL", "https://fapi.binance.com"),
 	}

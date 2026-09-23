@@ -171,6 +171,14 @@ func (r *AccountRepo) AdjustFrozenMargin(ctx context.Context, id uint64, availab
 	return affected(res, err)
 }
 
+// 系统账户(service.UID，镜像挂单用)专用：无条件把frozen_margin加上amount，不检查
+// balance/credit够不够。系统账户代表系统自己的资金，视为无限，永远冻结成功，
+// 见service.AccountService.FreezeMargin对这个uid的特殊路径
+func (r *AccountRepo) FreezeUnconditional(ctx context.Context, id uint64, amount decimal.Decimal) error {
+	_, err := r.db.ExecContext(ctx, `UPDATE accounts SET frozen_margin = frozen_margin + ? WHERE id = ?`, amount, id)
+	return err
+}
+
 // 已实现盈亏/强平清算缓冲结算：盈利(amount>=0)直接进balance，不动credit——赚的
 // 是新钱，没有变现风险。亏损(amount<0)走"先扣balance、balance里属于自己的正数部分耗尽了
 // 再扣credit、credit也耗尽了才让balance继续变负"的顺序——让运营发放的信用额度尽量少被

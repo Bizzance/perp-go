@@ -53,12 +53,11 @@ services:
       PERP_ENGINE_SYMBOLS: ${PERP_ENGINE_SYMBOLS:-}
       # 订单簿镜像：把币安的订单簿直接镜像成系统账户的真实挂单，进程内直接调用，不经HTTP/分布式锁，
       # 见docs/orderbook-sync.md。**生产必须配置PERP_MIRROR_SYMBOLS**，不然订单簿是空的，用户下单没有对手方。
-      # 系统账户uid是固定值(service.UID)，不需要配置
+      # 系统账户uid是固定值(service.UID)，不需要配置，也不需要充值/维护余额
       PERP_MIRROR_SYMBOLS: ${PERP_MIRROR_SYMBOLS:-}
       PERP_MIRROR_LEVELS: ${PERP_MIRROR_LEVELS:-}
       PERP_MIRROR_INTERVAL_MS: ${PERP_MIRROR_INTERVAL_MS:-}
       PERP_MIRROR_LEVERAGE: ${PERP_MIRROR_LEVERAGE:-}
-      PERP_MIRROR_BALANCE: ${PERP_MIRROR_BALANCE:-}
       PERP_MIRROR_STALE_SEC: ${PERP_MIRROR_STALE_SEC:-}
       PERP_MIRROR_BINANCE_URL: ${PERP_MIRROR_BINANCE_URL:-}
     # 默认只绑本机回环地址：目前没有鉴权，不能直接暴露到网络。生产在前面放带鉴权/TLS的

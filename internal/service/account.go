@@ -127,7 +127,21 @@ type FreezeResult struct {
 //     买力开新仓"，强制冻结、允许free balance变负；不动credit——浮盈不确定，不该跟已经到账的
 //     保险赔付混在一起算作已用掉
 //  4. 都不够 → 拒绝
+//
+// 系统账户(镜像挂单用，见MirrorService的UID常量)是例外：它代表系统自己的资金，不是某个
+// 真实用户的钱，视为无限，永远无条件冻结成功，不走上面这套买力校验，也不需要预先充值/维护
+// 一个具体的余额数字；它也不会被LiquidationService.RiskScanOnce强平。
 func (s *AccountService) FreezeMargin(ctx context.Context, uid uint64, amount decimal.Decimal) (FreezeResult, error) {
+	if uid == UID {
+		account, err := s.accounts.GetOrCreate(ctx, uid)
+		if err != nil {
+			return FreezeResult{}, err
+		}
+		if err := s.accounts.FreezeUnconditional(ctx, account.ID, amount); err != nil {
+			return FreezeResult{}, err
+		}
+		return FreezeResult{FromAvailable: amount}, nil
+	}
 	account, err := s.accounts.GetOrCreate(ctx, uid)
 	if err != nil {
 		return FreezeResult{}, err
