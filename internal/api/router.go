@@ -1314,11 +1314,15 @@ func (s *Server) conditionalOrderHistory(c *gin.Context) {
 }
 
 func (s *Server) positionCurrent(c *gin.Context) {
-	uid, ok1 := s.parseAccountUID(c)
+	uid, ok1 := parseUID(c)
 	if !ok1 {
 		return
 	}
-	views, err := s.positions.Views(c.Request.Context(), uid)
+	account := s.loadAccount(c, uid)
+	if account == nil {
+		return
+	}
+	views, err := s.positions.Views(c.Request.Context(), uid, account.IsInsured, account.Balance.Add(account.Credit))
 	if err != nil {
 		fail(c, 500, err.Error())
 		return

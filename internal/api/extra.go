@@ -437,7 +437,7 @@ func (s *Server) sweepOpenOrders(ctx context.Context, uid uint64, result *setAcc
 // ---------- 资金流水 / 强平记录 ----------
 
 var validTxTypes = map[string]bool{
-	model.TxDeposit: true, model.TxFee: true, model.TxRealizedPnl: true, model.TxLiquidationClear: true,
+	model.TxDeposit: true, model.TxFee: true, model.TxRealizedPnl: true,
 	model.TxFundingFee: true, model.TxCreditGrant: true, model.TxRoundClose: true,
 }
 

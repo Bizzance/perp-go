@@ -71,13 +71,14 @@ const (
 
 // TransactionType 资金流水类型——纯审计用途的字符串常量，不参与任何计算
 const (
-	TxDeposit          = "deposit"           // 资金账户注入(正数)/扣减(负数)
-	TxFee              = "fee"               // 交易手续费(负数)
-	TxRealizedPnl      = "realized_pnl"      // 平仓已实现盈亏(可正可负)
-	TxLiquidationClear = "liquidation_clear" // 强平结算后清算维持保证金缓冲进保险基金，用户侧记为负数
-	TxFundingFee       = "funding_fee"       // 资金费率结算，多头/空头互相划转，可正可负
-	TxCreditGrant      = "credit_grant"      // 合作方发放/追加信用额度(正数)
-	TxRoundClose       = "round_close"       // 结束本轮：信用额度清零，用户侧记为负数(不是亏损，是回收没用完的赔付额度)
+	TxDeposit     = "deposit"      // 资金账户注入(正数)/扣减(负数)
+	TxFee         = "fee"          // 交易手续费(负数)
+	TxRealizedPnl = "realized_pnl" // 平仓已实现盈亏(可正可负)
+	TxFundingFee  = "funding_fee"  // 资金费率结算，多头/空头互相划转，可正可负
+	TxCreditGrant = "credit_grant" // 合作方发放/追加信用额度，含投保触发强平时的自动赔付(正数)
+	TxRoundClose  = "round_close"  // 结束本轮：balance/credit都清零(每轮都是独立的资金周期)，
+	// 用户侧记为负数——不是亏损，balance这部分对应退给用户的钱(由合作方在系统外处理)，
+	// credit这部分是回收没用完的赔付额度
 )
 
 // 资金流水一行(member_transactions表)，Amount正数=入账、负数=出账，Type见上面Tx*常量
@@ -242,29 +243,24 @@ func (p *Position) UnrealizedPnl(markPrice decimal.Decimal) decimal.Decimal {
 	return p.AvgEntryPrice.Sub(markPrice).Mul(p.Volume)
 }
 
-// 单仓强平价估算(逐仓式公式，仅供展示参考)——维持保证金要求按分档公式
-// notional * mmr-maintenanceAmount推导：
-// 多头：liqPrice = (avgEntryPrice*N - positionMargin - maintenanceAmount) / (N * (1 - mmr))
-// 空头：liqPrice = (avgEntryPrice*N + positionMargin + maintenanceAmount) / (N * (1 + mmr))
-// 全仓真实强平以LiquidationService里"账户权益 vs 全部仓位维持保证金要求之和"为准，
-// 这个值只在没有其它持仓、也不考虑balance缓冲时才精确，MVP先用这个简化公式做展示
-func (p *Position) LiquidationPrice(mmr, maintenanceAmount decimal.Decimal) decimal.Decimal {
+// 单仓强平价估算(逐仓式公式，仅供展示参考)——维持保证金要求是"账户亏损达到lossRatio的
+// balance+credit"(未投保100%、已投保80%，投保保的是整个账户，不是单笔仓位，见
+// LiquidationService.checkAndLiquidate)，equityBase是这个账户当前的balance+credit。
+// 用单仓近似推导(忽略账户里其它仓位的浮盈亏)：equity ≈ equityBase + unrealizedPnl，
+// 触发条件unrealizedPnl <= -lossRatio*equityBase：
+// 多头：liqPrice = avgEntryPrice - lossRatio*equityBase/volume
+// 空头：liqPrice = avgEntryPrice + lossRatio*equityBase/volume
+// 全仓真实强平以LiquidationService里"账户权益 vs lossRatio*(balance+credit)"为准，这个值
+// 只在没有其它持仓时才精确，MVP先用这个简化公式做展示
+func (p *Position) LiquidationPrice(lossRatio, equityBase decimal.Decimal) decimal.Decimal {
 	if p.Volume.IsZero() {
 		return decimal.Zero
 	}
-	entryTimesN := p.AvgEntryPrice.Mul(p.Volume)
+	buffer := lossRatio.Mul(equityBase).Div(p.Volume)
 	if p.Side == SideLong {
-		denom := p.Volume.Mul(decimal.NewFromInt(1).Sub(mmr))
-		if denom.Sign() <= 0 {
-			return decimal.Zero
-		}
-		return decimal.Max(decimal.Zero, entryTimesN.Sub(p.PositionMargin).Sub(maintenanceAmount).Div(denom))
+		return decimal.Max(decimal.Zero, p.AvgEntryPrice.Sub(buffer))
 	}
-	denom := p.Volume.Mul(decimal.NewFromInt(1).Add(mmr))
-	if denom.Sign() <= 0 {
-		return decimal.Zero
-	}
-	return decimal.Max(decimal.Zero, entryTimesN.Add(p.PositionMargin).Add(maintenanceAmount).Div(denom))
+	return p.AvgEntryPrice.Add(buffer)
 }
 
 type Trade struct {

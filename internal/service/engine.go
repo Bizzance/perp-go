@@ -478,23 +478,21 @@ func (e *EngineService) marketOrderPriceLimit(ctx context.Context, order *model.
 // 兜底直接结算见liquidation.go的settleTimeoutFallback，两条路径都会走到这里)。side是刚
 // 被强平的这个仓位的方向，穿仓分支触发ADL时要用来定位"该向哪个方向的持仓者强制减仓"（跟
 // 被强平方向相反——比如多头被强平是因为价格下跌亏钱，跟这次价格下跌方向相反、真正因为
-// 这次下跌赚钱的是空头，ADL该找空头里最赚钱的仓位，不是随便找）。判断依据是available+
-// credit的合计，不是available单独判断——credit也是账户权益的一部分(见Equity)。走到判断的时候
-// 这个uid已经没有仓位了，仓位保证金是0，所以available+credit就是账户权益，跟触发强平时用的
-// 权益口径一致：
+// 这次下跌赚钱的是空头，ADL该找空头里最赚钱的仓位，不是随便找）。走到判断的时候这个uid
+// 已经没有仓位了，仓位保证金是0，free balance/free credit就是balance/credit本身：
 //  0. 前提：这个uid名下已经没有剩余仓位(见函数体里的说明)，还有仓位没平完就什么都不做
-//  1. 合计为负(穿仓)：用户自己的钱和信用额度都耗尽了还倒欠钱。保险基金余额不够覆盖这笔
-//     缺口时，先用ADL(runADL，见adl.go)强制减仓对手方最赚钱的仓位补一部分，补不满剩下的
-//     仍然由基金硬扛(基金余额可能因此变得更负)，这是明确接受的取舍，不是ADL的失败——极端
-//     行情下没有足够的反向盈利仓位可以减，基金兜底是最后一道防线
-//  2. 合计为正：这部分是维持保证金要求留下
-//     的缓冲，不退给用户——真实交易所是按破产价结算、多出来的差价当清算费进保险基金，这里
-//     不改结算价格/撮合逻辑，改成结算完直接把这部分正数余额扫进保险基金、账户清零，经济
-//     结果等价
-//
-// 两种情况下available和credit最终都会被清零——不管available/credit各自是正是负，"结清"
-// 的终态就是两个字段都变成0，保险基金拿走或垫付两者的合计净值，这里不需要区分"先清哪个"：
-// 清算的是两个字段的总和，不是循环着一点点从某个字段里扣，最终状态跟顺序无关
+//  1. balance是负的：先用credit垫平，这只是balance/credit两个桶之间的内部挪用，不算穿仓、
+//     不动保险基金
+//  2. credit垫不平剩下的缺口(或者credit本来就是0)：真正的穿仓，用户自己的钱和信用额度都
+//     耗尽了还倒欠钱。保险基金余额不够覆盖这笔缺口时，先用ADL(runADL，见adl.go)强制减仓
+//     对手方最赚钱的仓位补一部分，补不满剩下的仍然由基金硬扛(基金余额可能因此变得更负)，
+//     这是明确接受的取舍，不是ADL的失败——极端行情下没有足够的反向盈利仓位可以减，基金
+//     兜底是最后一道防线
+//  3. balance/credit垫平缺口之后(或者本来就没有缺口)还有正数结余：不扫进保险基金、不清零，
+//     留给用户——只要账户没结束本轮(round/close)，这笔钱(不管是本金结余、运营手动发的
+//     credit、还是投保触发强平时自动赔付的credit)还能继续用来交易。这跟真实交易所"清算费
+//     进保险基金"的惯例不同，是这个系统的产品口径：用户账户不会因为一次强平被"没收"，只有
+//     显式结束本轮才会清账(见AccountService.CloseRound)
 //
 // 同一个uid的这个结算在锁里串行执行：一个uid的多个仓位是各自异步平仓的，两个仓位几乎同时平完时
 // 会同时进到这里。不串行的话，两边可能读到同一份"缺口"各自垫付一遍，或者一边读余额之后另一边
@@ -541,12 +539,28 @@ func (e *EngineService) settleLiquidationAftermath(ctx context.Context, symbol s
 	if err != nil {
 		return err
 	}
-	combined := freeBalance.Add(freeCredit)
-	if combined.Sign() == 0 {
+	if freeBalance.Sign() == 0 && freeCredit.Sign() == 0 {
 		return nil
 	}
-	if combined.Sign() < 0 {
-		shortfall := combined.Neg()
+	// balance是负的先用credit垫平——这只是balance/credit两个桶之间的内部挪用，不算穿仓、
+	// 不动保险基金；credit垫不平的部分才是真正的穿仓，下面才需要基金/ADL兜底
+	if freeBalance.Sign() < 0 {
+		deficit := freeBalance.Neg()
+		covered := decimal.Min(freeCredit, deficit)
+		if covered.Sign() > 0 {
+			if err := e.accounts.SettleToBalance(ctx, uid, covered); err != nil {
+				return err
+			}
+			if err := e.accounts.SettleToCredit(ctx, uid, covered.Neg()); err != nil {
+				return err
+			}
+			freeBalance = freeBalance.Add(covered)
+			freeCredit = freeCredit.Sub(covered)
+		}
+	}
+	if freeBalance.Sign() < 0 {
+		// credit已经在上面用光了(freeCredit此时是0)，剩下的缺口才是真穿仓
+		shortfall := freeBalance.Neg()
 		fundBalance, err := e.fund.FreshBalance(ctx)
 		if err != nil {
 			return err
@@ -559,20 +573,11 @@ func (e *EngineService) settleLiquidationAftermath(ctx context.Context, symbol s
 		if err := e.fund.Adjust(ctx, symbol, uid, 0, shortfall.Neg(), "强平穿仓垫付"); err != nil {
 			return err
 		}
-		if err := e.accounts.SettleToBalance(ctx, uid, freeBalance.Neg()); err != nil {
-			return err
-		}
-		return e.accounts.SettleToCredit(ctx, uid, freeCredit.Neg())
+		return e.accounts.SettleToBalance(ctx, uid, shortfall)
 	}
-	log.Printf("[WARN] 强平后账户仍有维持保证金缓冲，按清算费扫入保险基金, uid=%d, 缓冲=%s(balance=%s, credit=%s)",
-		uid, combined, freeBalance, freeCredit)
-	if err := e.fund.Adjust(ctx, symbol, uid, 0, combined, "全仓强平清算费(维持保证金缓冲)"); err != nil {
-		return err
-	}
-	if err := e.accounts.SettleToBalance(ctx, uid, freeBalance.Neg()); err != nil {
-		return err
-	}
-	return e.accounts.SettleToCredit(ctx, uid, freeCredit.Neg())
+	// balance(可能还有没花完的credit)是非负的：不扫进保险基金、不清零，留给用户继续交易，
+	// 见函数顶部doc comment第3点
+	return nil
 }
 
 // 撤掉这个uid全部还没成交的用户委托和还没触发的条件单，返回撤单失败的笔数(失败的已经记了ERROR日志)。

@@ -2,6 +2,7 @@ package service
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"sync"
 	"time"
@@ -82,8 +83,17 @@ func (s *LiquidationService) RiskScanOnce(ctx context.Context) {
 	}
 }
 
+// 投保赔付：触发强平线时，按投保基准(账户当前balance+credit)的这个比例发放信用额度，
+// 见checkAndLiquidate。用户买了保险(合作方已经收了保费，我们只负责赔付)，亏到强平线
+// 就该赔付，不用等真正平仓结算完——那时候balance已经被这次亏损打没了，不是"投保基准"
+var insurancePayoutRatio = decimal.RequireFromString("0.5")
+
 func (s *LiquidationService) checkAndLiquidate(ctx context.Context, uid uint64) error {
-	maintainTotal, positions, err := s.positionSvc.MaintenanceMarginTotal(ctx, uid)
+	account, err := s.accounts.Find(ctx, uid)
+	if err != nil || account == nil {
+		return err
+	}
+	positions, err := s.positionSvc.FindByUID(ctx, uid)
 	if err != nil || len(positions) == 0 {
 		return err
 	}
@@ -99,10 +109,6 @@ func (s *LiquidationService) checkAndLiquidate(ctx context.Context, uid uint64) 
 			return nil
 		}
 	}
-	account, err := s.accounts.Find(ctx, uid)
-	if err != nil || account == nil {
-		return err
-	}
 	totalUnrealized, err := s.positionSvc.TotalUnrealizedPnl(ctx, uid)
 	if err != nil {
 		return err
@@ -110,8 +116,26 @@ func (s *LiquidationService) checkAndLiquidate(ctx context.Context, uid uint64) 
 	// 账户权益见Equity：balance/credit是不随冻结变化的总额，已经包含了挂单冻结/仓位占用的
 	// 保证金，不需要再单独加一遍——加了反而是重复计算
 	equity := Equity(account, totalUnrealized)
+	// 维持保证金要求=账户当前balance+credit(投保保的是整个账户，不是某一笔仓位，是产品口径
+	// 的简化决定，见PositionService.LossRatioUninsured/LossRatioInsured)乘以剩余比例：
+	// 未投保要亏光全部余额(100%)才强平，已投保收紧到亏损80%就强平
+	equityBase := account.Balance.Add(account.Credit)
+	maintainTotal := equityBase.Mul(decimal.NewFromInt(1).Sub(lossRatioFor(account.IsInsured)))
 	if equity.GreaterThan(maintainTotal) {
 		return nil
+	}
+	// 已投保的账户，一进入强平线就发放赔付——不依赖下面的"新触发"判断，只要还在强平线以下
+	// 就每轮都尝试，GrantCredit按uid+round幂等，第一次成功之后重复调用直接replayed、
+	// 不会多发；这样即使某一轮调用瞬时失败(网络抖动之类)，下一轮风控扫描还有机会重试，
+	// 不会因为下面pending过滤掉已经在LIQUIDATING的仓位就再也没有机会发赔付
+	if account.IsInsured {
+		payout := equityBase.Mul(insurancePayoutRatio)
+		if payout.Sign() > 0 {
+			reqID := fmt.Sprintf("liq-insurance-%d-r%d", uid, account.Round)
+			if _, err := s.accounts.GrantCredit(ctx, uid, payout, reqID); err != nil {
+				log.Printf("[ERROR] 投保赔付发放失败, uid=%d, amount=%s: %v", uid, payout, err)
+			}
+		}
 	}
 	// 过滤掉已经在LIQUIDATING的仓位(上一轮扫描已经挂出强平单、还在排队/等超时兜底)——不然
 	// 这条告警日志会在整个强平窗口期(最多到LiquidationOrderTimeoutMs)里每个扫描周期重复刷屏，

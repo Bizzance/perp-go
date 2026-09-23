@@ -329,13 +329,14 @@ func TestLiquidation_WashTradeLiquidatesInLegacyModeWithoutIndex(t *testing.T) {
 	a := e.newAccount(t, 1, "1000")
 	b := e.newAccount(t, 2, "10000")
 	e.openLongAgainst(t, a, b, testSymbol, "65000", "0.1", "650")
+	e.setCredit(t, a, "0", true) // 投保(阈值199.35)才会在55250这个价位触发，未投保阈值是0
 
 	e.trade(t, "55250")
 	mustDec(t, e.mark(t), "55250", "没有指数价，标记价=最新成交价")
 	e.liq.RiskScanOnce(context.Background())
 
 	waitFor(t, "挂出强平委托", func() bool { return len(e.liquidationOrders(t, a)) == 1 })
-	e.waitLiquidationDone(t, a, 1)
+	e.waitLiquidationDone(t, a, 0) // 权益是正的(21.75)，没有穿仓，不涉及保险基金
 }
 
 // 指数价断供：即使标记价已经在强平线以下，也不做强平判断；喂价恢复后才强平
@@ -345,6 +346,7 @@ func TestLiquidation_PausedWhileIndexIsStale(t *testing.T) {
 	a := e.newAccount(t, 1, "1000")
 	b := e.newAccount(t, 2, "10000")
 	e.openLongAgainst(t, a, b, testSymbol, "65000", "0.1", "650")
+	e.setCredit(t, a, "0", true) // 投保(阈值199.35)才会在55250这个价位触发，未投保阈值是0
 	// a还挂着一笔买单：误触发强平会先把它撤掉，所以它还在就说明连"触发"这一步都没有发生
 	pending := e.insertOrder(t, a, orderOpts{side: model.SideLong, action: model.ActionOpen, price: "50000", amount: "0.01", margin: "50"})
 	if err := e.engine.SubmitOrder(context.Background(), pending, 9); err != nil {
@@ -370,7 +372,7 @@ func TestLiquidation_PausedWhileIndexIsStale(t *testing.T) {
 	e.feedIndex(t, "55250") // 喂价恢复
 	e.liq.RiskScanOnce(context.Background())
 	waitFor(t, "喂价恢复后挂出强平委托", func() bool { return len(e.liquidationOrders(t, a)) == 1 })
-	e.waitLiquidationDone(t, a, 1)
+	e.waitLiquidationDone(t, a, 0) // 权益是正的(21.75)，没有穿仓，不涉及保险基金
 }
 
 // 资金费率：喂价断了不采样、不结算(用过期价格算出来的溢价率和资金费都不可信)，恢复后照常

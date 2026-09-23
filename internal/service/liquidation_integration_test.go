@@ -133,48 +133,104 @@ func TestLiquidation_FullyUsedPositionIsNotLiquidatedWithoutPriceMove(t *testing
 	}
 }
 
-// ---- 触发边界 ----
+// ---- 触发边界：维持保证金要求现在是"账户当前balance+credit亏损达到固定比例"——投保保的是
+// 整个账户，不是某一笔仓位的保证金。未投保100%(权益<=0才触发)、已投保80%(权益<=20%*(balance+
+// credit)才触发)，不再用risk_limit_tiers的分档mmr公式，见
+// PositionService.LossRatioUninsured/LossRatioInsured、LiquidationService.checkAndLiquidate ----
 
-// a充值1000，开仓后权益=996.75+0.1*(标记价-65000)，维持保证金=0.1*标记价*0.4%。
-// 标记价55300：权益26.75 > 维持22.12，不触发；标记价55250：权益21.75 <= 维持22.1，触发
-func TestLiquidation_TriggerBoundary(t *testing.T) {
+// a充值1000，开仓后balance=996.75(扣taker手续费3.25)，权益=996.75+0.1*(标记价-65000)。
+// 未投保：维持保证金要求=996.75*(1-100%)=0，标记价55040：权益0.75 > 0，不触发；
+// 标记价55030：权益-0.25 <= 0，触发
+func TestLiquidation_TriggerBoundary_Uninsured(t *testing.T) {
 	e := newEngineEnv(t)
 	ctx := context.Background()
 	a := e.newAccount(t, 1, "1000")
 	b := e.newAccount(t, 2, "10000")
 	e.openLongAgainst(t, a, b, testSymbol, "65000", "0.1", "650")
 
-	e.setMark(t, testSymbol, "55300")
+	e.setMark(t, testSymbol, "55040")
 	e.liq.RiskScanOnce(ctx)
 	if p := e.position(t, a, model.SideLong); p.Status != model.PositionStatusNormal {
-		t.Fatalf("权益高于维持保证金不应该触发, status=%s", p.Status)
+		t.Fatalf("权益还没亏光初始保证金，不应该触发, status=%s", p.Status)
 	}
 	if n := len(e.liquidationOrders(t, a)); n != 0 {
 		t.Fatalf("不应该有强平委托, got %d", n)
 	}
 
-	e.setMark(t, testSymbol, "55250")
+	e.setMark(t, testSymbol, "55030")
 	e.liq.RiskScanOnce(ctx)
 	// 强平单是异步goroutine里落库的，RiskScanOnce返回时可能还没写入
 	waitFor(t, "挂出强平委托", func() bool { return len(e.liquidationOrders(t, a)) == 1 })
 	e.waitLiquidationDone(t, a, 1) // 等异步的强平走完，别让它在测试库被删掉之后还在跑
 }
 
+// 同样的账户投保之后(不发信用额度，只改投保状态；用setCredit(amount="0")是为了避免顺带
+// 触发下面的投保赔付把balance/credit算复杂)：维持保证金要求=996.75*(1-80%)=199.35，
+// 标记价57030：权益199.75 > 199.35，不触发；标记价57020：权益198.75 <= 199.35，触发——
+// 阈值比未投保时宽松得多(198.75远大于0)
+func TestLiquidation_TriggerBoundary_Insured(t *testing.T) {
+	e := newEngineEnv(t)
+	ctx := context.Background()
+	a := e.newAccount(t, 1, "1000")
+	b := e.newAccount(t, 2, "10000")
+	e.openLongAgainst(t, a, b, testSymbol, "65000", "0.1", "650")
+	e.setCredit(t, a, "0", true)
+
+	e.setMark(t, testSymbol, "57030")
+	e.liq.RiskScanOnce(ctx)
+	if p := e.position(t, a, model.SideLong); p.Status != model.PositionStatusNormal {
+		t.Fatalf("权益还没跌破投保阈值，不应该触发, status=%s", p.Status)
+	}
+	if n := len(e.liquidationOrders(t, a)); n != 0 {
+		t.Fatalf("不应该有强平委托, got %d", n)
+	}
+
+	e.setMark(t, testSymbol, "57020")
+	e.liq.RiskScanOnce(ctx)
+	waitFor(t, "挂出强平委托", func() bool { return len(e.liquidationOrders(t, a)) == 1 })
+	e.waitLiquidationDone(t, a, 0) // 权益是正的(198.75)，没有穿仓，不涉及保险基金
+}
+
+// 用户随时可以投保，投保后强平线立刻变严格：同一个标记价，未投保时权益还没跌破0(不触发)，
+// 投保之后跌破199.35(触发)——不需要等下一轮价格变化，下一次风控扫描直接用新的投保状态判断
+func TestLiquidation_BuyingInsuranceTightensThresholdImmediately(t *testing.T) {
+	e := newEngineEnv(t)
+	ctx := context.Background()
+	a := e.newAccount(t, 1, "1000")
+	b := e.newAccount(t, 2, "10000")
+	e.openLongAgainst(t, a, b, testSymbol, "65000", "0.1", "650")
+	// 权益=996.75+0.1*(56032-65000)=99.95：未投保(阈值0)不触发，已投保(阈值199.35)会触发
+	e.setMark(t, testSymbol, "56032")
+
+	e.liq.RiskScanOnce(ctx)
+	if p := e.position(t, a, model.SideLong); p.Status != model.PositionStatusNormal {
+		t.Fatalf("未投保，权益还没亏光全部余额，不应该触发, status=%s", p.Status)
+	}
+
+	e.setCredit(t, a, "0", true)
+	e.liq.RiskScanOnce(ctx)
+	waitFor(t, "投保后阈值收紧，同样的标记价立刻触发强平", func() bool { return len(e.liquidationOrders(t, a)) == 1 })
+	e.waitLiquidationDone(t, a, 0) // 权益是正的(99.95)，没有穿仓，不涉及保险基金
+}
+
 // ---- 强平之后的资金结局 ----
 
-// 强平单在订单簿里被吃掉，成交价是对手挂单的价格；平仓后还剩正数(维持保证金留下的缓冲)，
-// 没有别的仓位了，这部分扫进保险基金，账户清零
+// 强平单在订单簿里被吃掉，成交价是对手挂单的价格；平仓后balance/credit都还剩正数，两者都
+// 不算穿仓、都不扫进保险基金，留给用户继续交易。账户投保(阈值199.35)才会在55250这个价位
+// 触发——未投保阈值是0，55250时权益21.75还是正的，不会触发，见
+// TestLiquidation_TriggerBoundary_Uninsured
 func TestLiquidation_FilledAgainstBookSweepsBufferIntoFund(t *testing.T) {
 	e := newEngineEnv(t)
 	a := e.newAccount(t, 1, "1000")
 	b := e.newAccount(t, 2, "10000")
 	c := e.newAccount(t, 3, "10000")
 	e.openLongAgainst(t, a, b, testSymbol, "65000", "0.1", "650")
+	e.setCredit(t, a, "0", true)
 	e.restBid(t, c, "55300", "0.1", "553")
 	e.setMark(t, testSymbol, "55250")
 
 	e.liq.RiskScanOnce(context.Background())
-	e.waitLiquidationDone(t, a, 1)
+	e.waitLiquidationDone(t, a, 0) // 没有穿仓，不涉及保险基金
 
 	orders := e.liquidationOrders(t, a)
 	if len(orders) != 1 || orders[0].Status != model.OrderStatusFilled {
@@ -182,39 +238,71 @@ func TestLiquidation_FilledAgainstBookSweepsBufferIntoFund(t *testing.T) {
 	}
 	// 保护价=55250-55250*0.004*2=54808，对手买单挂在55300(在保护价之上)，按对手价55300成交
 	mustDec(t, orders[0].AvgDealPrice, "55300", "强平成交价")
-	// 平仓盈亏(55300-65000)*0.1=-970，taker手续费5530*0.0005=2.765；
-	// 平仓后可用=346.75+650保证金退回-970-2.765=23.985，全部扫进保险基金
+	// 平仓盈亏(55300-65000)*0.1=-970，taker手续费5530*0.0005=2.765；balance=996.75-970-2.765=
+	// 23.985(650保证金本来就没从balance里扣过，解锁不改变balance)，不算穿仓，留给用户
 	mustDec(t, e.ledgerSum(t, a, model.TxRealizedPnl), "-970", "已实现盈亏")
 	acc := e.account(t, a)
-	mustDec(t, acc.Balance, "0", "缓冲扫进基金后账户清零")
-	mustDec(t, acc.Credit, "0", "信用额度清零")
-	mustDec(t, e.fundBalance(t), "23.985", "保险基金余额")
-	mustDec(t, e.fundLedgerAmount(t, "全仓强平清算费(维持保证金缓冲)"), "23.985", "基金流水")
+	mustDec(t, acc.Balance, "23.985", "没有穿仓，balance留给用户，不扫进基金")
+	// 触发那一刻(mark=55250前)投保赔付=(balance996.75+credit0)*50%=498.375
+	mustDec(t, acc.Credit, "498.375", "投保赔付留在信用额度里")
+	mustDec(t, e.fundBalance(t), "0", "没有穿仓，基金不受影响")
 }
 
-// 没有对手盘时靠超时兜底：撤掉强平单，按标记价直接结算，结果跟在订单簿成交是同一套账
+// 没有对手盘时靠超时兜底：撤掉强平单，按标记价直接结算，结果跟在订单簿成交是同一套账。
+// 账户投保(阈值199.35)才会在55250这个价位触发，理由同上一个测试
 func TestLiquidation_TimeoutFallbackSettlesAtMarkPrice(t *testing.T) {
 	e := newEngineEnv(t)
 	a := e.newAccount(t, 1, "1000")
 	b := e.newAccount(t, 2, "10000")
 	e.openLongAgainst(t, a, b, testSymbol, "65000", "0.1", "650")
+	e.setCredit(t, a, "0", true)
 	e.setMark(t, testSymbol, "55250")
 
 	e.liq.RiskScanOnce(context.Background())
-	e.waitLiquidationDone(t, a, 1)
+	e.waitLiquidationDone(t, a, 0) // 没有穿仓，不涉及保险基金
 
 	orders := e.liquidationOrders(t, a)
 	if len(orders) != 1 || orders[0].Status != model.OrderStatusFilled {
 		t.Fatalf("兜底后强平委托应该是filled, got %+v", orders)
 	}
 	mustDec(t, orders[0].AvgDealPrice, "55250", "兜底按标记价结算")
-	// (55250-65000)*0.1=-975，手续费5525*0.0005=2.7625；346.75+650-975-2.7625=18.9875
+	// (55250-65000)*0.1=-975，手续费5525*0.0005=2.7625；balance=996.75-975-2.7625=18.9875
+	// (650保证金本来就没从balance里扣过，解锁不改变balance，见account-and-margin.md)
 	mustDec(t, e.ledgerSum(t, a, model.TxRealizedPnl), "-975", "已实现盈亏")
-	mustDec(t, e.fundBalance(t), "18.9875", "保险基金余额")
-	mustDec(t, e.account(t, a).Balance, "0", "账户清零")
+	mustDec(t, e.fundBalance(t), "0", "没有穿仓，基金不受影响")
+	mustDec(t, e.account(t, a).Balance, "18.9875", "没有穿仓，balance留给用户，不扫进基金")
+	mustDec(t, e.account(t, a).Credit, "498.375", "投保赔付=(996.75+0)*50%，留在信用额度里")
 	if e.book.BookFor(testSymbol).Contains(orders[0].OrderID) {
 		t.Fatal("兜底之后强平单不应该还留在订单簿里")
 	}
+}
+
+// ---- 投保赔付：触发强平线那一刻，按(balance+credit)*50%发放信用额度，不用等平仓结算完 ----
+
+// a充值1000开仓500(50000@0.1，杠杆10)，投保。balance=1000-2.5(手续费)=997.5，投保阈值=
+// 997.5*20%=199.5，权益=997.5+0.1*(标记价-50000)<=199.5即触发(标记价<=42020)。一旦触发就
+// 应该立刻拿到(997.5+0)*50%=498.75的信用额度，不需要等强平单真正成交
+func TestLiquidation_InsuredAccountGetsCreditPayoutOnTrigger(t *testing.T) {
+	e := newEngineEnv(t)
+	ctx := context.Background()
+	a := e.newAccount(t, 1, "1000")
+	b := e.newAccount(t, 2, "10000")
+	e.openLongAgainst(t, a, b, testSymbol, "50000", "0.1", "500")
+	e.setCredit(t, a, "0", true)
+	e.setMark(t, testSymbol, "42000")
+
+	e.liq.RiskScanOnce(ctx)
+	waitFor(t, "投保赔付到账", func() bool {
+		return e.account(t, a).Credit.Equal(decimalOf(t, "498.75"))
+	})
+
+	// 再扫几轮：GrantCredit按uid+round幂等，重复触发不能重复发放
+	for i := 0; i < 3; i++ {
+		e.liq.RiskScanOnce(ctx)
+	}
+	time.Sleep(100 * time.Millisecond)
+	mustDec(t, e.account(t, a).Credit, "498.75", "多轮风控扫描不能重复发放赔付")
+	e.waitLiquidationDone(t, a, 0) // 触发时权益是正的(197.5)，没有穿仓，不涉及保险基金
 }
 
 // 穿仓：a只充值700，标记价跌到50000，平仓后可用余额为负。保险基金够的话由基金垫付、不动ADL，
@@ -267,7 +355,7 @@ func TestLiquidation_ShortfallTriggersADLWhenFundInsufficient(t *testing.T) {
 // 多仓位账户：先平完的仓位结算后free balance(balance-frozen_margin)可能暂时为负，但别的
 // 仓位的保证金还锁在frozen_margin里，这时候不能让基金垫付(也不能触发ADL)——等保证金解锁
 // 才知道有没有真的穿仓。确定性场景：直接构造"BTC仓位刚平完释放了它的650锁定、free balance=-100，
-// ETH仓位(300锁定)还开着"的状态
+// ETH仓位(300锁定)还开着"的状态。全部平完后如果是正数结余，不算穿仓，留给用户，不扫进保险基金
 func TestLiquidation_ShortfallDeferredWhileAnotherPositionStillOpen(t *testing.T) {
 	e := newEngineEnv(t)
 	ctx := context.Background()
@@ -295,7 +383,8 @@ func TestLiquidation_ShortfallDeferredWhileAnotherPositionStillOpen(t *testing.T
 		t.Fatalf("不应该有基金流水, got %d", n)
 	}
 
-	// 最后一个仓位也平完(模拟：ETH仓位归零，它的300锁定也释放)，这时才结算：合计为正200是缓冲，扫进基金
+	// 最后一个仓位也平完(模拟：ETH仓位归零，它的300锁定也释放)，这时才结算：合计为正200，
+	// 不是穿仓，留给用户，不动保险基金
 	if _, err := e.db.Exec(`UPDATE positions SET volume = 0, position_margin = 0, status = 'closed' WHERE uid = ? AND symbol = 'ETHUSDT'`, a); err != nil {
 		t.Fatal(err)
 	}
@@ -305,8 +394,8 @@ func TestLiquidation_ShortfallDeferredWhileAnotherPositionStillOpen(t *testing.T
 	if err := e.engine.HandleLiquidationSettleAftermath(ctx, "ETHUSDT", a, model.SideLong); err != nil {
 		t.Fatal(err)
 	}
-	mustDec(t, e.account(t, a).Balance, "0", "全部仓位平完之后才结清")
-	mustDec(t, e.fundBalance(t), "1200", "缓冲扫进基金")
+	mustDec(t, e.account(t, a).Balance, "200", "全部仓位平完之后，正数结余留给用户")
+	mustDec(t, e.fundBalance(t), "1000", "没有穿仓，基金不受影响")
 }
 
 // 真实的并发流程：两个仓位被同时强平(各自异步平仓、无对手盘走超时兜底)。一次成交的结算不是原子的，
@@ -443,8 +532,9 @@ func TestLiquidation_TriggerCancelsAllPendingOrdersAndSettlesRealShortfall(t *te
 }
 
 // 兜底：强平窗口期里用户新挂的单，在结算前也要撤掉。这里直接构造"没有仓位、free balance=-100、
-// 还有一笔挂单锁定600(真实的，来自实际下单)"的状态：真实权益是500，撤单后合计为正，按缓冲扫进
-// 基金、账户清零，用户拿不到那600。不撤的话基金会垫付100、之后撤单解锁600，用户白拿
+// 还有一笔挂单锁定600(真实的，来自实际下单)"的状态：真实权益是500，不撤单的话free balance
+// 会算成-100(漏算了这笔锁定)，误判成穿仓让基金多垫付100；撤单之后正确解出free balance=500，
+// 没有穿仓，也不动保险基金
 func TestLiquidation_AftermathCancelsOrdersPlacedDuringLiquidation(t *testing.T) {
 	e := newEngineEnv(t)
 	ctx := context.Background()
@@ -468,8 +558,8 @@ func TestLiquidation_AftermathCancelsOrdersPlacedDuringLiquidation(t *testing.T)
 	}
 	acc := e.account(t, a)
 	mustDec(t, acc.FrozenMargin, "0", "冻结保证金退回")
-	mustDec(t, acc.Balance, "0", "合计500是缓冲，扫进基金后账户清零")
-	mustDec(t, e.fundBalance(t), "1500", "基金收到500，没有垫付")
+	mustDec(t, acc.Balance, "500", "没有穿仓，正数结余留给用户")
+	mustDec(t, e.fundBalance(t), "1000", "没有穿仓，基金不受影响")
 	mustDec(t, e.fundLedgerAmount(t, "强平穿仓垫付"), "0", "没有穿仓，不应该垫付")
 }
 

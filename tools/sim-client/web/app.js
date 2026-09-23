@@ -294,10 +294,10 @@ function renderAccount() {
   if (!a) { $('acctInfo').innerHTML = '<div class="muted" style="grid-column:1/3">选择或新建一个账户</div>'; $('acctStatus').innerHTML = ''; return; }
   $('acctStatus').innerHTML = `<span class="badge ${a.status === 'frozen' ? 'frozen' : ''}">${a.status === 'frozen' ? '已冻结' : '正常'}</span>`;
   const items = [
-    ['权益', fixed(a.equity, 4), ''], ['可用余额', fixed(a.available, 4), ''],
-    ['仓位保证金', fixed(a.positionMargin, 4), ''], ['挂单冻结', fixed(a.frozenMargin, 4), ''],
-    ['未实现盈亏', fixed(a.totalUnrealizedPnl, 4), signCls(a.totalUnrealizedPnl)], ['信用额度', fixed(a.credit, 4), ''],
-    ['轮次', a.round, ''], ['投保', a.isInsured ? '是' : '否', ''],
+    ['权益', fixed(a.equity, 4), ''], ['余额总额', fixed(a.balance, 4), ''],
+    ['可用余额', fixed(Number(a.balance) - Number(a.frozenMargin), 4), ''], ['仓位保证金', fixed(a.positionMargin, 4), ''],
+    ['锁定合计(挂单+持仓)', fixed(a.frozenMargin, 4), ''], ['未实现盈亏', fixed(a.totalUnrealizedPnl, 4), signCls(a.totalUnrealizedPnl)],
+    ['信用额度', fixed(a.credit, 4), ''], ['轮次', a.round, ''], ['投保', a.isInsured ? '是' : '否', ''],
   ];
   $('acctInfo').innerHTML = items.map(([k, v, cls]) => `<div><span>${k}</span><b class="${cls}">${v}</b></div>`).join('');
   $('opsRound').textContent = `当前第 ${a.round} 轮`;
@@ -478,7 +478,7 @@ $('pct').addEventListener('click', (e) => {
   const p = Number(b.dataset.p) / 100, lev = Number($('fLev').value) || 1, price = refPrice();
   if (!(price > 0)) return;
   let amt;
-  if (state.action === 'open') amt = (Number(state.account.available) * lev * p) / price;
+  if (state.action === 'open') amt = ((Number(state.account.balance) - Number(state.account.frozenMargin)) * lev * p) / price;
   else { const pos = state.positions.filter((x) => x.symbol === state.symbol && Number(x.volume) > 0); amt = pos.length ? Number(pos[0].volume) * p : 0; }
   // 按USDT输入时填的是名义价值(币数量×价格，向下取到分)，按币输入时填的是币数量(向下取到步长)
   $('fAmount').value = state.amtUnit === 'usdt' ? fixed(Math.floor(amt * price * 100) / 100, 2) : floorQty(amt, state.detail);

@@ -188,18 +188,22 @@ equity = balance + credit + totalUnrealizedPnl
 1. 撤销这个uid名下全部symbol上还在排队的委托，按正常撤单逻辑释放冻结保证金
 2. 撤销这个uid名下全部还没触发的条件单（止盈止损/条件开仓），按条件单自己的撤销逻辑
    释放冻结保证金——见 [conditional-orders.md](conditional-orders.md)。不撤的话，
-   `credit`已经在下一步清零，之后如果条件单又触发，会用到不属于这一轮的额度
+   `balance`/`credit`已经在下一步清零，之后如果条件单又触发，会用到不属于这一轮的资金
 3. 对全部仍有持仓的symbol，按当前标记价立即强制平仓—— **不走**
    [liquidation.md](liquidation.md)里那套"挂保护价排队+超时兜底"机制：这是用户/合作方
-   主动结束本轮，不是风险触发的强平，没必要走保护价滑点缓冲、也没必要等撮合
-4. 调用`AccountService.CloseRound`清零`credit`、重置`is_insured`、`round`+1——清零前的
-   `credit`值不是提前单独`SELECT`出来的，是`CloseRoundIfRound`用MySQL会话变量在同一条
-   `UPDATE`里原子捕获后返回（写法跟`FreezeSpillToCredit`一致），再拿这个原子返回值记
-   `TxRoundClose`审计流水。早期实现是先单独读一次`credit`、再执行清零的`UPDATE`，这两步
-   之间如果有并发的`GrantCredit`把`credit`改大，`UPDATE`清零的是并发写入后的真实值，
-   但审计流水记的是清零前更早读到的、偏小的旧值，两者会永久对不上（不影响账户实际余额，
-   只影响审计流水这一个数字）——已用真实并发场景验证过：发放和清零的金额在
-   `member_transactions`里精确对应
+   主动结束本轮，不是风险触发的强平，没必要走保护价滑点缓冲、也没必要等撮合。这一步的
+   平仓结算完全走正常的`SettlementService.SettleFill`，不涉及强平那套"穿仓由保险基金
+   垫付/正数结余留给用户"的逻辑——结束本轮时不会再有仓位，谈不上穿仓
+4. 调用`AccountService.CloseRound`清零`balance`、`credit`、重置`is_insured`、`round`+1——
+   每一轮都是完全独立的资金周期，不跨轮结转：`balance`清零对应"这笔钱该退给用户了"，退款
+   本身是合作方在系统外处理的业务，我们这边只负责把账清零；`credit`清零是回收没用完的
+   赔付额度，不追讨。清零前的`balance`/`credit`值不是提前单独`SELECT`出来的，是
+   `CloseRoundIfRound`用MySQL会话变量在同一条`UPDATE`里原子捕获后返回（写法跟
+   `FreezeSpillToCredit`一致），再拿这两个原子返回值各记一条`TxRoundClose`审计流水。早期
+   实现是先单独读一次`credit`、再执行清零的`UPDATE`，这两步之间如果有并发的`GrantCredit`
+   把`credit`改大，`UPDATE`清零的是并发写入后的真实值，但审计流水记的是清零前更早读到的、
+   偏小的旧值，两者会永久对不上（不影响账户实际余额，只影响审计流水这一个数字）——已用
+   真实并发场景验证过：发放和清零的金额在`member_transactions`里精确对应
 
 上面1-3步只要有任何一笔没成功（撤单失败、强平缺标记价格等），就不会执行第4步——
 `AccountService.CloseRound`的前提是这个uid名下已经没有持仓/挂单/待触发条件单，不满足

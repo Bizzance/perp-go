@@ -101,12 +101,12 @@ func TestCloseRound_SettlesEverything(t *testing.T) {
 	mustDec(t, e.ledgerSum(t, a, model.TxFee), "-6.55", "手续费流水(建仓3.25+强平3.3)")
 
 	final := e.account(t, a)
-	// 结束本轮后所有锁定都已释放(frozen_margin=0)，balance本身就是可用余额：
-	// 9996.75(建仓后balance) + 100盈利 - 3.3手续费 = 10093.45
-	mustDec(t, final.Balance, "10093.45", "可用余额")
+	// 结束本轮：balance/credit都清零，每一轮都是完全独立的资金周期。清零前balance=
+	// 9996.75(建仓后) + 100盈利 - 3.3手续费 = 10093.45
+	mustDec(t, final.Balance, "0", "结束本轮balance清零")
 	mustDec(t, final.FrozenMargin, "0", "冻结保证金")
 	mustDec(t, final.Credit, "0", "信用额度清零")
-	mustDec(t, e.ledgerSum(t, a, model.TxRoundClose), "-500", "回收信用额度的流水")
+	mustDec(t, e.ledgerSum(t, a, model.TxRoundClose), "-10593.45", "回收信用额度500+清零balance10093.45的流水合计")
 	if round, insured := e.roundState(t, a); round != 2 || insured {
 		t.Fatalf("round应该推进到2且投保状态复位, got round=%d insured=%v", round, insured)
 	}
@@ -157,7 +157,9 @@ func TestCloseRound_IgnoresStaleOrFutureRound(t *testing.T) {
 		t.Fatalf("应该推进到round=4, got round=%d insured=%v", round, insured)
 	}
 
-	// 已经进入第4轮，账户里新挂了单、新发了额度；重复结束第3轮(超时重试)一样都不能动
+	// 已经进入第4轮：结束第3轮时balance跟credit一样清零了，第4轮是全新的资金周期，
+	// 要先充值才能挂单。账户里新挂了单、新发了额度；重复结束第3轮(超时重试)一样都不能动
+	e.newAccount(t, 1, "1000")
 	e.setCredit(t, uid, "200", true)
 	rest2 := e.insertOrder(t, uid, orderOpts{side: model.SideLong, action: model.ActionOpen, price: "60000", amount: "0.1", margin: "600"})
 	if err := e.engine.SubmitOrder(ctx, rest2, 2); err != nil {

@@ -245,38 +245,45 @@ func (r *AccountRepo) SetInsured(ctx context.Context, id uint64, insured bool) e
 // FreezeSpillToCredit一致，见下面注释)，不能先单独SELECT credit再执行这条UPDATE——
 // 两次读写之间如果有并发的GrantCredit把credit改大，UPDATE清零的是并发写入后的真实值，
 // 但如果审计流水金额用的是UPDATE之前读到的旧值，就会跟实际清零的金额对不上
-func (r *AccountRepo) CloseRoundIfRound(ctx context.Context, id, round uint64) (ok bool, clearedCredit decimal.Decimal, err error) {
+// CloseRoundIfRound 结束本轮：balance/credit都清零——每一轮都是完全独立的资金周期，
+// balance这部分对应退给用户的钱由合作方在系统外处理，我们这边只负责把账本清零。
+// 清零前的两个值通过MySQL会话变量在同一条UPDATE里原子捕获后返回，不能先单独SELECT再执行
+// 这条UPDATE——两次读写之间如果有并发的资金操作(GrantCredit/AdjustBalance/结算)把值改大，
+// UPDATE清零的是并发写入后的真实值，但如果审计流水金额用的是UPDATE之前读到的旧值，就会跟
+// 实际清零的金额对不上
+func (r *AccountRepo) CloseRoundIfRound(ctx context.Context, id, round uint64) (ok bool, clearedCredit, clearedBalance decimal.Decimal, err error) {
 	// 会话变量是连接级别的状态，必须让UPDATE和后面的SELECT @xxx用同一条物理连接，
 	// 否则连接池可能把SELECT分派到另一条从来没执行过这条UPDATE的连接上，读到的是
 	// 陌生会话里的旧值/NULL，而不是本次UPDATE刚写入的值
 	conn, err := r.db.Conn(ctx)
 	if err != nil {
-		return false, decimal.Zero, err
+		return false, decimal.Zero, decimal.Zero, err
 	}
 	defer conn.Close()
 
 	res, err := conn.ExecContext(ctx,
 		`UPDATE accounts SET
 			credit = (@perpgo_old_credit := credit) - credit,
+			balance = (@perpgo_old_balance := balance) - balance,
 			is_insured = 0,
 			round = round + 1
 		 WHERE id = ? AND round = ?`,
 		id, round)
 	if err != nil {
-		return false, decimal.Zero, err
+		return false, decimal.Zero, decimal.Zero, err
 	}
 	n, err := res.RowsAffected()
 	if err != nil {
-		return false, decimal.Zero, err
+		return false, decimal.Zero, decimal.Zero, err
 	}
 	if n == 0 {
 		// round已经被别的并发调用推进过，会话变量没有被这条UPDATE写过，不能读
-		return false, decimal.Zero, nil
+		return false, decimal.Zero, decimal.Zero, nil
 	}
-	if err := conn.QueryRowContext(ctx, `SELECT @perpgo_old_credit`).Scan(&clearedCredit); err != nil {
-		return false, decimal.Zero, err
+	if err := conn.QueryRowContext(ctx, `SELECT @perpgo_old_credit, @perpgo_old_balance`).Scan(&clearedCredit, &clearedBalance); err != nil {
+		return false, decimal.Zero, decimal.Zero, err
 	}
-	return true, clearedCredit, nil
+	return true, clearedCredit, clearedBalance, nil
 }
 
 func affected(res sql.Result, err error) (bool, error) {

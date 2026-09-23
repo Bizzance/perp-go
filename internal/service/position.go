@@ -83,12 +83,15 @@ type PositionView struct {
 	LiquidationPrice decimal.Decimal `json:"liquidationPrice"`
 }
 
-// 这个uid名下全部持仓的展示视图
-func (s *PositionService) Views(ctx context.Context, uid uint64) ([]PositionView, error) {
+// 这个uid名下全部持仓的展示视图。insured是账户当前的投保状态，equityBase是账户当前的
+// balance+credit——两者一起决定预估强平价用的lossRatio*equityBase(见
+// LiquidationService.checkAndLiquidate，投保保的是整个账户，不是单笔仓位)
+func (s *PositionService) Views(ctx context.Context, uid uint64, insured bool, equityBase decimal.Decimal) ([]PositionView, error) {
 	positions, err := s.positions.FindByUID(ctx, uid)
 	if err != nil {
 		return nil, err
 	}
+	lossRatio := lossRatioFor(insured)
 	views := make([]PositionView, 0, len(positions))
 	for _, p := range positions {
 		v := PositionView{Position: p}
@@ -100,9 +103,7 @@ func (s *PositionService) Views(ctx context.Context, uid uint64) ([]PositionView
 			if p.PositionMargin.Sign() > 0 {
 				v.Roe = v.UnrealizedPnl.Div(p.PositionMargin)
 			}
-			if tier, err := s.TierFor(ctx, p.Symbol, v.NotionalValue); err == nil && tier != nil {
-				v.LiquidationPrice = p.LiquidationPrice(tier.MaintenanceMarginRate, tier.MaintenanceAmount)
-			}
+			v.LiquidationPrice = p.LiquidationPrice(lossRatio, equityBase)
 		}
 		views = append(views, v)
 	}
@@ -170,47 +171,20 @@ func (s *PositionService) TotalPositionMargin(ctx context.Context, uid uint64) (
 	return sumPositionMargin(positions), nil
 }
 
-// 这个uid名下全部持仓的维持保证金要求之和，风控强平判断用——
-// 维持保证金按分档公式notional*mmr-maintenanceAmount算，档位由这个仓位当前的名义价值决定。
-// 缺标记价格/分档配置的仓位只跳过它自己这一份贡献(计入0，打ERROR日志)，不能因为一个symbol
-// 缺数据就让调用方跳过这个uid的整轮风控扫描——那样会连累这个用户名下其它数据齐全、可能
-// 已经跌破维持保证金的仓位也被一起放过，比"漏算这一个仓位"更危险。
-//
-// 注意这里跳过=计0，跟TotalUnrealizedPnl把缺数据的仓位浮盈算0不是同一个安全方向：
-// TotalUnrealizedPnl算0会拉低equity，让强平判断更容易触发，是保守方向；这里给
-// maintainTotal算0是相反方向——会让这个仓位自己永远不足以成为触发强平的原因，即使它在
-// 持续亏损(那笔亏损依然会通过TotalUnrealizedPnl正常拉低equity，不会完全没有感知，
-// 只是没有为这个仓位单独贡献维持保证金要求)。这是分档配置在仓位已开仓后被删除/改坏
-// 这个操作失误场景下的已知残留风险，见docs/known-limitations.md，MVP阶段选择打日志
-// 告警而不是引入"缺配置就假设最大风险、强制触发强平"这类会带来其它副作用的兜底逻辑
-func (s *PositionService) MaintenanceMarginTotal(ctx context.Context, uid uint64) (decimal.Decimal, []model.Position, error) {
-	positions, err := s.positions.FindByUID(ctx, uid)
-	if err != nil {
-		return decimal.Zero, nil, err
+// LossRatioUninsured/LossRatioInsured：维持保证金要求现在按"亏损达到账户总资产(balance+
+// credit)的这个比例"算，不再用risk_limit_tiers的分档mmr公式(那张表继续用于开仓/改杠杆的
+// 最大杠杆校验、以及强平单保护价缓冲，见liquidation.go)。未投保的账户亏光全部余额(100%)
+// 才强平；已投保的账户风控收紧到亏损80%就强平——投保就是保整个账户，不是只保某一笔仓位的
+// 保证金，这是产品口径的简化决定(先不支持"只投保一部分")。用户随时可以投保，这里每次都读
+// 账户当前的投保状态，不是仓位开仓时锁定的快照，见LiquidationService.checkAndLiquidate
+var (
+	LossRatioUninsured = decimal.NewFromInt(1)            // 100%
+	LossRatioInsured   = decimal.RequireFromString("0.8") // 80%
+)
+
+func lossRatioFor(insured bool) decimal.Decimal {
+	if insured {
+		return LossRatioInsured
 	}
-	total := decimal.Zero
-	for _, p := range positions {
-		if p.Volume.Sign() <= 0 {
-			continue
-		}
-		mark, ok := s.markPrice.Get(ctx, p.Symbol)
-		if !ok {
-			log.Printf("[WARN] 维持保证金计算缺标记价格，跳过这个仓位, uid=%d, symbol=%s", uid, p.Symbol)
-			continue
-		}
-		notional := p.Volume.Mul(mark)
-		tier, err := s.TierFor(ctx, p.Symbol, notional)
-		if err != nil {
-			return decimal.Zero, nil, err
-		}
-		if tier == nil {
-			// ERROR不是WARN：这个仓位的维持保证金贡献被计成0，会削弱这个uid的强平判断，
-			// 属于需要运营立刻介入排查配置的问题，不是可以自愈的瞬时状态
-			log.Printf("[ERROR] 维持保证金计算缺分档配置，该仓位维持保证金按0计入，跳过, uid=%d, symbol=%s", uid, p.Symbol)
-			continue
-		}
-		maint := decimal.Max(decimal.Zero, notional.Mul(tier.MaintenanceMarginRate).Sub(tier.MaintenanceAmount))
-		total = total.Add(maint)
-	}
-	return total, positions, nil
+	return LossRatioUninsured
 }

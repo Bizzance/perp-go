@@ -299,26 +299,34 @@ func (s *AccountService) SetInsured(ctx context.Context, uid uint64, insured boo
 	return s.accounts.SetInsured(ctx, account.ID, insured)
 }
 
-// 结束本轮的资金收尾：credit清零(没用完的赔付额度不追讨)、is_insured重置、
-// round+1。调用前必须已经没有持仓/挂单——这里只做资金状态收尾，强平仓位/撤销挂单由
-// 更上层的编排负责(见EngineService.CloseRound)。round是调用方预期的"当前轮次"，只有
-// account当前round还是这个值才会真的执行，返回false表示round已经被别的调用推进过了
-// (engine分片部署下多个实例可能都观察到"这个uid可以结算了"，见docs/engine-sharding.md)，
-// 这种情况不是错误，调用方应该当no-op处理，不能重复插入round-close的资金流水记录
+// 结束本轮的资金收尾：balance/credit都清零(每一轮都是完全独立的资金周期，不跨轮结转)、
+// is_insured重置、round+1。balance清零对应"这笔钱该退给用户了"，退款本身是合作方在系统外
+// 处理的业务，我们这边只负责把账本归零；credit清零是回收没用完的赔付额度，不追讨。调用前
+// 必须已经没有持仓/挂单——这里只做资金状态收尾，强平仓位/撤销挂单由更上层的编排负责(见
+// EngineService.CloseRound)。round是调用方预期的"当前轮次"，只有account当前round还是这个
+// 值才会真的执行，返回false表示round已经被别的调用推进过了(engine分片部署下多个实例可能
+// 都观察到"这个uid可以结算了"，见docs/engine-sharding.md)，这种情况不是错误，调用方应该
+// 当no-op处理，不能重复插入round-close的资金流水记录
 func (s *AccountService) CloseRound(ctx context.Context, uid, round uint64) (bool, error) {
 	account, err := s.accounts.GetOrCreate(ctx, uid)
 	if err != nil {
 		return false, err
 	}
-	// 清零前的credit值由CloseRoundIfRound在同一条UPDATE里原子捕获返回，不在这里单独
-	// 预读——预读的话，跟并发的GrantCredit之间有竞态，审计流水金额可能跟实际清零的
-	// 金额对不上，见account_repo.go里CloseRoundIfRound的注释
-	ok, clearedCredit, err := s.accounts.CloseRoundIfRound(ctx, account.ID, round)
+	// 清零前的balance/credit值由CloseRoundIfRound在同一条UPDATE里原子捕获返回，不在这里
+	// 单独预读——预读的话，跟并发的资金操作(GrantCredit/结算/AdjustBalance)之间有竞态，
+	// 审计流水金额可能跟实际清零的金额对不上，见account_repo.go里CloseRoundIfRound的注释
+	ok, clearedCredit, clearedBalance, err := s.accounts.CloseRoundIfRound(ctx, account.ID, round)
 	if err != nil || !ok {
 		return ok, err
 	}
+	now := time.Now().UnixMilli()
 	if clearedCredit.Sign() > 0 {
-		if err := s.tx.Insert(ctx, uid, "USDT", model.TxRoundClose, clearedCredit.Neg(), time.Now().UnixMilli()); err != nil {
+		if err := s.tx.Insert(ctx, uid, "USDT", model.TxRoundClose, clearedCredit.Neg(), now); err != nil {
+			return true, err
+		}
+	}
+	if clearedBalance.Sign() != 0 {
+		if err := s.tx.Insert(ctx, uid, "USDT", model.TxRoundClose, clearedBalance.Neg(), now); err != nil {
 			return true, err
 		}
 	}

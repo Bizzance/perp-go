@@ -82,7 +82,7 @@ func (p *PushService) PublishUserSnapshot(ctx context.Context, uid uint64) {
 		log.Printf("[ERROR] 推送账户快照查询account失败, uid=%d: %v", uid, err)
 		return
 	}
-	positions, err := p.positions.Views(ctx, uid)
+	positions, err := p.positions.Views(ctx, uid, account.IsInsured, account.Balance.Add(account.Credit))
 	if err != nil {
 		log.Printf("[ERROR] 推送账户快照查询positions失败, uid=%d: %v", uid, err)
 		return
