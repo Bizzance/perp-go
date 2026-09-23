@@ -36,12 +36,12 @@ func TestSettlement_OpenThenCloseWithProfit(t *testing.T) {
 	if got := e.order(t, buy.OrderID).Status; got != model.OrderStatusFilled {
 		t.Fatalf("taker委托应该全部成交, status=%s", got)
 	}
-	// 名义价值6500：taker手续费3.25，maker手续费1.3；冻结的保证金650转成仓位保证金，账户里不再冻结
+	// 名义价值6500：taker手续费3.25，maker手续费1.3；冻结的保证金650转成仓位占用，继续锁在frozen_margin里
 	takerAcc, makerAcc := e.account(t, long), e.account(t, short)
-	mustDec(t, takerAcc.Available, "9346.75", "taker可用余额=10000-650保证金-3.25手续费")
-	mustDec(t, takerAcc.FrozenMargin, "0", "taker冻结保证金")
-	mustDec(t, makerAcc.Available, "9348.7", "maker可用余额=10000-650保证金-1.3手续费")
-	mustDec(t, makerAcc.FrozenMargin, "0", "maker冻结保证金")
+	mustDec(t, e.freeBalance(t, long), "9346.75", "taker可用余额=10000-650保证金-3.25手续费")
+	mustDec(t, takerAcc.FrozenMargin, "650", "taker冻结保证金(仓位占用)")
+	mustDec(t, e.freeBalance(t, short), "9348.7", "maker可用余额=10000-650保证金-1.3手续费")
+	mustDec(t, makerAcc.FrozenMargin, "650", "maker冻结保证金(仓位占用)")
 
 	lp := e.position(t, long, model.SideLong)
 	mustDec(t, lp.Volume, "0.1", "多头仓位数量")
@@ -77,9 +77,9 @@ func TestSettlement_OpenThenCloseWithProfit(t *testing.T) {
 	if got := e.order(t, closeOrder.OrderID).Status; got != model.OrderStatusFilled {
 		t.Fatalf("平仓委托应该全部成交, status=%s", got)
 	}
-	// 成交额6600，taker手续费3.3：可用余额=9346.75 + 650退回保证金 + 100盈利 - 3.3
+	// 成交额6600，taker手续费3.3：平仓后650的锁定解除，balance=9996.75(开仓后)+100盈利-3.3手续费=10093.45
 	closed := e.account(t, long)
-	mustDec(t, closed.Available, "10093.45", "平仓后可用余额")
+	mustDec(t, closed.Balance, "10093.45", "平仓后可用余额")
 	mustDec(t, closed.FrozenMargin, "0", "平仓后冻结保证金")
 	lp = e.position(t, long, model.SideLong)
 	mustDec(t, lp.Volume, "0", "平仓后仓位数量")
@@ -89,9 +89,8 @@ func TestSettlement_OpenThenCloseWithProfit(t *testing.T) {
 	mustDec(t, e.ledgerSum(t, long, model.TxRealizedPnl), "100", "已实现盈亏流水")
 	mustDec(t, e.ledgerSum(t, long, model.TxFee), "-6.55", "两次成交的手续费流水合计(3.25+3.3)")
 
-	// 接盘的buyer(maker)：开多0.1@66000，手续费6600*0.0002=1.32
-	b := e.account(t, buyer)
-	mustDec(t, b.Available, "9338.68", "buyer可用余额=10000-660保证金-1.32手续费")
+	// 接盘的buyer(maker)：开多0.1@66000，手续费6600*0.0002=1.32，660保证金继续锁在frozen_margin里
+	mustDec(t, e.freeBalance(t, buyer), "9338.68", "buyer可用余额=10000-660保证金-1.32手续费")
 	mustDec(t, e.position(t, buyer, model.SideLong).AvgEntryPrice, "66000", "buyer开仓均价")
 	// 没参与第二笔成交的short仓位不变
 	mustDec(t, e.position(t, short, model.SideShort).Volume, "0.1", "无关仓位不受影响")
@@ -118,8 +117,8 @@ func TestSettlement_PartialFillThenCancelReleasesProportionalMargin(t *testing.T
 		t.Fatalf("maker应该是部分成交, status=%s", partial.Status)
 	}
 	mustDec(t, partial.TradedAmount, "0.05", "已成交数量")
-	// 成交0.05：1300*0.05/0.2=325转成仓位保证金，剩下975还冻结着
-	mustDec(t, e.account(t, maker).FrozenMargin, "975", "部分成交后maker还冻结着未成交部分的保证金")
+	// 成交0.05：1300*0.05/0.2=325转成仓位占用(继续锁着)，剩下975还锁在未成交部分
+	mustDec(t, e.account(t, maker).FrozenMargin, "1300", "部分成交后maker的锁定=仓位占用325+未成交部分975")
 
 	if err := e.engine.CancelOrder(ctx, partial); err != nil {
 		t.Fatalf("CancelOrder: %v", err)
@@ -129,20 +128,20 @@ func TestSettlement_PartialFillThenCancelReleasesProportionalMargin(t *testing.T
 		t.Fatalf("撤单后应该是canceled, status=%s", got)
 	}
 	acc := e.account(t, maker)
-	mustDec(t, acc.FrozenMargin, "0", "撤单后冻结保证金清零")
-	// 可用余额=10000 - 325(已成交部分的仓位保证金) - 手续费3250*0.0002=0.65，未成交的975退回
-	mustDec(t, acc.Available, "9674.35", "撤单后可用余额")
+	mustDec(t, acc.FrozenMargin, "325", "撤单后只剩已成交部分的仓位占用还锁着")
+	// 可用余额=10000 - 325(已成交部分的仓位保证金) - 手续费3250*0.0002=0.65，未成交的975解锁
+	mustDec(t, e.freeBalance(t, maker), "9674.35", "撤单后可用余额")
 	mustDec(t, e.position(t, maker, model.SideShort).PositionMargin, "325", "仓位保证金只有已成交部分")
 	if e.book.BookFor(testSymbol).Contains(sell.OrderID) {
 		t.Fatal("撤单后不应该还在订单簿里")
 	}
 
 	// 已经终结的委托再撤一次：不能重复退保证金
-	before := acc.Available
+	before := e.freeBalance(t, maker)
 	if err := e.engine.CancelOrder(ctx, e.order(t, sell.OrderID)); err != nil {
 		t.Fatalf("重复撤单: %v", err)
 	}
-	mustDec(t, e.account(t, maker).Available, before.String(), "重复撤单不能再退一次保证金")
+	mustDec(t, e.freeBalance(t, maker), before.String(), "重复撤单不能再退一次保证金")
 }
 
 // 自成交保护：同一个账户的买卖单撞上时不成交，被摘掉的挂单退回保证金，没有成交记录也没有手续费
@@ -168,7 +167,7 @@ func TestSettlement_SelfTradeIsPreventedAndRefunded(t *testing.T) {
 	// 被摘掉的那笔退回保证金，剩下的一笔仍然冻结着：总共只冻结一笔的650
 	acc := e.account(t, uid)
 	mustDec(t, acc.FrozenMargin, "650", "只剩一笔挂单在冻结保证金")
-	mustDec(t, acc.Available, "9350", "另一笔的保证金已经退回")
+	mustDec(t, e.freeBalance(t, uid), "9350", "另一笔的保证金已经退回")
 	canceled := 0
 	for _, id := range []uint64{sell.OrderID, buy.OrderID} {
 		if e.order(t, id).Status == model.OrderStatusCanceled {

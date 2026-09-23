@@ -46,7 +46,7 @@ func TestBuyingPower_UnrealizedLossReducesIt(t *testing.T) {
 	a := e.buyingPowerAccount(t, "1000")
 	e.setMark(t, testSymbol, "64000") // 0.1*(64000-65000)=-100
 
-	mustDec(t, e.account(t, a).Available, "346.75", "available本身是够的")
+	mustDec(t, e.freeBalance(t, a), "346.75", "available本身是够的")
 	if !e.canFreeze(t, a, "240") {
 		t.Fatal("买力246.75，冻结240应该成功")
 	}
@@ -137,7 +137,7 @@ func TestBuyingPower_UsesNetUnrealizedAcrossPositions(t *testing.T) {
 	e.setMark(t, "ETHUSDT", "3030")   // ETH +30
 
 	// available=2000-650-3.25-300-1.5=1045.25；买力=1045.25-70=975.25
-	mustDec(t, e.account(t, a).Available, "1045.25", "available")
+	mustDec(t, e.freeBalance(t, a), "1045.25", "available")
 	if !e.canFreeze(t, a, "975.25") {
 		t.Fatal("买力975.25，冻结975.25应该成功")
 	}

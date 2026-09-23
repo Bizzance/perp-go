@@ -261,11 +261,12 @@ func TestE2E_03_OrderFlowThroughKafkaFillsAndSettles(t *testing.T) {
 		}
 		return fieldIs(t, pos[0], "volume", "0.1")
 	})
-	// 0.1 BTC*65000=6500名义价值：保证金650，taker手续费3.25，maker手续费1.3。
+	// 0.1 BTC*65000=6500名义价值：保证金650，taker手续费3.25，maker手续费1.3。保证金一直锁在
+	// frozenMargin里(先是挂单锁定，成交后转成仓位占用，继续锁着，直到平仓才解锁)。
 	// 手续费是在仓位可见之后才扣的(先落仓位、再扣手续费)，所以账户字段也要轮询，不能读一次就断言
 	eventually(t, "多头账户结算完成(含手续费)", 20*time.Second, func() (bool, string) {
 		acc := e.accountInfo(t, long)
-		for field, want := range map[string]string{"available": "9346.75", "positionMargin": "650", "frozenMargin": "0", "equity": "9996.75"} {
+		for field, want := range map[string]string{"balance": "9996.75", "positionMargin": "650", "frozenMargin": "650", "equity": "9996.75"} {
 			if ok, detail := fieldIs(t, acc, field, want); !ok {
 				return false, detail
 			}
@@ -273,7 +274,7 @@ func TestE2E_03_OrderFlowThroughKafkaFillsAndSettles(t *testing.T) {
 		return true, ""
 	})
 	eventually(t, "空头账户结算", 20*time.Second, func() (bool, string) {
-		return fieldIs(t, e.accountInfo(t, short), "available", "9348.7")
+		return fieldIs(t, e.accountInfo(t, short), "balance", "9998.7")
 	})
 }
 
@@ -294,7 +295,7 @@ func TestE2E_04_CancelFlowThroughKafkaRefundsMargin(t *testing.T) {
 		if ok, d := fieldIs(t, acc, "frozenMargin", "0"); !ok {
 			return false, d
 		}
-		return fieldIs(t, acc, "available", "10000")
+		return fieldIs(t, acc, "balance", "10000")
 	})
 }
 

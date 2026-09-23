@@ -10,32 +10,33 @@ import (
 
 func d(s string) decimal.Decimal { return decimal.RequireFromString(s) }
 
-// 权益是全部属于用户的钱加浮动盈亏：每一块都要算进去，任何一块漏掉都会让权益凭空变少(或变多)
-func TestEquity_SumsEveryPool(t *testing.T) {
+// 权益=balance+credit+浮动盈亏：balance/credit是不随冻结变化的总额，已经包含了挂单/仓位
+// 锁定的那部分钱，不需要再单独加frozen_margin/frozen_credit/仓位保证金
+func TestEquity_SumsBalanceCreditAndUnrealized(t *testing.T) {
 	acc := &model.Account{
-		Available:    d("100"),
+		Balance:      d("100"),
 		Credit:       d("20"),
 		FrozenMargin: d("30"),
 		FrozenCredit: d("5"),
 	}
-	got := Equity(acc, d("650"), d("-40"))
-	if !got.Equal(d("765")) {
-		t.Fatalf("100+20+30+5+650-40=765, got %s", got)
+	got := Equity(acc, d("-40"))
+	if !got.Equal(d("80")) {
+		t.Fatalf("100+20-40=80(frozen_margin/frozen_credit不重复计入), got %s", got)
 	}
 }
 
-// 开仓只是把钱从available挪进冻结/仓位保证金，权益不变
-func TestEquity_UnchangedWhenMarginMovesFromAvailableToPosition(t *testing.T) {
-	before := Equity(&model.Account{Available: d("1000")}, decimal.Zero, decimal.Zero)
-	after := Equity(&model.Account{Available: d("350")}, d("650"), decimal.Zero)
+// 开仓只是把锁定额度从frozen_margin记多一点，balance本身不变，权益不变
+func TestEquity_UnchangedWhenMarginGetsLocked(t *testing.T) {
+	before := Equity(&model.Account{Balance: d("1000")}, decimal.Zero)
+	after := Equity(&model.Account{Balance: d("1000"), FrozenMargin: d("650")}, decimal.Zero)
 	if !before.Equal(after) {
-		t.Fatalf("保证金从available转进仓位，权益不应该变: before=%s after=%s", before, after)
+		t.Fatalf("保证金被锁进frozen_margin，balance不变，权益不应该变: before=%s after=%s", before, after)
 	}
 }
 
-// available可以是负数(全仓下合法)，权益照常相加，不会被截成0
-func TestEquity_NegativeAvailableIsCarried(t *testing.T) {
-	got := Equity(&model.Account{Available: d("-100")}, d("300"), decimal.Zero)
+// balance可以是负数(全仓下合法)，权益照常相加，不会被截成0
+func TestEquity_NegativeBalanceIsCarried(t *testing.T) {
+	got := Equity(&model.Account{Balance: d("-100")}, d("300"))
 	if !got.Equal(d("200")) {
 		t.Fatalf("-100+300=200, got %s", got)
 	}

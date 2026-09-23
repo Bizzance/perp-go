@@ -108,7 +108,7 @@ func TestMirror_PlacesRestingOrdersMatchingBinanceDepth(t *testing.T) {
 		t.Fatalf("订单簿深度应该反映镜像挂单: %+v", depth)
 	}
 	acc := e.account(t, uid)
-	if acc.Available.Sign() <= 0 && acc.FrozenMargin.Sign() <= 0 {
+	if acc.Balance.Sign() <= 0 && acc.FrozenMargin.Sign() <= 0 {
 		t.Fatalf("系统账户应该已经建好并充值: %+v", acc)
 	}
 }

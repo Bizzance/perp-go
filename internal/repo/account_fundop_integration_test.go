@@ -51,8 +51,8 @@ func assertBalance(t *testing.T, accounts *repo.AccountRepo, uid uint64, availab
 	if err != nil || a == nil {
 		t.Fatalf("查账户: %v %v", a, err)
 	}
-	if !a.Available.Equal(decimal.RequireFromString(available)) || !a.Credit.Equal(decimal.RequireFromString(credit)) {
-		t.Fatalf("余额不对: available=%s credit=%s, 期望 available=%s credit=%s", a.Available, a.Credit, available, credit)
+	if !a.Balance.Equal(decimal.RequireFromString(available)) || !a.Credit.Equal(decimal.RequireFromString(credit)) {
+		t.Fatalf("余额不对: balance=%s credit=%s, 期望 balance=%s credit=%s", a.Balance, a.Credit, available, credit)
 	}
 }
 

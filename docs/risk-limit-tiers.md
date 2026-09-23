@@ -89,7 +89,7 @@ tier = TierFor(symbol, projectedNotional)
 这个uid+symbol+side的后续下单。
 
 这不是完整意义上的Redlock（没有考虑多Redis节点场景的容错），跟这个项目现有的单Redis
-实例部署假设一致，够用，不是过度设计。`FreezeMargin`内部对`available`/`credit`字段的
+实例部署假设一致，够用，不是过度设计。`FreezeMargin`内部对`balance`/`credit`字段的
 读-改-写仍然是"原子条件UPDATE"那一套（见 [account-and-margin.md](account-and-margin.md)
 "并发控制"一节），这把锁解决的是更上层的"分档校验决策"竞态，两者互补、不冲突。
 

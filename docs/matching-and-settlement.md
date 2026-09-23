@@ -90,41 +90,40 @@
 
 **开仓分支（`action == OPEN`）**：
 
-1. 按订单总冻结保证金比例，算出这一笔成交对应释放多少冻结保证金（`filledMargin`，
-   基于下单时的保守估计，`filledFromAvailable`/`filledFromCredit`两部分分开算——见
-   [account-and-margin.md](account-and-margin.md)为什么冻结要分来源记账）
+1. 按订单总锁定保证金比例，算出这一笔成交对应的`frozen_margin`/`frozen_credit`是多少
+   （`filledMargin`，基于下单时的保守估计，`filledFromAvailable`/`filledFromCredit`两
+   部分分开算——见 [account-and-margin.md](account-and-margin.md)为什么锁定要分来源记账）
 2. 按真实成交价算这一笔成交本该占用多少保证金（`properMargin`，真实的风险敞口，决定
-   强平价该在哪，也是这笔仓位真正该从`available`/`credit`净扣掉的钱），按
-   `filledFromAvailable`/`filledFromCredit`的比例拆成`properFromAvailable`/
-   `properFromCredit`两部分
+   强平价该在哪，也是这笔仓位真正该继续锁着的钱），按`filledFromAvailable`/
+   `filledFromCredit`的比例拆成`properFromAvailable`/`properFromCredit`两部分
 3. 加权平均开仓价、累加仓位（`ApplyOpenFill`），记账用的`position_margin`是`properMargin`，
    `credit_margin`是其中`properFromCredit`的部分——一个仓位可能由多笔成交累积而成，
    `credit_margin`要按金额持续累加，不能只记最后一笔成交的来源比例
-4. **多退少补**：`available`/`credit`不是把`filledFromAvailable`/`filledFromCredit`
-   原样退回，而是分别退`filledFromAvailable - properFromAvailable`/
-   `filledFromCredit - properFromCredit`这两个差额——冻结时按保守估计多冻了
-   （`filledMargin > properMargin`，比如SHORT+OPEN报了吃单价、真实按对手更高的价格
-   成交），就把多冻的部分还给各自来源；冻结不够（较少见，比如挂单挂了很久、真实成交时
-   标记价格已经比下单时更高），就从各自来源里再扣差额。这样`available`/`credit`最终
-   净扣掉的正好是`properFromAvailable`/`properFromCredit`，不会把该占用的保证金错误地
-   留在`available`/`credit`里、变相凭空多出一部分可用余额——这正是[之前那个用极端报价的
-   吃单几乎不冻结保证金就开出大仓位的漏洞](known-limitations.md)的根治方式
+4. **多退少补**：`frozen_margin`/`frozen_credit`不是整笔清零、把钱退回`balance`/`credit`
+   （`balance`/`credit`是不随锁定变化的总额，本来就没被减少过，见
+   [account-and-margin.md](account-and-margin.md)），而是把锁定量从`filledFromAvailable`/
+   `filledFromCredit`调整到`properFromAvailable`/`properFromCredit`，只解锁/补锁这两者的
+   差额——锁多了（`filledMargin > properMargin`，比如SHORT+OPEN报了吃单价、真实按对手更高的
+   价格成交）就解锁多出的部分；锁少了（较少见，比如挂单挂了很久、真实成交时标记价格已经比
+   下单时更高）就补锁差额。这样`frozen_margin`/`frozen_credit`最终锁着的正好是
+   `properFromAvailable`/`properFromCredit`，不会把该占用的保证金错误地释放掉、变相凭空
+   多出一部分可用余额——这正是[之前那个用极端报价的吃单几乎不冻结保证金就开出大仓位的
+   漏洞](known-limitations.md)的根治方式
 
 **平仓分支（`action == CLOSE`）**：
 
 1. 按加权平均开仓价算已实现盈亏，按比例释放`position_margin`/`credit_margin`
    （`ApplyCloseFill`返回`releasedMargin`/`releasedCreditMargin`）
-2. **释放的仓位保证金必须还给账户**：`releasedMargin - releasedCreditMargin`还给
-   `available`，`releasedCreditMargin`还给`credit`——这部分钱在开仓时 (上面第4步)已经
-   永久从`available`/`credit`里扣掉、记进了`position_margin`/`credit_margin`，平仓时
-   不还回来的话，这笔钱会凭空消失（即使是一笔盈亏为0的平仓，账户也会永久损失一笔仓位
-   保证金）。这一步不能走`SettlePnl`的"先available后credit"亏损兜底顺序——那套顺序是
-   给真实亏损设计的，归还本金必须精确按来源退回，不能被那套逻辑误吞
-3. 已实现盈亏走`SettlePnl`结算，可正可负：盈利只进`available`，亏损走"先available后
+2. **释放的仓位保证金必须解锁**：`releasedMargin - releasedCreditMargin`解锁
+   `frozen_margin`，`releasedCreditMargin`解锁`frozen_credit`——这部分钱从开仓起
+   (上面第4步)就一直锁在这两列里，平仓时不解锁的话，这笔钱会一直被算作"锁定"、用户永远
+   拿不回自由余额。这一步不能走`SettlePnl`的"先balance后credit"亏损兜底顺序——那套顺序是
+   给真实亏损设计的，解锁本金必须精确按来源释放，不能被那套逻辑误吞
+3. 已实现盈亏走`SettlePnl`结算，可正可负：盈利只进`balance`，亏损走"先balance后
    credit"顺序（见 [account-and-margin.md](account-and-margin.md)）
 
 两个分支之后都会扣手续费（maker/taker两档费率，MVP不区分强平单的清算费率），手续费扣款
-也走"先available后credit"顺序。
+也走"先balance后credit"顺序。
 
 ## 一笔成交里maker/taker两边独立处理，一方失败不连累另一方
 

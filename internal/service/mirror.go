@@ -160,7 +160,7 @@ func (m *MirrorService) ensureReady(ctx context.Context) error {
 		return fmt.Errorf("查系统账户%d: %w", UID, err)
 	}
 	bal, _ := decimal.NewFromString(m.cfg.Balance)
-	if view.Available.LessThan(bal.Div(decimal.NewFromInt(2))) {
+	if view.Balance.Sub(view.FrozenMargin).LessThan(bal.Div(decimal.NewFromInt(2))) {
 		if _, err := m.accounts.AdjustBalance(ctx, UID, bal, fmt.Sprintf("mirror-topup-%d", m.now().UnixNano())); err != nil {
 			return fmt.Errorf("给系统账户%d充值: %w", UID, err)
 		}

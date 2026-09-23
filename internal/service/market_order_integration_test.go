@@ -44,8 +44,8 @@ func TestMarketOrder_BuySweepsAsksAboveMarkPrice(t *testing.T) {
 	mustDec(t, p.Volume, "0.15", "仓位数量")
 	mustDec(t, p.PositionMargin, "977", "仓位保证金按真实成交额算")
 	acc := e.account(t, taker)
-	mustDec(t, acc.FrozenMargin, "0", "冻结的保证金已经转成仓位保证金")
-	mustDec(t, acc.Available, "9018.115", "可用=10000-977-4.885")
+	mustDec(t, acc.FrozenMargin, "977", "冻结的保证金转成了仓位占用，继续锁着")
+	mustDec(t, e.freeBalance(t, taker), "9018.115", "可用=10000-977-4.885")
 	if e.book.BookFor(testSymbol).Contains(buy.OrderID) {
 		t.Fatal("市价单不挂簿")
 	}
@@ -78,7 +78,7 @@ func TestMarketOrder_SellSweepsBidsBelowMarkPrice(t *testing.T) {
 	p := e.position(t, taker, model.SideShort)
 	mustDec(t, p.Volume, "0.15", "空头仓位数量")
 	mustDec(t, p.PositionMargin, "973", "仓位保证金按真实成交额算")
-	mustDec(t, e.account(t, taker).Available, "9022.135", "可用=10000-973-4.865(冻结的975里多冻的2已退回)")
+	mustDec(t, e.freeBalance(t, taker), "9022.135", "可用=10000-973-4.865(冻结的975里多冻的2已退回)")
 }
 
 // 平仓的市价单同样要能吃到标记价另一侧的对手盘：多头持仓市价平仓(卖出)，买盘都在标记价之下
@@ -131,9 +131,10 @@ func TestMarketOrder_InsufficientLiquidityCancelsRemainderAndReleasesMargin(t *t
 	}
 	mustDec(t, got.TradedAmount, "0.1", "只吃到盘口上有的0.1")
 	acc := e.account(t, taker)
-	mustDec(t, acc.FrozenMargin, "0", "剩余0.2对应的冻结保证金已释放")
+	// 剩余0.2对应的锁定已释放，成交的0.1对应的651仓位保证金继续锁着
+	mustDec(t, acc.FrozenMargin, "651", "剩余0.2对应的锁定已释放，成交部分仍锁着")
 	// 成交额6510：保证金651，taker手续费3.255
-	mustDec(t, acc.Available, "9345.745", "可用=10000-651-3.255")
+	mustDec(t, e.freeBalance(t, taker), "9345.745", "可用=10000-651-3.255")
 	if e.book.BookFor(testSymbol).Contains(buy.OrderID) {
 		t.Fatal("市价单不挂簿")
 	}
@@ -171,7 +172,7 @@ func TestMarketOrder_CollusiveFarAwayCloseOrderIsNotSweptByVictim(t *testing.T) 
 		t.Fatalf("远离标记价的平仓卖单应该原样挂着, status=%s", got)
 	}
 	acc := e.account(t, victim)
-	mustDec(t, acc.Available, "1000", "受害者的钱原样退回，没有被吃穿")
+	mustDec(t, acc.Balance, "1000", "受害者的钱原样退回，没有被吃穿")
 	mustDec(t, acc.FrozenMargin, "0", "冻结的保证金已释放")
 }
 
@@ -255,5 +256,6 @@ func TestMarketOrder_FillsInsideBandAndCancelsRemainderBeyondIt(t *testing.T) {
 		t.Fatalf("超出保护带的剩余部分应该撤销, status=%s", got.Status)
 	}
 	mustDec(t, got.TradedAmount, "0.1", "只吃到保护带内的0.1")
-	mustDec(t, e.account(t, taker).FrozenMargin, "0", "剩余部分的保证金已释放")
+	// 超出保护带的0.1对应的锁定已释放，成交的0.1对应的651仓位保证金继续锁着
+	mustDec(t, e.account(t, taker).FrozenMargin, "651", "剩余部分的锁定已释放，成交部分仍锁着")
 }

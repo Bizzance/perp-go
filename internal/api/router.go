@@ -619,7 +619,7 @@ func (s *Server) rollbackFreeze(ctx context.Context, uid uint64, fr service.Free
 		return
 	}
 	if err := s.accounts.UnfreezeMargin(ctx, uid, fr.FromAvailable, fr.FromCredit); err != nil {
-		log.Printf("[ERROR] failed to roll back frozen margin, uid=%d, available=%s, credit=%s: %v", uid, fr.FromAvailable, fr.FromCredit, err)
+		log.Printf("[ERROR] failed to roll back frozen margin, uid=%d, fromBalance=%s, fromCredit=%s: %v", uid, fr.FromAvailable, fr.FromCredit, err)
 	}
 }
 
@@ -788,7 +788,7 @@ func (s *Server) addOrder(c *gin.Context) {
 	// 冻结保证金用orderNotionalPrice而不是price本身：SHORT+OPEN报一个远低于市价的吃单价，
 	// 真实会按对手的高价成交，如果冻结按这个低价算，会把这笔仓位真实该占用的保证金严重
 	// 低估。这里先按保守估计冻结，等真正成交、知道真实成交价之后，settlement.go的
-	// SettleFill会用真实成交价重算，多退少补，不会让这部分差额一直悬在available里
+	// SettleFill会用真实成交价重算，多退少补，不会让这部分差额一直悬在frozen_margin里
 	requiredMargin := amount.Mul(orderNotionalPrice).Div(leverage)
 	var freezeResult service.FreezeResult
 	if action == model.ActionOpen {
@@ -843,20 +843,19 @@ func (s *Server) addOrder(c *gin.Context) {
 	orderID := service.NextID()
 	now := service.NowMillis()
 	o := &model.Order{
-		OrderID:    orderID,
-		UID:        uid,
-		Symbol:     symbol,
-		Side:       side,
-		Action:     action,
-		Type:       orderType,
-		Price:      price,
-		Amount:     amount,
-		Leverage:   uint32(leverage.IntPart()),
-		ReduceOnly: req.ReduceOnly,
-		Status:     model.OrderStatusOpen,
-		CreateTime: now,
-		UpdateTime: now,
-
+		OrderID:     orderID,
+		UID:         uid,
+		Symbol:      symbol,
+		Side:        side,
+		Action:      action,
+		Type:        orderType,
+		Price:       price,
+		Amount:      amount,
+		Leverage:    uint32(leverage.IntPart()),
+		ReduceOnly:  req.ReduceOnly,
+		Status:      model.OrderStatusOpen,
+		CreateTime:  now,
+		UpdateTime:  now,
 		RequestID:   strPtr(requestID),
 		RequestHash: hashIfKeyed(requestID, requestHash),
 	}
@@ -1016,9 +1015,20 @@ func (s *Server) addConditionalOrder(c *gin.Context) {
 		fail(c, 400, msg)
 		return
 	}
-	requestHash := service.RequestFingerprint("conditional", strconv.FormatUint(uid, 10), symbol, string(side), string(action),
-		string(orderType), req.TriggerPrice.String(), string(req.TriggerDirection), req.Price.String(),
-		decPtrStr(req.Amount), decPtrStr(req.MarginAmount), leverage.String(), strconv.FormatBool(req.ReduceOnly))
+	requestHash := service.RequestFingerprint(
+		"conditional",
+		strconv.FormatUint(uid, 10),
+		symbol,
+		string(side),
+		string(action),
+		string(orderType),
+		req.TriggerPrice.String(),
+		string(req.TriggerDirection),
+		req.Price.String(),
+		decPtrStr(req.Amount),
+		decPtrStr(req.MarginAmount),
+		leverage.String(),
+		strconv.FormatBool(req.ReduceOnly))
 	if requestID != "" {
 		existing, err := s.conditionalOrders.FindByRequestID(c.Request.Context(), uid, requestID)
 		if err != nil {
@@ -1245,9 +1255,8 @@ func (s *Server) cancelConditionalOrder(c *gin.Context) {
 	}
 	if err := s.cancelPendingConditional(c.Request.Context(), *co); err != nil {
 		if errors.Is(err, errConditionalNotPending) {
-			// 撤单请求跟engine那边的触发扫描并发竞争，扫描先一步赢了——这笔条件单已经变成了
-			// 真正的委托，不能再当"条件单撤销"处理，调用方该走普通撤单接口
-			failC(c, 400, ErrOrderNotCancelable, "conditional order has already triggered, cannot cancel")
+			// 撤单请求跟engine那边的触发扫描并发竞争，扫描先一步赢了——这笔条件单已经变成了真正的委托，不能再当"条件单撤销"处理
+			failC(c, 400, ErrOrderNotCancelable, "conditional order has already triggered")
 			return
 		}
 		fail(c, 500, err.Error())
@@ -1258,20 +1267,18 @@ func (s *Server) cancelConditionalOrder(c *gin.Context) {
 
 var errConditionalNotPending = errors.New("conditional order is not in pending status")
 
-// 原子标记撤销并退回冻结保证金——单笔撤销和批量撤销共用。返回
-// errConditionalNotPending表示条件单已经不是pending(被并发的触发扫描抢先了)
-func (s *Server) cancelPendingConditional(ctx context.Context, co model.ConditionalOrder) error {
-	ok1, err := s.conditionalOrders.MarkCanceled(ctx, co.OrderID, service.NowMillis())
+// 原子标记撤销并退回冻结保证金——单笔撤销和批量撤销共用。返回errConditionalNotPending表示条件单已经不是pending(被并发的触发扫描抢先了)
+func (s *Server) cancelPendingConditional(ctx context.Context, order model.ConditionalOrder) error {
+	ok1, err := s.conditionalOrders.MarkCanceled(ctx, order.OrderID, service.NowMillis())
 	if err != nil {
 		return err
 	}
 	if !ok1 {
 		return errConditionalNotPending
 	}
-	if co.Action == model.ActionOpen && (co.FrozenMargin.Sign() > 0 || co.FrozenCredit.Sign() > 0) {
-		// 条件单从来没有部分成交这一说(触发之前压根没提交撮合)，撤销就是整笔退，不需要
-		// 像普通委托撤单那样按剩余量比例计算
-		return s.accounts.UnfreezeMargin(ctx, co.UID, co.FrozenMargin, co.FrozenCredit)
+	if order.Action == model.ActionOpen && (order.FrozenMargin.Sign() > 0 || order.FrozenCredit.Sign() > 0) {
+		// 条件单从来没有部分成交这一说(触发之前压根没提交撮合)，撤销就是整笔退，不需要像普通委托撤单那样按剩余量比例计算
+		return s.accounts.UnfreezeMargin(ctx, order.UID, order.FrozenMargin, order.FrozenCredit)
 	}
 	return nil
 }
@@ -1329,9 +1336,9 @@ type setLeverageRequest struct {
 // 修改一个已有仓位的杠杆——只对已经有仓位的uid+symbol+side生效，这个系统里
 // 杠杆本来就是下单时的参数，没有"没有仓位时预先声明杠杆"这种场景，见docs/leverage.md。
 // 按新杠杆重新算这个仓位应该占用多少保证金，多退少补：杠杆调低(需要的保证金变多)从
-// available/credit补冻结差额，钱不够直接拒绝；杠杆调高(需要的保证金变少)按仓位现有的
-// available/credit来源比例释放差额，不能笼统退回available——那样等于让credit经过
-// "冻结再降杠杆"这个渠道被洗成可提现的available，跟开仓保证金拆分的既有规则(见
+// balance/credit补锁定差额，钱不够直接拒绝；杠杆调高(需要的保证金变少)按仓位现有的
+// balance/credit来源比例解锁差额，不能笼统解到balance一侧——那样等于让credit经过
+// "锁定再降杠杆"这个渠道被洗成balance，跟开仓保证金拆分的既有规则(见
 // account-and-margin.md)是同一个道理
 func (s *Server) setLeverage(c *gin.Context) {
 	var req setLeverageRequest
@@ -1386,41 +1393,29 @@ func (s *Server) setLeverage(c *gin.Context) {
 		newCreditMargin := p.CreditMargin
 		switch delta.Sign() {
 		case 1:
-			// 杠杆调低，需要的保证金变多。全仓下已有仓位的position_margin不是记在
-			// frozen_margin/frozen_credit那两个"挂单专用"列里的(那两列只对应还在排队等
-			// 成交的委托，开仓成交后就已经被DecreaseFrozenMargin转出、永久体现在
-			// available/credit的余额降低里了，见account-and-margin.md)，所以不能直接
-			// UnfreezeMargin(那样会去扣一个其实是0的frozen_margin，得到"冻结保证金不足"
-			// 的假错误)。这里复用FreezeMargin的四级路径(available→credit→浮盈买力→拒绝)
-			// 判断这笔差额该从哪里出，冻结完立刻用DecreaseFrozenMargin把它从
-			// frozen_margin/frozen_credit转出——净效果是available/credit被永久扣掉delta，
-			// frozen_margin/frozen_credit不变，跟SubmitOrder"先冻结、成交时转移到仓位
-			// 记账"是同一套两步动作，只是这里没有异步撮合环节、在一次请求里连续做完
+			// 杠杆调低，需要的保证金变多。这个仓位的position_margin从开仓起就一直锁在
+			// accounts.frozen_margin/frozen_credit里(见settlement.go的OPEN分支)，跟还在
+			// 排队等成交的委托共用同一个锁定池，所以这里直接复用FreezeMargin的四级路径
+			// (free balance→free credit→浮盈买力→拒绝)判断这笔差额该从哪里出、锁进
+			// frozen_margin/frozen_credit——净效果是自由余额被永久扣掉delta，
+			// 跟SubmitOrder下单冻结走的是同一个函数
 			result, err := s.accounts.FreezeMargin(ctx, uid, delta)
 			if err != nil {
 				return err
 			}
-			if err := s.accounts.DecreaseFrozenMargin(ctx, uid, result.FromAvailable, result.FromCredit); err != nil {
-				return err
-			}
 			newCreditMargin = p.CreditMargin.Add(result.FromCredit)
 		case -1:
-			// 杠杆调高，需要的保证金变少——按仓位现有的available/credit来源比例，把差额
-			// 直接退回available/credit，不经过frozen_margin/frozen_credit(这部分保证金
-			// 本来就不记在那两列里)，是ApplyCloseFill释放持仓保证金时同样的直接退回模式
+			// 杠杆调高，需要的保证金变少——按仓位现有的balance/credit来源比例，把差额
+			// 对应的frozen_margin/frozen_credit解锁，是ApplyCloseFill释放持仓保证金时
+			// 同样的解锁路径
 			release := delta.Neg()
 			var releaseCredit decimal.Decimal
 			if p.PositionMargin.Sign() > 0 {
 				releaseCredit = p.CreditMargin.Mul(release).Div(p.PositionMargin)
 			}
 			releaseAvailable := release.Sub(releaseCredit)
-			if err := s.accounts.SettleToAvailable(ctx, uid, releaseAvailable); err != nil {
+			if err := s.accounts.UnfreezeMargin(ctx, uid, releaseAvailable, releaseCredit); err != nil {
 				return err
-			}
-			if !releaseCredit.IsZero() {
-				if err := s.accounts.SettleToCredit(ctx, uid, releaseCredit); err != nil {
-					return err
-				}
 			}
 			newCreditMargin = p.CreditMargin.Sub(releaseCredit)
 		}

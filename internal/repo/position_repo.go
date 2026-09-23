@@ -46,7 +46,7 @@ func (r *PositionRepo) FindOpenBySymbol(ctx context.Context, symbol string) ([]m
 
 // 开仓/加仓：加权平均开仓价、累加保证金，不存在就先插入一行空仓位再累加
 // addedMargin是这笔成交真实占用的保证金(properMargin)，addedCreditMargin是其中来自credit
-// 的部分——一个仓位可能由多笔成交(甚至多笔不同订单)累积而成，每笔成交的available/credit
+// 的部分——一个仓位可能由多笔成交(甚至多笔不同订单)累积而成，每笔成交的balance/credit
 // 来源比例可能不一样，必须在仓位上按金额累加着记credit_margin，平仓时才能按仓位整体精确
 // 的来源比例释放，不能只看最后一笔成交的比例
 //
@@ -110,7 +110,7 @@ func (r *PositionRepo) ApplyOpenFill(
 // releasedCreditMargin, closeVolume)。releasedMargin是这次平仓比例释放的position_margin
 // (开仓时按真实成交价占用、全仓下没有真的搬钱，但这部分钱这之前一直被算作"已用掉"，平仓时
 // 必须还给账户，不能只结算已实现盈亏——见settlement.go对这两个返回值的用法)，
-// releasedCreditMargin是其中来自credit的部分，两者的差额才是该还回available的部分。
+// releasedCreditMargin是其中来自credit的部分，两者的差额才是该解锁frozen_margin的部分。
 // closeVolume是按现有持仓量截断后的真实平仓量(防御性处理，reduce-only在上游本该保证不会超)
 //
 // 跟ApplyOpenFill一样，用乐观并发重试循环——同一个仓位在分批强平(docs/liquidation.md)期间

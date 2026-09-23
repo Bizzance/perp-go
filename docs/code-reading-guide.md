@@ -113,9 +113,9 @@ deploy/         容器化部署：Dockerfile、docker-compose.yml(+deps叠加层
 
 ### 1. 全仓保证金四级冻结路径
 
-`AccountService.FreezeMargin`（account.go）：`available`够→不够就`available+credit`
-（`FreezeSpillToCredit`）→不够就`available+credit+全部持仓未实现盈亏`（
-`FreezeForceIntoNegative`，允许`available`变负）→都不够就拒绝。详见
+`AccountService.FreezeMargin`（account.go）：自由余额够→不够就自由余额+自由信用额度
+（`FreezeSpillToCredit`）→不够就再加上全部持仓未实现盈亏（
+`FreezeForceIntoNegative`，允许自由余额变负）→都不够就拒绝。详见
 [account-and-margin.md](account-and-margin.md)。
 
 ### 2. CAS原子更新，不用悲观锁/事务

@@ -20,15 +20,22 @@
 | `is_insured`    | 本轮是否投保，运营通过`POST /account/insured`单独设置                           |
 | `status`        | 账户状态`active`/`frozen`，运营通过`POST /account/status`设置，见下面"账户状态" |
 | `round`         | 轮数，结束本轮时+1                                                              |
-| `credit`        | 信用额度余额（用户买保险后的赔付），只能当开仓保证金用，不能转出/提现           |
-| `available`     | 可用余额，**可能为负**                                                          |
-| `frozen_margin` | 挂单冻结的保证金（来自`available`的部分）                                       |
-| `frozen_credit` | 挂单冻结的保证金（来自`credit`的部分）                                          |
+| `credit`        | 信用额度总额（用户买保险后的赔付），只能当开仓保证金用，不能转出/提现           |
+| `balance`       | 余额总额，**可能为负**。不随下单/开仓锁定而变化，只有充值/提现/已实现盈亏/手续费这些真实改变总资产的操作才会改它 |
+| `frozen_margin` | 来自`balance`的锁定额——挂单占用+持仓占用的合计，可用余额=`balance - frozen_margin` |
+| `frozen_credit` | 来自`credit`的锁定额，跟`frozen_margin`对称，可用信用额度=`credit - frozen_credit` |
 
-`available`允许为负，这是全仓模式下的合法状态，不是bug——两种情况会让它变负：
+`balance`允许为负，这是全仓模式下的合法状态，不是bug——两种情况会让它变负：
 
 1. 用持仓浮盈当买力开新仓（见下面"冻结保证金的四级路径"第3级）
 2. 强平穿仓垫付之前，账户余额被打成负数
+
+`frozen_margin`/`frozen_credit`覆盖挂单和持仓两种锁定：下单时先按`FreezeMargin`的四级路径
+把保证金锁进这两列；成交之后，这笔钱不是"退回余额、再记到仓位上"，而是留在原地——只是把
+锁定的估算值从"下单时的保守估计"调整成"按真实成交价算出的真实保证金"（多退少补，见
+[matching-and-settlement.md](matching-and-settlement.md)），继续锁着直到这笔仓位平仓才
+释放。`positions`表的`position_margin`/`credit_margin`是同一份锁定按仓位维度的分账（用于
+按symbol算强平价、展示给合作方），不是另一笔独立的钱。
 
 ## 账户状态（冻结/解冻）
 
@@ -58,78 +65,79 @@
 
 ## 为什么`frozen_margin`/`frozen_credit`要分开记账
 
-`credit`不能提现，`available`可以（通过合作方接口转出）。如果冻结保证金不区分来源、
-笼统记一笔`frozen_margin`，"冻结→撤单退回"或"冻结→成交多退少补"这些环节退钱的时候，
-没法知道这笔钱本该退回`available`还是`credit`——一旦退错，就等于让`credit`经过"冻结
-再释放"这条渠道被洗成了可提现的`available`。所以`orders`表和`accounts`表都各自把
-`frozen_margin`（来自available）和`frozen_credit`（来自credit）分开存，资金流转的每一步
-（冻结、撤单释放、成交转正、多退少补）都按各自来源精确对应，不允许混用。
+`credit`不能提现，`balance`可以（通过合作方接口转出）。如果锁定的保证金不区分来源、
+笼统记一笔，"撤单解锁"或"成交多退少补"这些环节的时候，没法知道这笔钱本该解到`balance`
+那一侧还是`credit`那一侧——一旦弄混，就等于让`credit`经过"锁定再解锁"这条渠道被洗成了
+可提现的`balance`。所以`orders`表和`accounts`表都各自把`frozen_margin`（来自balance）
+和`frozen_credit`（来自credit）分开存，资金流转的每一步（锁定、撤单解锁、成交多退少补、
+平仓解锁）都按各自来源精确对应，不允许混用。
 
 ## 冻结保证金的四级路径（`FreezeMargin`）
 
-开仓下单时，`requiredMargin`先过一道 **买力预检**，再按四级路径依次尝试冻结，返回`FreezeResult{FromAvailable,
-FromCredit}`告诉调用方这笔钱分别从两个来源各拿了多少。
+开仓下单时，`requiredMargin`先过一道 **买力预检**，再按四级路径依次尝试锁定，返回`FreezeResult{FromAvailable,
+FromCredit}`告诉调用方这笔钱分别从两个来源各拿了多少。下面的"自由余额"/"自由信用额度"
+指`balance - frozen_margin`/`credit - frozen_credit`——`balance`/`credit`本身是不随锁定
+变化的总额，见上面"全仓模式"一节。
 
-**买力预检：账户有浮亏时，买力是`available + credit`减掉浮亏，不够就直接拒绝**，不管`available`本身够不够。
+**买力预检：账户有浮亏时，买力是自由余额+自由信用额度减掉浮亏，不够就直接拒绝**，不管自由余额本身够不够。
 币安的可用余额 = 钱包余额 − 初始保证金 +
 未实现盈亏（[币安说明](https://www.binance.com/en/blog/futures/what-is-the-available-balance-margin-balance-and-total-balance-on-binance-futures-457299340443288694)），
 浮亏直接减少可用余额；OKX的可用保证金也是从计入未实现盈亏的调整后权益算起。早期实现前两级只看余额、
-不扣浮亏，账户浮亏累累甚至已经满足强平条件，只要`available`还是正数就能继续冻结保证金开新仓（探针复现：
-权益21.75 <= 维持保证金22.1、浮亏975、`available`346.75时能冻结340）。按这个口径，账户进入强平条件
+不扣浮亏，账户浮亏累累甚至已经满足强平条件，只要自由余额还是正数就能继续锁定保证金开新仓（探针复现：
+权益21.75 <= 维持保证金22.1、浮亏975、自由余额346.75时能锁定340）。按这个口径，账户进入强平条件
 （权益 <= 维持保证金 < 初始保证金）时买力必然为负，新开仓自然被拒，所以不需要单独加"强平期间拒绝新单"的规则，
 代码里也没有按仓位`liquidating`状态拦截。下单、创建条件单、降杠杆补保证金都走这个检查。
 浮盈不在预检里放宽，只在第3级才能当买力。
 
 预检之后的四级路径：
 
-1. **`available`够** → 全部从`available`冻结，`FromCredit`为0
-2. **`available`不够，但`available + credit`够** → 缺口部分从`credit`冻结
+1. **自由余额够** → 全部从`balance`锁定（只加`frozen_margin`，不动`balance`），`FromCredit`为0
+2. **自由余额不够，但自由余额+自由信用额度够** → 缺口部分从`credit`锁定
    （`FreezeSpillToCredit`）
-3. **前两级都不够，但`available + credit + 全部持仓未实现盈亏`够** → 币安式"持仓浮盈
-   也能当买力开新仓"，强制冻结、允许`available`变负； **不动`credit`**——浮盈是不确定的，
+3. **前两级都不够，但自由余额+自由信用额度+全部持仓未实现盈亏够** → 币安式"持仓浮盈
+   也能当买力开新仓"，强制锁定、允许自由余额变负； **不动`credit`**——浮盈是不确定的，
    不该跟运营已经真金白银给出的保险赔付混在一起算作"已用掉"
 4. **都不够** → 拒绝，返回`ErrInsufficientMargin`
 
 任何一个持仓缺标记价格，未实现盈亏就按0算（不计入买力）——这是保守方向：算少了买力
 顶多让开仓更容易被拒绝，不会让账户透支。
 
-第3级强制冻结（`FreezeForceIntoNegative`）用的`available`/`credit`基准，是紧邻着这次
-调用之前重新读的最新值，不是复用第2级判断时更早读到的快照——两次读之间账户可能被
-并发改过。这一步同时改成CAS写法：`UPDATE ... WHERE available=? AND credit=?`带上
-读到的旧值做守卫，读到的快照跟真正生效的这次扣减对不上时返回失败，让上层按余额不足
-拒绝，而不是拿一个过期基准悄悄执行扣减。
+第3级强制锁定（`FreezeForceIntoNegative`）用的`balance`/`credit`/`frozen_margin`/
+`frozen_credit`基准，是紧邻着这次调用之前重新读的最新快照，不是复用第2级判断时更早读到的
+快照——两次读之间账户可能被并发改过。这一步是CAS写法：`UPDATE ... WHERE balance=? AND
+credit=? AND frozen_margin=? AND frozen_credit=?`带上读到的旧值做守卫，读到的快照跟真正
+生效的这次锁定对不上时返回失败，让上层按余额不足拒绝，而不是拿一个过期基准悄悄执行锁定。
 
 ## 合作方调整余额（`POST /account/balance`）
 
 `requestId`必填（幂等键，见 [idempotency.md](idempotency.md)），"写资金流水+改余额"在同一个数据库事务里
-完成（`AccountRepo.ApplyFundOp`）。正数是入账，直接加到`available`；负数是扣款，只在`available >= 扣减额`
-时才扣，用一条`UPDATE ... WHERE available >= ?`原子完成"检查余额+扣减"，不够返回`insufficient_balance`、
+完成（`AccountRepo.ApplyFundOp`）。正数是入账，直接加到`balance`；负数是扣款，只在自由余额
+（`balance - frozen_margin`）够扣时才扣，用一条`UPDATE ... WHERE balance - frozen_margin >= ?`
+原子完成"检查余额+扣减"，不够返回`insufficient_balance`、
 事务回滚（流水一起撤掉，`requestId`不被占用）。事务开头先`SELECT ... FOR UPDATE`锁账户行，同一个账户的资金
 操作串行执行，避免并发的同一个`requestId`在唯一索引上死锁，见 [idempotency.md](idempotency.md)。`POST /account/credit`
 发额度同理，也是必填`requestId`+同一个事务。
-早期实现负数分支也是无条件的`available = available + ?`，文档写着"扣的时候必须有足够`available`"
-但代码根本没校验，扣款能把余额扣成负数。注意这里只看`available`，不看信用额度和浮盈——这个接口是
-合作方的资金划转（模拟提现），信用额度不能转出，浮盈没有兑现，都不该被这个接口扣走。每次成功的调整
-都会写一条`deposit`类型的资金流水（`GET /account/transactions`可查，带上`requestId`方便对账）。
+注意这里的扣款检查只看自由余额，不看浮盈——这个接口是合作方的资金划转（模拟提现），锁在
+挂单/仓位里的钱和浮盈都没有兑现，都不该被这个接口扣走。每次成功的调整都会写一条`deposit`
+类型的资金流水（`GET /account/transactions`可查，带上`requestId`方便对账）。
 
-## "先available后credit"的扣款顺序
+## "先balance后credit"的扣款顺序
 
 已实现盈亏（`SettlePnl`）、手续费（`DeductFee`）这些"从账户里往外扣钱"的场景，统一走
-`deductWithCreditFallback`：先扣`available`，`available`扣完了（含扣到负数为止都优先扣
-`available`）再扣`credit`。这是刻意的业务取舍：`credit`是运营发放的保险赔付，尽量少被
-真实亏损/手续费吃掉，能控制运营的赔付成本。盈利只进`available`，不会误加回`credit`。
+`deductWithCreditFallback`：先扣`balance`，`balance`扣完了（含扣到负数为止都优先扣
+`balance`）再扣`credit`。这是刻意的业务取舍：`credit`是运营发放的保险赔付，尽量少被
+真实亏损/手续费吃掉，能控制运营的赔付成本。盈利只进`balance`，不会误加回`credit`。
 
 ## 资金流转的几个关键操作
 
 | 操作                   | 说明                                                                                                                                                                                                                                               |
 |------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| `FreezeMargin`         | 挂单开仓冻结保证金，见上面四级路径                                                                                                                                                                                                                 |
-| `UnfreezeMargin`       | 撤单/未成交部分释放冻结的保证金，`availableAmount`/`creditAmount`分别按来源精确归还                                                                                                                                                                |
-| `DecreaseFrozenMargin` | 开仓成交：冻结保证金转移到仓位（全仓下`position_margin`只是记账用的名义值，不是真的锁住）。归还的不是原样冻结的钱，是按真实成交价"多退少补"之后的金额，分别退回`available`/`credit`，详见 [matching-and-settlement.md](matching-and-settlement.md) |
-| `SettleToAvailable`    | 保证金原样归还到`available`——只用于明确知道钱该回`available`的场景，不用来结算亏损                                                                                                                                                                 |
-| `SettleToCredit`       | 跟`SettleToAvailable`对称，归还冻结时属于`credit`的那一份                                                                                                                                                                                          |
-| `SettlePnl`            | 已实现盈亏结算，可正可负：盈利只进`available`；亏损走"先available后credit"顺序                                                                                                                                                                     |
-| `DeductFee`            | 手续费扣款，跟`SettlePnl`亏损分支同样的"先available后credit"顺序，无守卫——这笔手续费对应的成交已经真实发生，不能因为差一点钱扣不出来就不扣                                                                                                         |
+| `FreezeMargin`         | 挂单/开仓锁定保证金，见上面四级路径                                                                                                                                                                                                                |
+| `UnfreezeMargin`       | 解锁`frozen_margin`/`frozen_credit`，不touch`balance`/`credit`——撤单、条件单撤销、平仓解锁、降杠杆释放共用，`availableAmount`/`creditAmount`按来源精确释放。settlement.go开仓成交时也用它把锁定从"下单时的保守估算"调整到"按真实成交价算出的真实保证金"，这个delta偶尔是负数(需要补锁而不是释放)，同一个函数处理两种方向 |
+| `SettleToBalance`      | 直接改`balance`——只用于真实改变总资产的场景（资金费、ADL划转保险基金），不用来结算已实现盈亏                                                                                                                                                       |
+| `SettleToCredit`       | 直接改`credit`，无守卫——只用于强平穿仓垫付/维持保证金缓冲清算这类"把自由信用额度清零"的场景                                                                                                                                                       |
+| `SettlePnl`            | 已实现盈亏结算，可正可负：盈利只进`balance`；亏损走"先balance后credit"顺序                                                                                                                                                                         |
+| `DeductFee`            | 手续费扣款，跟`SettlePnl`亏损分支同样的"先balance后credit"顺序，无守卫——这笔手续费对应的成交已经真实发生，不能因为差一点钱扣不出来就不扣                                                                                                           |
 | `GrantCredit`          | 运营发放/追加信用额度，同一轮内可以多次调用、直接累加                                                                                                                                                                                              |
 | `SetInsured`           | 单独设置本轮是否投保，跟`GrantCredit`是两个独立动作，互不联动                                                                                                                                                                                      |
 | `CloseRound`           | 结束本轮的资金收尾：`credit`清零（没用完的赔付额度不追讨，不退给运营）、`is_insured`重置、`round`+1                                                                                                                                                |
@@ -137,12 +145,17 @@ FromCredit}`告诉调用方这笔钱分别从两个来源各拿了多少。
 ## 并发控制：原子条件UPDATE，不用悲观锁
 
 账户余额的加减全部走"UPDATE ... WHERE 字段 >= 金额"这种数据库层面的原子条件更新。
-涉及`credit`的多分支逻辑（比如`FreezeSpillToCredit`要同时判断`available`不够、
-`available+credit`够、`available`可能已经是负数）用SQL的`GREATEST`/`LEAST`函数把
+涉及`credit`的多分支逻辑（比如`FreezeSpillToCredit`要同时判断自由余额不够、
+自由余额+自由信用额度够、自由余额可能已经是负数）用SQL的`GREATEST`/`LEAST`函数把
 分支判断内嵌进一条`UPDATE`语句，保证整个多字段读-判断-写是原子的，不需要应用层加锁。
-`UPDATE`受影响行数为0就代表"条件不满足"，调用方判断`RowsAffected() > 0`即可。这一层
-保证的是单次`available`/`credit`加减操作本身的原子性，不覆盖"先读一批状态、再决定要
-冻结多少"这种跨越多次读写的复合决策——开仓时"读现有仓位/挂单→算分档→冻结保证金"这段
+`UPDATE`受影响行数为0就代表"条件不满足"，调用方判断`RowsAffected() > 0`即可——这也是
+数据库连接要开`clientFoundRows`的原因：结算时`UnfreezeMargin`传的delta经常刚好是0
+（下单时的保守估算跟真实成交价算出来的保证金完全相等），这种情况下`SET`子句没有让任何
+列的值发生变化，MySQL默认的"受影响行数=值变化的行数"语义会把这个完全正常的no-op误判成
+"没匹配到、乐观锁冲突"，`clientFoundRows`让"匹配到WHERE条件的行数"才是`RowsAffected()`
+的含义，这才是这里各处判断逻辑真正想要的语义（见`internal/db/db.go`）。这一层
+保证的是单次`balance`/`credit`加减操作本身的原子性，不覆盖"先读一批状态、再决定要
+锁定多少"这种跨越多次读写的复合决策——开仓时"读现有仓位/挂单→算分档→锁定保证金"这段
 复合临界区另外用分布式锁保护，见 [risk-limit-tiers.md](risk-limit-tiers.md#并发下单的原子性按uidsymbolside的分布式锁)。
 其它没有额外加锁的极端并发场景（比如同一个uid同时触发强平结算与主动撤单）仍然只靠
 这套原子UPDATE兜底，属于MVP阶段已知、接受的简化——详见 [known-limitations.md](known-limitations.md)。
@@ -152,15 +165,18 @@ FromCredit}`告诉调用方这笔钱分别从两个来源各拿了多少。
 `GET /account/info`返回的是现算现填的视图，不是`accounts`表原始字段：
 
 ```
-equity = available + credit + frozenMargin + frozenCredit + positionMargin + totalUnrealizedPnl
+equity = balance + credit + totalUnrealizedPnl
 ```
 
 `credit`要算进权益，信用额度才能真正起到"扛住浮亏、推迟强平"的作用——强平联合判断
-（见 [liquidation.md](liquidation.md)）用的也是这个口径。挂单冻结的保证金和仓位占用的保证金也要算进去
-（`positionMargin`是这个uid全部持仓占用的保证金之和，含来自信用额度的部分）：开仓只是把钱从`available`
-挪进冻结/仓位，权益不变，价格不动权益只会被手续费拉低。 **买力**（开仓够不够钱，见"冻结保证金的四级路径"）
-是另一个口径，只看自由余额`available`（加`credit`和浮盈），不含已经占用的保证金。`totalUnrealizedPnl`是这个uid
-名下全部持仓当前未实现盈亏之和，跟`FreezeMargin`第三级路径共用同一份计算逻辑。
+（见 [liquidation.md](liquidation.md)）用的也是这个口径。`balance`是不随锁定变化的总额，
+本身已经包含了挂单/仓位占用的那部分钱，不需要再单独加`frozenMargin`/`positionMargin`——
+开仓/挂单只是让`frozenMargin`变多，`balance`不变，价格不动权益只会被手续费拉低。
+`positionMargin`（这个uid全部持仓占用的保证金之和，含来自信用额度的部分）只是查询视图上
+的展示字段，不参与权益计算。 **买力**（开仓够不够钱，见"冻结保证金的四级路径"）
+是另一个口径，只看自由余额`balance - frozenMargin`（加自由信用额度和浮盈），不含已经
+占用的保证金。`totalUnrealizedPnl`是这个uid名下全部持仓当前未实现盈亏之和，跟
+`FreezeMargin`第三级路径共用同一份计算逻辑。
 
 ## 轮次（round）生命周期
 

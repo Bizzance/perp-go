@@ -108,10 +108,10 @@ type Account struct {
 	UID          uint64          `db:"uid" json:"uid"`
 	IsInsured    bool            `db:"is_insured" json:"isInsured"`       // 是否投保
 	Round        uint64          `db:"round" json:"round"`                // 轮数，结束本轮时+1
-	Credit       decimal.Decimal `db:"credit" json:"credit"`              // 信用额度余额，只能当开仓保证金用，不能转出/提现
-	Available    decimal.Decimal `db:"available" json:"available"`        // 可用余额
-	FrozenMargin decimal.Decimal `db:"frozen_margin" json:"frozenMargin"` // 挂单冻结保证金(来自available的部分)
-	FrozenCredit decimal.Decimal `db:"frozen_credit" json:"frozenCredit"` // 挂单冻结保证金(来自credit的部分)
+	Credit       decimal.Decimal `db:"credit" json:"credit"`              // 信用额度总额，只能当开仓保证金用，不能转出/提现
+	Balance      decimal.Decimal `db:"balance" json:"balance"`            // 余额总额，不随下单/开仓冻结变化，只有充值/提现/已实现盈亏/手续费才会改它
+	FrozenMargin decimal.Decimal `db:"frozen_margin" json:"frozenMargin"` // 来自balance的锁定额(挂单+持仓占用的合计)，可用余额=balance-frozenMargin
+	FrozenCredit decimal.Decimal `db:"frozen_credit" json:"frozenCredit"` // 来自credit的锁定额，可用信用额度=credit-frozenCredit
 	Version      uint32          `db:"version" json:"-"`
 	Status       AccountStatus   `db:"status" json:"status"`
 	StatusReason string          `db:"status_reason" json:"-"`
@@ -161,7 +161,7 @@ type Order struct {
 	Amount       decimal.Decimal `db:"amount" json:"amount"`              // 挂单数量
 	TradedAmount decimal.Decimal `db:"traded_amount" json:"tradedAmount"` // 已成交的数量
 	AvgDealPrice decimal.Decimal `db:"avg_deal_price" json:"avgDealPrice"`
-	FrozenMargin decimal.Decimal `db:"frozen_margin" json:"frozenMargin"` // 冻结保证金来自available的部分
+	FrozenMargin decimal.Decimal `db:"frozen_margin" json:"frozenMargin"` // 冻结保证金来自balance的部分
 	FrozenCredit decimal.Decimal `db:"frozen_credit" json:"frozenCredit"` // 冻结保证金来自credit的部分
 	Leverage     uint32          `db:"leverage" json:"leverage"`
 	ReduceOnly   bool            `db:"reduce_only" json:"reduceOnly"`
@@ -192,7 +192,7 @@ type ConditionalOrder struct {
 	Amount           decimal.Decimal        `db:"amount" json:"amount"`
 	Leverage         uint32                 `db:"leverage" json:"leverage"`
 	ReduceOnly       bool                   `db:"reduce_only" json:"reduceOnly"`
-	FrozenMargin     decimal.Decimal        `db:"frozen_margin" json:"frozenMargin"` // 创建时冻结的保证金来自available的部分，只有开仓方向才有
+	FrozenMargin     decimal.Decimal        `db:"frozen_margin" json:"frozenMargin"` // 创建时冻结的保证金来自balance的部分，只有开仓方向才有
 	FrozenCredit     decimal.Decimal        `db:"frozen_credit" json:"frozenCredit"` // 创建时冻结的保证金来自credit的部分，只有开仓方向才有
 	Status           ConditionalOrderStatus `db:"status" json:"status"`
 	CreateTime       int64                  `db:"create_time" json:"createTime"`
@@ -247,7 +247,7 @@ func (p *Position) UnrealizedPnl(markPrice decimal.Decimal) decimal.Decimal {
 // 多头：liqPrice = (avgEntryPrice*N - positionMargin - maintenanceAmount) / (N * (1 - mmr))
 // 空头：liqPrice = (avgEntryPrice*N + positionMargin + maintenanceAmount) / (N * (1 + mmr))
 // 全仓真实强平以LiquidationService里"账户权益 vs 全部仓位维持保证金要求之和"为准，
-// 这个值只在没有其它持仓、也不考虑available缓冲时才精确，MVP先用这个简化公式做展示
+// 这个值只在没有其它持仓、也不考虑balance缓冲时才精确，MVP先用这个简化公式做展示
 func (p *Position) LiquidationPrice(mmr, maintenanceAmount decimal.Decimal) decimal.Decimal {
 	if p.Volume.IsZero() {
 		return decimal.Zero

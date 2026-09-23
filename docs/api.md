@@ -202,7 +202,7 @@ X-Signature  HMAC-SHA256(secret, timestamp\nnonce\nMETHOD\npath\nrawQuery\nsha25
   "code": 200, "message": "success",
   "data": {
     "uid": 10001, "isInsured": false, "status": "active", "round": 1,
-    "credit": "0", "available": "0", "frozenMargin": "0", "frozenCredit": "0",
+    "credit": "0", "balance": "0", "frozenMargin": "0", "frozenCredit": "0",
     "positionMargin": "0", "totalUnrealizedPnl": "0", "equity": "0",
     "created": true
   }
@@ -222,8 +222,9 @@ X-Signature  HMAC-SHA256(secret, timestamp\nnonce\nMETHOD\npath\nrawQuery\nsha25
 { "uid": 10001, "amount": 1000, "requestId": "dep-20260919-0001" }
 ```
 
-**`requestId`必填**，见上面"幂等"：同一个`requestId`重复提交只入账/扣款一次。扣款时`available`必须够，
-否则返回`insufficient_balance`、什么都不改，而且这个`requestId`不会被占用，补足余额后可以重试。
+**`requestId`必填**，见上面"幂等"：同一个`requestId`重复提交只入账/扣款一次。扣款时自由余额
+（`balance - frozenMargin`）必须够，否则返回`insufficient_balance`、什么都不改，而且这个
+`requestId`不会被占用，补足余额后可以重试。
 
 ```json
 { "code": 200, "message": "success", "data": { "requestId": "dep-20260919-0001" } }
@@ -238,8 +239,8 @@ X-Signature  HMAC-SHA256(secret, timestamp\nnonce\nMETHOD\npath\nrawQuery\nsha25
   "code": 200, "message": "success",
   "data": {
     "uid": 990102, "isInsured": false, "status": "active", "round": 1,
-    "credit": "0", "available": "1115.6",
-    "frozenMargin": "0", "frozenCredit": "0",
+    "credit": "0", "balance": "1615.6",
+    "frozenMargin": "500", "frozenCredit": "0",
     "positionMargin": "500",
     "totalUnrealizedPnl": "100.0000000005", "equity": "1715.6000000005"
   }
@@ -250,12 +251,12 @@ X-Signature  HMAC-SHA256(secret, timestamp\nnonce\nMETHOD\npath\nrawQuery\nsha25
 |----------------------|------------------------------------------------------------------------------------------|
 | `round`              | 当前轮数，`POST /account/round/close`成功后加1                                           |
 | `isInsured`          | 本轮是否投保                                                                             |
-| `credit`             | 信用额度余额（保险赔付，只能当保证金，不能转出提现）                                     |
-| `available`          | 可用余额。全仓模式下可能为负（持仓浮盈被当作买力借用时）                                 |
-| `frozenMargin` / `frozenCredit` | 挂单占用的冻结保证金，分别来自`available`/`credit`                            |
-| `positionMargin`     | 全部持仓占用的保证金之和（含来自信用额度的部分）。开仓成交时这笔钱从`available`转进仓位   |
+| `credit`             | 信用额度总额（保险赔付，只能当保证金，不能转出提现）                                     |
+| `balance`            | 余额总额，不随下单/开仓锁定而变化，只有充值/提现/已实现盈亏/手续费才会改它。全仓模式下可能为负（持仓浮盈被当作买力借用、或亏损超过自有资金时） |
+| `frozenMargin` / `frozenCredit` | 锁定额，挂单占用+持仓占用的合计，分别来自`balance`/`credit`。可用余额=`balance - frozenMargin`，可用信用额度=`credit - frozenCredit`；客户端想分开显示这两部分都行 |
+| `positionMargin`     | 全部持仓占用的保证金之和（含来自信用额度的部分），是`frozenMargin`/`frozenCredit`按仓位维度的分账，仅供展示 |
 | `totalUnrealizedPnl` | 全部持仓的未实现盈亏之和                                                                 |
-| `equity`             | 账户权益 = `available + credit + frozenMargin + frozenCredit + positionMargin + totalUnrealizedPnl`，即全部属于用户的钱加浮动盈亏，强平判断用的就是这个口径。开仓只是把钱从`available`挪进保证金，价格不动权益不变（只被手续费拉低） |
+| `equity`             | 账户权益 = `balance + credit + totalUnrealizedPnl`，即全部属于用户的钱（不管当前是自由的还是锁在挂单/仓位里）加浮动盈亏，强平判断用的就是这个口径。开仓/挂单只是让`frozenMargin`变多，`balance`本身不变，价格不动权益不变（只被手续费拉低） |
 
 ### `POST /account/credit`
 

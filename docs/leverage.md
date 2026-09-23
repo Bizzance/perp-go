@@ -25,52 +25,42 @@
 跟并发下单挤在同一把锁里序列化——这本来就是同一个uid+symbol+side"名义价值/保证金占用"
 临界区的两个不同入口，不需要为这个接口单独发明一套锁。
 
-## 保证金调整：不能走`FreezeMargin`/`UnfreezeMargin`的frozen_margin路径
+## 保证金调整：直接复用`FreezeMargin`/`UnfreezeMargin`
 
-这是这个功能里最容易写错的地方。全仓模式下， **已经开仓的仓位的保证金不记在`accounts.
-frozen_margin`/`frozen_credit`这两列里**——这两列只对应"还在排队等成交的挂单"，一笔委托
-成交之后，`EngineService.settleOneFill`（`internal/service/settlement.go`）就会用
-`DecreaseFrozenMargin`把对应金额从这两列转出，同时用`SettleToAvailable`/`SettleToCredit`
-把"占用这个仓位的真实保证金"永久体现为`available`/`credit`余额的降低——`position.
-PositionMargin`/`CreditMargin`只是记账用的名义值，用来在平仓时知道该退回多少、退给
-`available`还是`credit`，不对应`frozen_margin`/`frozen_credit`里的任何一分钱（见
-[account-and-margin.md](account-and-margin.md)"资金流转的几个关键操作"）。
+全仓模式下，`accounts.frozen_margin`/`frozen_credit`这两列覆盖挂单**和**持仓两种锁定：
+一笔委托成交之后，`EngineService.settleOneFill`（`internal/service/settlement.go`）不会
+把这笔钱从`frozen_margin`/`frozen_credit`转出、退回`balance`/`credit`，而是把锁定量从
+"下单时的保守估算"调整到"按真实成交价算出的真实保证金"，继续锁着直到平仓——`position.
+PositionMargin`/`CreditMargin`是这份锁定按仓位维度的分账（用于查询展示、按symbol算强平
+价），跟`accounts.frozen_margin`/`frozen_credit`里的锁定是同一份钱，不是另外记的独立
+金额（见 [account-and-margin.md](account-and-margin.md)）。
 
-第一版实现直接照抄了开仓下单校验那段代码，杠杆调低时调`FreezeMargin`、杠杆调高时调
-`UnfreezeMargin`—— **实测直接暴露问题**：对一个刚成交、`frozen_margin`已经是0的账户
-调高杠杆（应该释放保证金），`UnfreezeMargin`去扣一个本来就是0的`frozen_margin`，
-返回"冻结保证金不足"这个完全文不对题的假错误，操作直接失败。
+这个设计下，改杠杆需要的保证金调整就是单纯的"锁多一点"或"解锁一点"，跟下单冻结、撤单
+解锁走的是完全相同的机制，不需要为这个接口单独发明一套逻辑：
 
-正确的做法是分别复用两条既有链路各自的"直接改`available`/`credit`，不碰`frozen_margin`/
-`frozen_credit`"的那一半：
-
-- **杠杆调高（需要的保证金变少）**：直接照抄`ApplyCloseFill`释放持仓保证金那一段——按
-  仓位现有`CreditMargin/PositionMargin`的比例把差额拆成`available`/`credit`两部分，
-  分别调`SettleToAvailable`/`SettleToCredit`直接退，不经过`frozen_margin`。
-- **杠杆调低（需要的保证金变多）**：不能只加"直接扣`available`/`credit`"这么简单——
-  还需要`FreezeMargin`那套四级路径（`available`够不够 → 不够就查`available+credit`
-  够不够 → 还不够就查加上浮盈够不够 → 都不够就拒绝）来判断这笔新增的保证金到底该从哪个
-  来源出、以及要不要拒绝。做法是先调`FreezeMargin`（复用完整的四级判断逻辑，副作用是
-  会把这笔钱记进`frozen_margin`/`frozen_credit`），紧接着立刻调`DecreaseFrozenMargin`
-  把它从这两列转出——两步连续执行，净效果是`available`/`credit`被永久扣掉差额、
-  `frozen_margin`/`frozen_credit`不变，效果上完全等价于`SubmitOrder`"先冻结、成交时
-  转移到仓位记账"这套流程，只是这里没有异步撮合的中间状态，写成一次请求里连续完成的
-  两步。
+- **杠杆调高（需要的保证金变少）**：按仓位现有`CreditMargin/PositionMargin`的比例把
+  差额拆成两部分，直接调`UnfreezeMargin`解锁——跟`ApplyCloseFill`释放持仓保证金时用的
+  是同一个函数。
+- **杠杆调低（需要的保证金变多）**：直接调`FreezeMargin`（复用完整的四级路径：自由余额
+  够不够 → 不够就查自由余额+自由信用额度够不够 → 还不够就查加上浮盈够不够 → 都不够就
+  拒绝），锁定的钱就留在`frozen_margin`/`frozen_credit`里，不需要像旧版本那样"冻结完
+  立刻转出"——因为这里的`frozen_margin`本来就是仓位要一直锁着的地方，不是临时中转站。
 
 ## 实测验证
 
 用真实成交开出一个仓位，覆盖了这几种场景，均符合预期：
 
-- 纯`available`来源的仓位调高/调低杠杆：保证金按新杠杆重算，`available`增减金额精确
-  对应差额。
-- `available`+`credit`混合来源的仓位（先充少量`available`、发一笔`credit`，开仓时
-  `available`不够、自动spill到`credit`）调高杠杆：差额按仓位当前`CreditMargin/
-  PositionMargin`的比例精确拆分，分别退回两个来源，不会把`credit`那一份错误地退到
-  `available`（那样等于把不能提现的信用额度洗成了可提现的余额）。
+- 纯`balance`来源的仓位调高/调低杠杆：`frozen_margin`按新杠杆重算，增减金额精确
+  对应差额，`balance`全程不变。
+- `balance`+`credit`混合来源的仓位（先充少量`balance`、发一笔`credit`，开仓时
+  `balance`不够、自动spill到`credit`）调高杠杆：差额按仓位当前`CreditMargin/
+  PositionMargin`的比例精确拆分，分别解锁`frozen_margin`/`frozen_credit`，不会把
+  `credit`那一份错误地解到`frozen_margin`（那样等于把不能提现的信用额度洗成了balance
+  一侧的锁定）。
 - 同一个仓位反向操作（调低杠杆后又调回去）：拿到的最终状态跟没做过这次往返完全一致，
-  `frozen_margin`/`frozen_credit`全程保持0，没有意外残留。
-- 拒绝路径：新杠杆超过分档允许的最大值、没有对应方向的持仓、`available+credit`不够
-  覆盖调低杠杆后的新增保证金——三种情况都正确拒绝且不产生任何副作用（拒绝前后仓位/
+  没有意外残留。
+- 拒绝路径：新杠杆超过分档允许的最大值、没有对应方向的持仓、自由余额+自由信用额度
+  不够覆盖调低杠杆后的新增保证金——三种情况都正确拒绝且不产生任何副作用（拒绝前后仓位/
   账户状态完全不变，用真实请求逐条验证过）。
 
 ## 明确没做的

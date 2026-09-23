@@ -120,7 +120,7 @@ func (e *engineEnv) newAccount(t *testing.T, offset uint64, available string) ui
 	if _, _, err := e.accountRepo.CreateIfAbsent(context.Background(), uid); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.db.Exec(`UPDATE accounts SET available = ? WHERE uid = ?`, available, uid); err != nil {
+	if _, err := e.db.Exec(`UPDATE accounts SET balance = ? WHERE uid = ?`, available, uid); err != nil {
 		t.Fatal(err)
 	}
 	return uid
@@ -140,6 +140,14 @@ func (e *engineEnv) account(t *testing.T, uid uint64) *model.Account {
 		t.Fatalf("查账户失败: %v %v", a, err)
 	}
 	return a
+}
+
+// 自由余额=balance-frozen_margin，即老口径里的available——用于验证买力/开仓冻结相关的
+// 断言，balance本身现在是不随冻结变化的总额，见model.Account.Balance
+func (e *engineEnv) freeBalance(t *testing.T, uid uint64) decimal.Decimal {
+	t.Helper()
+	acc := e.account(t, uid)
+	return acc.Balance.Sub(acc.FrozenMargin)
 }
 
 func (e *engineEnv) order(t *testing.T, orderID uint64) *model.Order {
@@ -171,7 +179,7 @@ func (e *engineEnv) insertOrder(t *testing.T, uid uint64, o orderOpts) *model.Or
 	frozen := decimal.Zero
 	if o.margin != "" {
 		frozen = decimal.RequireFromString(o.margin)
-		ok, err := e.accountRepo.FreezeFromAvailable(ctx, acc.ID, frozen)
+		ok, err := e.accountRepo.FreezeFromBalance(ctx, acc.ID, frozen)
 		if err != nil || !ok {
 			t.Fatalf("冻结保证金失败: ok=%v err=%v", ok, err)
 		}

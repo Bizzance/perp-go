@@ -221,7 +221,7 @@ func TestCreateAccountResultJSON_FlattensAccountViewAndCreatedFlag(t *testing.T)
 	if m["uid"] != float64(10001) || m["created"] != true {
 		t.Errorf("uid和created应该在同一层, got %s", b)
 	}
-	for _, k := range []string{"round", "available", "credit", "equity", "isInsured", "positionMargin"} {
+	for _, k := range []string{"round", "balance", "credit", "equity", "isInsured", "positionMargin"} {
 		if _, ok := m[k]; !ok {
 			t.Errorf("账户视图的字段%s应该被展开到同一层, got %s", k, b)
 		}

@@ -91,8 +91,8 @@
    （专门只匹配`status='triggered'`，跟撤单用的`MarkCanceled`区分开）把条件单状态改回
    `canceled`，并对`ActionOpen`且确实冻结过保证金的情况调用`UnfreezeMargin`退还，
    等效于"这次触发没有真的发生"，用户损失的只是这一次触发机会，不是钱。已用真实注入
-   落库失败验证过：条件单正确变成`canceled`、账户`available`/`frozenMargin`回到触发前
-   的状态，没有产生孤儿仓位或永久卡住的冻结资金
+   落库失败验证过：条件单正确变成`canceled`、账户`frozenMargin`回到触发前
+   的状态，没有产生孤儿仓位或永久卡住的锁定资金
 3. 调用`EngineService.SubmitOrder`，走跟普通委托完全一样的撮合流程
 
 触发后是否立刻成交，取决于撮合引擎里有没有对手盘——如果是MARKET类型但当时没有对手盘，

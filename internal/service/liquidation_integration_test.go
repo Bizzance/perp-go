@@ -89,7 +89,8 @@ func (e *engineEnv) waitLiquidationDone(t *testing.T, uid uint64, wantFundLedger
 
 // ---- 账户权益口径 ----
 
-// 权益要把仓位占用的保证金和挂单冻结的保证金算进去：开仓只是钱换了个地方放，价格不动权益只被手续费拉低
+// 权益=balance+credit+浮动盈亏：balance是不随冻结变化的总额，已经包含了仓位占用/挂单冻结的
+// 保证金，开仓/挂单只是让frozen_margin变多，价格不动权益只被手续费拉低
 func TestEquity_CountsPositionMarginAndFrozenMargin(t *testing.T) {
 	e := newEngineEnv(t)
 	ctx := context.Background()
@@ -101,16 +102,17 @@ func TestEquity_CountsPositionMarginAndFrozenMargin(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	mustDec(t, v.Available, "0", "开仓后可用余额")
+	mustDec(t, v.Balance.Sub(v.FrozenMargin), "0", "开仓后可用余额")
 	mustDec(t, v.PositionMargin, "650", "仓位保证金")
-	mustDec(t, v.Equity, "650", "权益=0+仓位保证金650(653.25充值只被3.25手续费拉低)")
+	mustDec(t, v.Equity, "650", "权益=balance(650，653.25充值只被3.25手续费拉低)+credit(0)+浮动盈亏(0)")
 
-	// 挂一笔开仓单冻结600：钱只是从available挪到frozen，权益不变
+	// 挂一笔开仓单再锁定600：balance不变，frozen_margin变多，权益不变
+	vbBefore, _ := e.accounts.View(ctx, b)
 	e.restBid(t, b, "60000", "0.1", "600")
 	vb, _ := e.accounts.View(ctx, b)
-	mustDec(t, vb.FrozenMargin, "600", "挂单冻结")
-	// b: 10000 - 650保证金 - 1.3手续费(maker) = 9348.7，其中600冻结在挂单里，仓位保证金650
-	mustDec(t, vb.Equity, "9998.7", "权益=可用+冻结+仓位保证金=8748.7+600+650")
+	mustDec(t, vb.FrozenMargin.Sub(vbBefore.FrozenMargin), "600", "挂单新增锁定")
+	// b: 10000 - 1.3手续费(maker，开仓那笔650名义值的成交) = 9998.7，balance不受挂单/仓位锁定影响
+	mustDec(t, vb.Equity, "9998.7", "权益=balance(9998.7)+credit(0)+浮动盈亏(0)")
 }
 
 // 回归：满仓开仓、价格一动不动，不能被强平。之前权益只算available，这种账户开仓瞬间权益就是0，
@@ -184,7 +186,7 @@ func TestLiquidation_FilledAgainstBookSweepsBufferIntoFund(t *testing.T) {
 	// 平仓后可用=346.75+650保证金退回-970-2.765=23.985，全部扫进保险基金
 	mustDec(t, e.ledgerSum(t, a, model.TxRealizedPnl), "-970", "已实现盈亏")
 	acc := e.account(t, a)
-	mustDec(t, acc.Available, "0", "缓冲扫进基金后账户清零")
+	mustDec(t, acc.Balance, "0", "缓冲扫进基金后账户清零")
 	mustDec(t, acc.Credit, "0", "信用额度清零")
 	mustDec(t, e.fundBalance(t), "23.985", "保险基金余额")
 	mustDec(t, e.fundLedgerAmount(t, "全仓强平清算费(维持保证金缓冲)"), "23.985", "基金流水")
@@ -209,7 +211,7 @@ func TestLiquidation_TimeoutFallbackSettlesAtMarkPrice(t *testing.T) {
 	// (55250-65000)*0.1=-975，手续费5525*0.0005=2.7625；346.75+650-975-2.7625=18.9875
 	mustDec(t, e.ledgerSum(t, a, model.TxRealizedPnl), "-975", "已实现盈亏")
 	mustDec(t, e.fundBalance(t), "18.9875", "保险基金余额")
-	mustDec(t, e.account(t, a).Available, "0", "账户清零")
+	mustDec(t, e.account(t, a).Balance, "0", "账户清零")
 	if e.book.BookFor(testSymbol).Contains(orders[0].OrderID) {
 		t.Fatal("兜底之后强平单不应该还留在订单簿里")
 	}
@@ -233,7 +235,7 @@ func TestLiquidation_ShortfallCoveredByFundWithoutADL(t *testing.T) {
 	// 平仓盈亏(50000-65000)*0.1=-1500，手续费5000*0.0005=2.5；46.75+650-1500-2.5=-805.75，缺口805.75
 	mustDec(t, e.ledgerSum(t, a, model.TxRealizedPnl), "-1500", "已实现盈亏")
 	acc := e.account(t, a)
-	mustDec(t, acc.Available, "0", "穿仓由基金垫付后账户清零")
+	mustDec(t, acc.Balance, "0", "穿仓由基金垫付后账户清零")
 	mustDec(t, e.fundBalance(t), "99194.25", "基金余额=100000-805.75")
 	mustDec(t, e.fundLedgerAmount(t, "强平穿仓垫付"), "-805.75", "垫付流水")
 	mustDec(t, e.position(t, b, model.SideShort).Volume, "0.1", "基金够用，不应该动对手方的仓位(没有ADL)")
@@ -259,12 +261,13 @@ func TestLiquidation_ShortfallTriggersADLWhenFundInsufficient(t *testing.T) {
 	mustDec(t, e.fundLedgerAmount(t, "强平穿仓垫付"), "-805.75", "垫付金额")
 	mustDec(t, e.fundBalance(t), "0", "ADL补足缺口后基金刚好不亏")
 	mustDec(t, e.position(t, b, model.SideShort).Volume, "0.0462833333333333", "b被强制减仓后剩余的空头")
-	mustDec(t, e.account(t, a).Available, "0", "a账户清零")
+	mustDec(t, e.account(t, a).Balance, "0", "a账户清零")
 }
 
-// 多仓位账户：先平完的仓位结算后available可能暂时为负，但别的仓位的保证金还锁在仓位里，这时候
-// 不能让基金垫付(也不能触发ADL)——等保证金退回来才知道有没有真的穿仓。确定性场景：直接构造
-// "BTC仓位刚平完、available=-100，ETH仓位还开着"的状态
+// 多仓位账户：先平完的仓位结算后free balance(balance-frozen_margin)可能暂时为负，但别的
+// 仓位的保证金还锁在frozen_margin里，这时候不能让基金垫付(也不能触发ADL)——等保证金解锁
+// 才知道有没有真的穿仓。确定性场景：直接构造"BTC仓位刚平完释放了它的650锁定、free balance=-100，
+// ETH仓位(300锁定)还开着"的状态
 func TestLiquidation_ShortfallDeferredWhileAnotherPositionStillOpen(t *testing.T) {
 	e := newEngineEnv(t)
 	ctx := context.Background()
@@ -276,7 +279,9 @@ func TestLiquidation_ShortfallDeferredWhileAnotherPositionStillOpen(t *testing.T
 	if _, err := e.db.Exec(`UPDATE positions SET volume = 0, position_margin = 0, status = 'closed' WHERE uid = ? AND symbol = ?`, a, testSymbol); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.db.Exec(`UPDATE accounts SET available = -100 WHERE uid = ?`, a); err != nil {
+	// BTC平仓释放了它的650锁定，frozen_margin只剩ETH的300；balance摆成让
+	// free balance(balance-frozen_margin=200-300)等于-100
+	if _, err := e.db.Exec(`UPDATE accounts SET balance = 200, frozen_margin = 300 WHERE uid = ?`, a); err != nil {
 		t.Fatal(err)
 	}
 
@@ -284,23 +289,23 @@ func TestLiquidation_ShortfallDeferredWhileAnotherPositionStillOpen(t *testing.T
 		t.Fatal(err)
 	}
 
-	mustDec(t, e.account(t, a).Available, "-100", "还有仓位没平完时不能结清账户")
+	mustDec(t, e.freeBalance(t, a), "-100", "还有仓位没平完时不能结清账户")
 	mustDec(t, e.fundBalance(t), "1000", "基金不能提前垫付")
 	if n := e.fundLedgerCount(t); n != 0 {
 		t.Fatalf("不应该有基金流水, got %d", n)
 	}
 
-	// 最后一个仓位也平完(模拟：ETH仓位归零，保证金300退回账户)，这时才结算：合计为正200是缓冲，扫进基金
+	// 最后一个仓位也平完(模拟：ETH仓位归零，它的300锁定也释放)，这时才结算：合计为正200是缓冲，扫进基金
 	if _, err := e.db.Exec(`UPDATE positions SET volume = 0, position_margin = 0, status = 'closed' WHERE uid = ? AND symbol = 'ETHUSDT'`, a); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.db.Exec(`UPDATE accounts SET available = 200 WHERE uid = ?`, a); err != nil {
+	if _, err := e.db.Exec(`UPDATE accounts SET balance = 200, frozen_margin = 0 WHERE uid = ?`, a); err != nil {
 		t.Fatal(err)
 	}
 	if err := e.engine.HandleLiquidationSettleAftermath(ctx, "ETHUSDT", a, model.SideLong); err != nil {
 		t.Fatal(err)
 	}
-	mustDec(t, e.account(t, a).Available, "0", "全部仓位平完之后才结清")
+	mustDec(t, e.account(t, a).Balance, "0", "全部仓位平完之后才结清")
 	mustDec(t, e.fundBalance(t), "1200", "缓冲扫进基金")
 }
 
@@ -309,7 +314,7 @@ func TestLiquidation_ShortfallDeferredWhileAnotherPositionStillOpen(t *testing.T
 // 后回收"的多余记录，见docs/known-limitations.md；但每一笔垫付/回收都恰好等于当时被清零的金额，
 // 总额始终守恒：不管谁先谁后，最终基金只应该净垫付整个账户真正的缺口，账户清零
 // a充值1000：BTC多头0.1@65000(保证金650)、ETH多头1@3000(保证金300)，开仓手续费3.25+1.5，
-// available=45.25。BTC标记价跌到50000亏1500，平仓手续费2.5，ETH标记价不动平仓手续费1.5：
+// free balance=45.25。BTC标记价跌到50000亏1500，平仓手续费2.5，ETH标记价不动平仓手续费1.5：
 // 总缺口=-(45.25+950-1500-2.5-1.5)=508.75
 func TestLiquidation_TwoPositionsConcurrentlyEndInConsistentState(t *testing.T) {
 	e := newEngineEnv(t)
@@ -329,7 +334,7 @@ func TestLiquidation_TwoPositionsConcurrentlyEndInConsistentState(t *testing.T) 
 
 	mustDec(t, e.fundBalance(t), "99491.25", "基金净垫付=100000-508.75，不管中间怎么进出")
 	acc := e.account(t, a)
-	mustDec(t, acc.Available, "0", "账户清零")
+	mustDec(t, acc.Balance, "0", "账户清零")
 	mustDec(t, acc.Credit, "0", "信用额度")
 	mustDec(t, acc.FrozenMargin, "0", "冻结保证金")
 }
@@ -340,7 +345,7 @@ func TestLiquidation_ConcurrentAftermathSettlesShortfallOnce(t *testing.T) {
 	e := newEngineEnv(t)
 	a := e.newAccount(t, 1, "0")
 	e.setFundBalance(t, "1000")
-	if _, err := e.db.Exec(`UPDATE accounts SET available = -100 WHERE uid = ?`, a); err != nil {
+	if _, err := e.db.Exec(`UPDATE accounts SET balance = -100 WHERE uid = ?`, a); err != nil {
 		t.Fatal(err)
 	}
 
@@ -360,7 +365,7 @@ func TestLiquidation_ConcurrentAftermathSettlesShortfallOnce(t *testing.T) {
 		}
 	}
 
-	mustDec(t, e.account(t, a).Available, "0", "缺口结清后账户是0，不是被多加了钱")
+	mustDec(t, e.account(t, a).Balance, "0", "缺口结清后账户是0，不是被多加了钱")
 	mustDec(t, e.fundBalance(t), "900", "基金只垫付一次")
 	if n := e.fundLedgerCount(t); n != 1 {
 		t.Fatalf("基金流水应该只有1行, got %d", n)
@@ -369,12 +374,13 @@ func TestLiquidation_ConcurrentAftermathSettlesShortfallOnce(t *testing.T) {
 
 // ---- 强平时撤挂单(币安/OKX全仓强平的做法) ----
 
-// 强平触发时先撤掉这个uid的全部挂单和条件单(含条件平仓单)，冻结的保证金退回账户，再处理仓位；
-// 别的账户的挂单不受影响。之前不撤的话，结算只看available+credit，挂单冻结的保证金被漏算：
-// 这里available会被亏到-705.75、基金垫付705.75，之后撤单退回700，账户白拿700
-// a充值1500：多头0.1@65000(保证金650、开仓手续费3.25)，挂开仓限价单冻结600，条件开仓单冻结100，
-// 另有一笔条件平仓单。标记价跌到50000：权益=146.75+700冻结+650仓位保证金-1500亏损=-3.25，触发强平。
-// 撤单后可用=846.75，平仓亏1500、手续费2.5、保证金650退回，可用=-5.75，这就是真实缺口
+// 强平触发时先撤掉这个uid的全部挂单和条件单(含条件平仓单)，锁定的保证金解锁，再处理仓位；
+// 别的账户的挂单不受影响。之前不撤的话，结算只看free balance+free credit，挂单锁定的保证金
+// 被漏算：这里free balance会被亏到-705.75、基金垫付705.75，之后撤单解锁700，账户白拿700
+// a充值1500：多头0.1@65000(保证金650、开仓手续费3.25)，挂开仓限价单再锁定600，条件开仓单再锁定100，
+// 另有一笔条件平仓单。标记价跌到50000：权益=balance(1496.75)+credit(0)+持仓浮亏(-1500)=-3.25，
+// 触发强平——balance是不随锁定变化的总额，不需要再单独加挂单/仓位占用的部分
+// 撤单后free=846.75，平仓亏1500、手续费2.5、650锁定解锁，free=-5.75，这就是真实缺口
 func TestLiquidation_TriggerCancelsAllPendingOrdersAndSettlesRealShortfall(t *testing.T) {
 	e := newEngineEnv(t)
 	ctx := context.Background()
@@ -387,7 +393,7 @@ func TestLiquidation_TriggerCancelsAllPendingOrdersAndSettlesRealShortfall(t *te
 	if err := e.engine.SubmitOrder(ctx, rest, 3); err != nil {
 		t.Fatal(err)
 	}
-	if ok, err := e.accountRepo.FreezeFromAvailable(ctx, e.account(t, a).ID, decimalOf(t, "100")); err != nil || !ok {
+	if ok, err := e.accountRepo.FreezeFromBalance(ctx, e.account(t, a).ID, decimalOf(t, "100")); err != nil || !ok {
 		t.Fatalf("冻结条件单保证金: ok=%v err=%v", ok, err)
 	}
 	condOpen := newConditionalOpen(e, a, "90000", "0.05", "100")
@@ -403,7 +409,8 @@ func TestLiquidation_TriggerCancelsAllPendingOrdersAndSettlesRealShortfall(t *te
 	if err := e.engine.SubmitOrder(ctx, otherOrder, 4); err != nil {
 		t.Fatal(err)
 	}
-	mustDec(t, e.account(t, a).FrozenMargin, "700", "强平前挂单+条件单冻结")
+	// frozen_margin现在是挂单+仓位占用的合计：650(仓位)+600(挂单)+100(条件单)=1350
+	mustDec(t, e.account(t, a).FrozenMargin, "1350", "强平前挂单+条件单+仓位的锁定合计")
 	e.setFundBalance(t, "100000")
 	e.setMark(t, testSymbol, "50000")
 
@@ -430,14 +437,14 @@ func TestLiquidation_TriggerCancelsAllPendingOrdersAndSettlesRealShortfall(t *te
 
 	acc := e.account(t, a)
 	mustDec(t, acc.FrozenMargin, "0", "冻结保证金全部退回")
-	mustDec(t, acc.Available, "0", "缺口由基金垫付后账户清零")
+	mustDec(t, acc.Balance, "0", "缺口由基金垫付后账户清零")
 	mustDec(t, e.fundLedgerAmount(t, "强平穿仓垫付"), "-5.75", "垫付的是真实缺口，不是被漏算了挂单保证金的705.75")
 	mustDec(t, e.fundBalance(t), "99994.25", "基金余额")
 }
 
-// 兜底：强平窗口期里用户新挂的单，在结算前也要撤掉。这里直接构造"没有仓位、available=-100、
-// 还有一笔挂单冻结600"的状态：真实权益是500，撤单后合计为正，按缓冲扫进基金、账户清零，
-// 用户拿不到那600。不撤的话基金会垫付100、之后撤单退回600，用户白拿
+// 兜底：强平窗口期里用户新挂的单，在结算前也要撤掉。这里直接构造"没有仓位、free balance=-100、
+// 还有一笔挂单锁定600(真实的，来自实际下单)"的状态：真实权益是500，撤单后合计为正，按缓冲扫进
+// 基金、账户清零，用户拿不到那600。不撤的话基金会垫付100、之后撤单解锁600，用户白拿
 func TestLiquidation_AftermathCancelsOrdersPlacedDuringLiquidation(t *testing.T) {
 	e := newEngineEnv(t)
 	ctx := context.Background()
@@ -447,7 +454,8 @@ func TestLiquidation_AftermathCancelsOrdersPlacedDuringLiquidation(t *testing.T)
 		t.Fatal(err)
 	}
 	e.setFundBalance(t, "1000")
-	if _, err := e.db.Exec(`UPDATE accounts SET available = -100 WHERE uid = ?`, a); err != nil {
+	// 这笔600是insertOrder真实锁进frozen_margin的，balance摆成让free balance(balance-600)等于-100
+	if _, err := e.db.Exec(`UPDATE accounts SET balance = 500 WHERE uid = ?`, a); err != nil {
 		t.Fatal(err)
 	}
 
@@ -460,7 +468,7 @@ func TestLiquidation_AftermathCancelsOrdersPlacedDuringLiquidation(t *testing.T)
 	}
 	acc := e.account(t, a)
 	mustDec(t, acc.FrozenMargin, "0", "冻结保证金退回")
-	mustDec(t, acc.Available, "0", "合计500是缓冲，扫进基金后账户清零")
+	mustDec(t, acc.Balance, "0", "合计500是缓冲，扫进基金后账户清零")
 	mustDec(t, e.fundBalance(t), "1500", "基金收到500，没有垫付")
 	mustDec(t, e.fundLedgerAmount(t, "强平穿仓垫付"), "0", "没有穿仓，不应该垫付")
 }

@@ -125,7 +125,7 @@ func (e *apiEnv) newAccount(t *testing.T, offset uint64, available string) uint6
 	if _, _, err := e.accountRepo.CreateIfAbsent(context.Background(), uid); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := e.db.Exec(`UPDATE accounts SET available = ? WHERE uid = ?`, available, uid); err != nil {
+	if _, err := e.db.Exec(`UPDATE accounts SET balance = ? WHERE uid = ?`, available, uid); err != nil {
 		t.Fatal(err)
 	}
 	return uid
@@ -184,7 +184,7 @@ func (e *apiEnv) seedOrder(t *testing.T, uid uint64, o orderSeed) uint64 {
 	frozen := decimal.Zero
 	if o.margin != "" {
 		frozen = decimal.RequireFromString(o.margin)
-		if ok, err := e.accountRepo.FreezeFromAvailable(ctx, e.account(t, uid).ID, frozen); err != nil || !ok {
+		if ok, err := e.accountRepo.FreezeFromBalance(ctx, e.account(t, uid).ID, frozen); err != nil || !ok {
 			t.Fatalf("冻结保证金: ok=%v err=%v", ok, err)
 		}
 	}
@@ -207,7 +207,7 @@ func (e *apiEnv) seedConditional(t *testing.T, uid uint64, action model.OrderAct
 	frozen := decimal.Zero
 	if margin != "" {
 		frozen = decimal.RequireFromString(margin)
-		if ok, err := e.accountRepo.FreezeFromAvailable(ctx, e.account(t, uid).ID, frozen); err != nil || !ok {
+		if ok, err := e.accountRepo.FreezeFromBalance(ctx, e.account(t, uid).ID, frozen); err != nil || !ok {
 			t.Fatalf("冻结保证金: ok=%v err=%v", ok, err)
 		}
 	}

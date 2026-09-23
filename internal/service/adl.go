@@ -73,11 +73,10 @@ func (e *EngineService) runADL(ctx context.Context, symbol string, targetSide mo
 		}
 		contribution := decimal.Min(result.RealizedPnl, remaining)
 		if contribution.Sign() > 0 {
-			// 从这笔刚结算到available的盈利里划出贡献部分给保险基金——不能划credit(这个
-			// account.SettleToAvailable只动available，跟ApplyCloseFill/SettlePnl释放/
-			// 结算已实现盈亏时的落点一致，ADL捐出去的必须是刚实现的那部分盈利本身，不能
-			// 牵连到这个账户完全无关的credit额度)
-			if err := e.accounts.SettleToAvailable(ctx, cand.p.UID, contribution.Neg()); err != nil {
+			// 从这笔刚结算到balance的盈利里划出贡献部分给保险基金——不能划credit(这个
+			// account.SettleToBalance只动balance，跟SettlePnl结算已实现盈亏时的落点一致，
+			// ADL捐出去的必须是刚实现的那部分盈利本身，不能牵连到这个账户完全无关的credit额度)
+			if err := e.accounts.SettleToBalance(ctx, cand.p.UID, contribution.Neg()); err != nil {
 				log.Printf("[ERROR] ADL划转盈利失败, uid=%d: %v", cand.p.UID, err)
 			} else if err := e.fund.Adjust(ctx, symbol, cand.p.UID, cand.p.ID, contribution, "ADL强制减仓注入保险基金"); err != nil {
 				log.Printf("[ERROR] ADL盈利入基金失败, uid=%d: %v", cand.p.UID, err)

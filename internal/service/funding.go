@@ -209,7 +209,7 @@ func (s *FundingService) settlePositions(ctx context.Context, symbol string, rat
 		if fundingFee.IsZero() {
 			continue
 		}
-		if err := s.accounts.SettleToAvailable(ctx, p.UID, fundingFee.Neg()); err != nil {
+		if err := s.accounts.SettleToBalance(ctx, p.UID, fundingFee.Neg()); err != nil {
 			log.Printf("[ERROR] funding settle: uid=%d symbol=%s: %v", p.UID, symbol, err)
 			continue
 		}

@@ -116,14 +116,14 @@ func TestConsumer_CancelEventCancelsAndRefunds(t *testing.T) {
 	}
 	acc := e.account(t, uid)
 	mustDec(t, acc.FrozenMargin, "0", "冻结保证金退回")
-	mustDec(t, acc.Available, "10000", "可用余额恢复")
+	mustDec(t, acc.Balance, "10000", "可用余额恢复")
 
 	// 同一个撤单事件再来一次(不同的消息偏移，绕过消息级去重)：不能再退一遍
 	again := msgOf(t, events.TopicOrderCancel, 2, events.OrderCancelEvent{OrderID: o.OrderID, UID: uid, Symbol: testSymbol})
 	if err := e.engine.HandleOrderCancel(ctx, again); err != nil {
 		t.Fatal(err)
 	}
-	mustDec(t, e.account(t, uid).Available, "10000", "重复撤单不能多退")
+	mustDec(t, e.account(t, uid).Balance, "10000", "重复撤单不能多退")
 }
 
 func TestConsumer_CancelEventEdgeCases(t *testing.T) {

@@ -515,11 +515,11 @@ func (e *EngineService) HandleLiquidationSettleAftermath(ctx context.Context, sy
 func (e *EngineService) settleLiquidationAftermath(ctx context.Context, symbol string, uid uint64, side model.Side) error {
 	// 先确认没有剩余仓位，再读余额：反过来的话，读到余额之后别的仓位才平完、保证金才退回来，
 	// 拿到的就是过期的余额。两种结局都要等这个uid已经没有剩余仓位了(这一轮强平彻底结束)才判断：
-	// 全仓强平是这个uid名下全部仓位各自异步平仓，先平完的那个仓位结算之后，available可能因为它的
-	// 亏损暂时为负，但别的仓位占用的保证金还锁在仓位里、平仓时会退回来——这时候就让基金垫付，
-	// 后面的仓位平完保证金回到账上，垫付就成了多余的一进一出，还可能不必要地触发ADL去强减无辜的
-	// 对手方。available为负本来就是全仓下的合法状态，留着不动，由最后一个平完的仓位来结清；
-	// 如果剩下的仓位没有被强平掉，账户权益低于维持保证金的话下一轮风控扫描会继续强平它们
+	// 全仓强平是这个uid名下全部仓位各自异步平仓，先平完的那个仓位结算之后，free balance可能
+	// 因为它的亏损暂时为负，但别的仓位占用的保证金还锁在frozen_margin里、平仓时会解锁——这时候
+	// 就让基金垫付，后面的仓位平完保证金解锁，垫付就成了多余的一进一出，还可能不必要地触发ADL去
+	// 强减无辜的对手方。free balance为负本来就是全仓下的合法状态，留着不动，由最后一个平完的
+	// 仓位来结清；如果剩下的仓位没有被强平掉，账户权益低于维持保证金的话下一轮风控扫描会继续强平它们
 	positions, err := e.positionSvc.FindByUID(ctx, uid)
 	if err != nil {
 		return err
@@ -529,20 +529,19 @@ func (e *EngineService) settleLiquidationAftermath(ctx context.Context, symbol s
 			return nil
 		}
 	}
-	// 兜底：强平触发时已经撤过一遍挂单，但强平窗口期里用户可能又挂了新单。这些单冻结的保证金
-	// 不在下面的available+credit里，不撤的话结算时被漏算：available为负时基金照常垫付，之后撤单把
-	// 冻结的保证金退回账户，用户拿到的比真实权益多。撤单失败已经记了ERROR日志，这里不中断结算——
-	// 中断的话账户会停在"没有仓位、available为负"的状态，没有任何后续动作会再来结清它
+	// 兜底：强平触发时已经撤过一遍挂单，但强平窗口期里用户可能又挂了新单。这些单锁定的保证金
+	// 不在下面的free balance+free credit里，不撤的话结算时被漏算：free balance为负时基金照常
+	// 垫付，之后撤单把锁定的保证金解锁，用户拿到的比真实权益多。撤单失败已经记了ERROR日志，这里
+	// 不中断结算——中断的话账户会停在"没有仓位、free balance为负"的状态，没有任何后续动作会
+	// 再来结清它
 	e.CancelAllPendingOrders(ctx, uid)
-	available, err := e.accounts.FindFreshAvailable(ctx, uid)
+	// 走到这里所有仓位/挂单都已经清空，frozen_margin/frozen_credit理论上应该是0，free
+	// balance/free credit等于balance/credit本身；仍然按free值算，防御万一还有残留的锁定
+	freeBalance, freeCredit, err := e.accounts.FindFreshFreeMargin(ctx, uid)
 	if err != nil {
 		return err
 	}
-	credit, err := e.accounts.FindFreshCredit(ctx, uid)
-	if err != nil {
-		return err
-	}
-	combined := available.Add(credit)
+	combined := freeBalance.Add(freeCredit)
 	if combined.Sign() == 0 {
 		return nil
 	}
@@ -560,20 +559,20 @@ func (e *EngineService) settleLiquidationAftermath(ctx context.Context, symbol s
 		if err := e.fund.Adjust(ctx, symbol, uid, 0, shortfall.Neg(), "强平穿仓垫付"); err != nil {
 			return err
 		}
-		if err := e.accounts.SettleToAvailable(ctx, uid, available.Neg()); err != nil {
+		if err := e.accounts.SettleToBalance(ctx, uid, freeBalance.Neg()); err != nil {
 			return err
 		}
-		return e.accounts.SettleToCredit(ctx, uid, credit.Neg())
+		return e.accounts.SettleToCredit(ctx, uid, freeCredit.Neg())
 	}
-	log.Printf("[WARN] 强平后账户仍有维持保证金缓冲，按清算费扫入保险基金, uid=%d, 缓冲=%s(available=%s, credit=%s)",
-		uid, combined, available, credit)
+	log.Printf("[WARN] 强平后账户仍有维持保证金缓冲，按清算费扫入保险基金, uid=%d, 缓冲=%s(balance=%s, credit=%s)",
+		uid, combined, freeBalance, freeCredit)
 	if err := e.fund.Adjust(ctx, symbol, uid, 0, combined, "全仓强平清算费(维持保证金缓冲)"); err != nil {
 		return err
 	}
-	if err := e.accounts.SettleToAvailable(ctx, uid, available.Neg()); err != nil {
+	if err := e.accounts.SettleToBalance(ctx, uid, freeBalance.Neg()); err != nil {
 		return err
 	}
-	return e.accounts.SettleToCredit(ctx, uid, credit.Neg())
+	return e.accounts.SettleToCredit(ctx, uid, freeCredit.Neg())
 }
 
 // 撤掉这个uid全部还没成交的用户委托和还没触发的条件单，返回撤单失败的笔数(失败的已经记了ERROR日志)。

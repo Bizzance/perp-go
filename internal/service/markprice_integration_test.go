@@ -410,7 +410,7 @@ func TestConditionalOrder_NotTriggeredWhileIndexIsStale(t *testing.T) {
 	ctx := context.Background()
 	uid := e.newAccount(t, 1, "10000")
 	acc := e.account(t, uid)
-	if ok, err := e.accountRepo.FreezeFromAvailable(ctx, acc.ID, decimalOf(t, "330")); err != nil || !ok {
+	if ok, err := e.accountRepo.FreezeFromBalance(ctx, acc.ID, decimalOf(t, "330")); err != nil || !ok {
 		t.Fatalf("冻结保证金: ok=%v err=%v", ok, err)
 	}
 	co := newConditionalOpen(e, uid, "66000", "0.05", "330")

@@ -29,7 +29,7 @@ func TestEngineFreeze_FrozenAccountOpenOrderIsCanceledAndRefunded(t *testing.T) 
 	}
 	acc := e.account(t, uid)
 	mustDec(t, acc.FrozenMargin, "0", "冻结保证金应该退回")
-	mustDec(t, acc.Available, "10000", "可用余额应该恢复")
+	mustDec(t, acc.Balance, "10000", "可用余额应该恢复")
 	if e.book.BookFor(testSymbol).Contains(o.OrderID) {
 		t.Fatal("被撤销的委托不应该在订单簿里")
 	}
@@ -38,7 +38,7 @@ func TestEngineFreeze_FrozenAccountOpenOrderIsCanceledAndRefunded(t *testing.T) 
 	if err := e.engine.SubmitOrder(ctx, o, 1); err != nil {
 		t.Fatalf("重复投递: %v", err)
 	}
-	mustDec(t, e.account(t, uid).Available, "10000", "重复投递后可用余额不能变多")
+	mustDec(t, e.account(t, uid).Balance, "10000", "重复投递后可用余额不能变多")
 }
 
 // 对照组：没冻结的账户同样的开仓委托正常挂进订单簿，保证金继续冻结着
@@ -209,7 +209,7 @@ func TestEngineFreeze_ConditionalOpenTriggeredOnFrozenAccount(t *testing.T) {
 	ctx := context.Background()
 	uid := e.newAccount(t, 1, "10000")
 	acc := e.account(t, uid)
-	if ok, err := e.accountRepo.FreezeFromAvailable(ctx, acc.ID, decimalOf(t, "330")); err != nil || !ok {
+	if ok, err := e.accountRepo.FreezeFromBalance(ctx, acc.ID, decimalOf(t, "330")); err != nil || !ok {
 		t.Fatalf("冻结保证金: ok=%v err=%v", ok, err)
 	}
 	co := newConditionalOpen(e, uid, "66000", "0.05", "330")
@@ -228,7 +228,7 @@ func TestEngineFreeze_ConditionalOpenTriggeredOnFrozenAccount(t *testing.T) {
 	}
 	a := e.account(t, uid)
 	mustDec(t, a.FrozenMargin, "0", "保证金应该退回")
-	mustDec(t, a.Available, "10000", "可用余额应该恢复")
+	mustDec(t, a.Balance, "10000", "可用余额应该恢复")
 	if e.book.BookFor(testSymbol).Contains(co.OrderID) {
 		t.Fatal("不应该进订单簿")
 	}

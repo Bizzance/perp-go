@@ -428,10 +428,13 @@ func (m *maker) ensureReady(ctx context.Context) bool {
 			return false
 		}
 		var info struct {
-			Available string `json:"available"`
+			Balance      string `json:"balance"`
+			FrozenMargin string `json:"frozenMargin"`
 		}
 		_ = json.Unmarshal(raw, &info)
-		avail, _ := decimal.NewFromString(info.Available)
+		balance, _ := decimal.NewFromString(info.Balance)
+		frozenMargin, _ := decimal.NewFromString(info.FrozenMargin)
+		avail := balance.Sub(frozenMargin)
 		bal, _ := decimal.NewFromString(m.cfg.balance)
 		if avail.LessThan(bal.Div(decimal.NewFromInt(2))) {
 			if _, err := m.api.call(ctx, "POST", "/account/balance", map[string]any{

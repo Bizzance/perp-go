@@ -107,10 +107,9 @@ func (s *LiquidationService) checkAndLiquidate(ctx context.Context, uid uint64) 
 	if err != nil {
 		return err
 	}
-	// 账户权益见Equity：把credit算进去，信用额度才能真正起到"扛住浮亏、推迟强平"的作用；把仓位
-	// 占用的保证金和挂单冻结的保证金也算进去——那是用户的钱、是扛浮亏的垫子，只算available的话
-	// 一开仓权益就少了整笔保证金，满仓的账户开仓后价格一动不动也会被强平
-	equity := Equity(account, sumPositionMargin(positions), totalUnrealized)
+	// 账户权益见Equity：balance/credit是不随冻结变化的总额，已经包含了挂单冻结/仓位占用的
+	// 保证金，不需要再单独加一遍——加了反而是重复计算
+	equity := Equity(account, totalUnrealized)
 	if equity.GreaterThan(maintainTotal) {
 		return nil
 	}
@@ -129,7 +128,7 @@ func (s *LiquidationService) checkAndLiquidate(ctx context.Context, uid uint64) 
 	}
 	log.Printf("[WARN] 触发全仓联合强平, uid=%d, 账户权益=%s, 维持保证金要求=%s, 仓位数=%d", uid, equity, maintainTotal, len(pending))
 	// 先撤掉这个uid的全部挂单和条件单，再处理仓位(币安、OKX的全仓强平都是这个顺序)。不需要撤单之后
-	// 重新评估要不要强平：权益已经把挂单冻结的保证金算进去了，撤单只是钱从冻结挪回available，权益不变
+	// 重新评估要不要强平：权益已经把挂单冻结的保证金算进去了，撤单只是解锁，权益不变
 	if failed := s.engine.CancelAllPendingOrders(ctx, uid); failed > 0 {
 		log.Printf("[ERROR] 强平前撤挂单有%d笔失败, uid=%d, 继续强平", failed, uid)
 	}

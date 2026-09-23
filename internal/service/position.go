@@ -148,8 +148,9 @@ func (s *PositionService) TotalUnrealizedPnl(ctx context.Context, uid uint64) (d
 	return total, nil
 }
 
-// 全部持仓占用的保证金之和(含来自信用额度的部分)，账户权益要把它算进去：开仓成交时这笔钱已经从
-// available里扣走、转成了仓位保证金，但它仍然是用户的钱，是扛浮亏的垫子，不是已经亏掉的
+// 全部持仓占用的保证金之和(含来自信用额度的部分)，查询接口用于展示——这笔钱一直锁在
+// accounts.frozen_margin/frozen_credit里(见settlement.go)，账户权益(Equity)不需要
+// 再单独加一遍，这里只是按仓位维度把同一份锁定重新汇总一次
 func sumPositionMargin(positions []model.Position) decimal.Decimal {
 	total := decimal.Zero
 	for _, p := range positions {

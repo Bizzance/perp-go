@@ -18,7 +18,7 @@ func NewAccountRepo(db *sqlx.DB) *AccountRepo { return &AccountRepo{db: db} }
 func (r *AccountRepo) FindByUID(ctx context.Context, uid uint64) (*model.Account, error) {
 	var a model.Account
 	err := r.db.GetContext(ctx, &a,
-		`SELECT id, uid, is_insured, round, credit, available, frozen_margin, frozen_credit, version,
+		`SELECT id, uid, is_insured, round, credit, balance, frozen_margin, frozen_credit, version,
 		        status, status_reason, status_time
 		 FROM accounts WHERE uid = ?`, uid)
 	if errors.Is(err, sql.ErrNoRows) {
@@ -35,7 +35,7 @@ func (r *AccountRepo) GetOrCreate(ctx context.Context, uid uint64) (*model.Accou
 	} else if a != nil {
 		return a, nil
 	}
-	_, err := r.db.ExecContext(ctx, `INSERT IGNORE INTO accounts (uid, available, frozen_margin) VALUES (?, 0, 0)`, uid)
+	_, err := r.db.ExecContext(ctx, `INSERT IGNORE INTO accounts (uid, balance, frozen_margin) VALUES (?, 0, 0)`, uid)
 	if err != nil {
 		return nil, err
 	}
@@ -46,7 +46,7 @@ func (r *AccountRepo) GetOrCreate(ctx context.Context, uid uint64) (*model.Accou
 // INSERT IGNORE撞了uid唯一约束时受影响行数是0，并发下多个请求同时创建同一个uid，只有一个
 // 会得到created=true
 func (r *AccountRepo) CreateIfAbsent(ctx context.Context, uid uint64) (acc *model.Account, created bool, err error) {
-	res, err := r.db.ExecContext(ctx, `INSERT IGNORE INTO accounts (uid, available, frozen_margin) VALUES (?, 0, 0)`, uid)
+	res, err := r.db.ExecContext(ctx, `INSERT IGNORE INTO accounts (uid, balance, frozen_margin) VALUES (?, 0, 0)`, uid)
 	if err != nil {
 		return nil, false, err
 	}
@@ -58,44 +58,50 @@ func (r *AccountRepo) CreateIfAbsent(ctx context.Context, uid uint64) (acc *mode
 	return acc, n > 0, err
 }
 
-func (r *AccountRepo) FindFreshAvailable(ctx context.Context, id uint64) (decimal.Decimal, error) {
-	var v decimal.Decimal
-	err := r.db.GetContext(ctx, &v, `SELECT available FROM accounts WHERE id = ?`, id)
-	return v, err
+// 最新的"自由"额度——balance/credit这两列是不随冻结变化的总额，真正能拿去开新仓/被扣减的
+// 是减掉frozen_margin/frozen_credit之后的部分，这条查询绕开一级缓存的account实体，跟
+// FreezeMargin四级路径判断"要不要往下一级尝试"的场景配套用(见该方法注释)
+func (r *AccountRepo) FindFreshFreeMargin(ctx context.Context, id uint64) (freeBalance, freeCredit decimal.Decimal, err error) {
+	var balance, credit, frozenMargin, frozenCredit decimal.Decimal
+	if err := r.db.QueryRowContext(ctx, `SELECT balance, credit, frozen_margin, frozen_credit FROM accounts WHERE id = ?`, id).
+		Scan(&balance, &credit, &frozenMargin, &frozenCredit); err != nil {
+		return decimal.Zero, decimal.Zero, err
+	}
+	return balance.Sub(frozenMargin), credit.Sub(frozenCredit), nil
 }
 
-func (r *AccountRepo) FindFreshCredit(ctx context.Context, id uint64) (decimal.Decimal, error) {
-	var v decimal.Decimal
-	err := r.db.GetContext(ctx, &v, `SELECT credit FROM accounts WHERE id = ?`, id)
-	return v, err
+// 强制冻结前拍的完整快照，FreezeForceIntoNegative要核对这4列都没被并发改过
+func (r *AccountRepo) FindFreshMarginSnapshot(ctx context.Context, id uint64) (balance, credit, frozenMargin, frozenCredit decimal.Decimal, err error) {
+	err = r.db.QueryRowContext(ctx, `SELECT balance, credit, frozen_margin, frozen_credit FROM accounts WHERE id = ?`, id).
+		Scan(&balance, &credit, &frozenMargin, &frozenCredit)
+	return
 }
 
-// 快路径：available单独够用，整笔从available划到frozenMargin，不动credit
-func (r *AccountRepo) FreezeFromAvailable(ctx context.Context, id uint64, amount decimal.Decimal) (bool, error) {
+// 快路径：free balance(balance-frozen_margin)单独够用，只加frozen_margin，
+// 不动balance——balance是不随冻结变化的总额，见model.Account.Balance
+func (r *AccountRepo) FreezeFromBalance(ctx context.Context, id uint64, amount decimal.Decimal) (bool, error) {
 	res, err := r.db.ExecContext(ctx,
-		`UPDATE accounts SET available = available - ?, frozen_margin = frozen_margin + ? WHERE id = ? AND available >= ?`,
-		amount, amount, id, amount)
+		`UPDATE accounts SET frozen_margin = frozen_margin + ? WHERE id = ? AND balance - frozen_margin >= ?`,
+		amount, id, amount)
 	return affected(res, err)
 }
 
-// available单独不够、但available+credit够时的中间路径：available里
-// "属于自己的正数部分"全部冻结完，缺口从credit冻结(frozen_credit记账)。用GREATEST(available,0)
-// 而不是裸的available，是因为这个方法可能在available已经因为FreezeForceIntoNegative变负
-// 之后被调用——这种情况下available没有"正数部分"可以贡献，全部缺口应该整笔从credit冻结，
-// 不能让负的available把frozen_margin/frozen_credit的计算搅乱。用一条UPDATE原子完成，SET里
-// 引用的available/credit都是这一行更新前的值(available的赋值放在最后一条子句，前面几条
-// 子句引用的都还是原始值，MySQL对同一条UPDATE语句的SET子句是从左到右求值、后面的子句会
-// 看到前面已经写入的新值——这一点在deductWithCreditFallback上踩过坑，这里的写法没有这个
-// 问题是因为available的重新赋值特意放在最后)。
+// free balance单独不够、但free balance+free credit够时的中间路径：free balance里
+// "属于自己的正数部分"全部冻结完，缺口从credit冻结(frozen_credit记账)。用GREATEST(free,0)
+// 而不是裸的free balance，是因为这个方法可能在free balance已经因为FreezeForceIntoNegative
+// 变负之后被调用——这种情况下free balance没有"正数部分"可以贡献，全部缺口应该整笔从credit冻结，
+// 不能让负的free balance把frozen_margin/frozen_credit的计算搅乱。balance/credit本身在这条语句里
+// 完全不写(它们是总额，冻结不动它们)，只需要原子地把free balance/free credit这两个"读的时候
+// 用来判断"的值和"真正写入frozen_margin/frozen_credit的值"锁在同一条UPDATE里，用MySQL的用户
+// 变量把中间计算结果记下来，同一个连接上紧接着SELECT出来——必须用同一个*sql.Conn(而不是
+// db.ExecContext/QueryContext各自可能从连接池拿到不同的物理连接)，用户变量是连接级别的会话
+// 状态，换一条连接就读不到/读到别的调用留下的脏值
 //
 // 返回值里的(fromAvailable, fromCredit)必须是这条UPDATE语句真正应用的那个拆分，不能在
-// 调用方另外读一次available/credit、事后拿这份读到的快照去反推——两次读写之间账户可能被
-// 别的请求并发改过，反推出来的拆分会跟这条UPDATE实际写入的frozen_margin/frozen_credit不一致，
-// 导致这笔委托记录的来源比例和账户里真实冻结的来源比例对不上，后续撤单/成交按这个错误比例
-// 释放，会让frozen_margin/frozen_credit这两个跨订单共享的资金池分账逐渐失衡。做法是用
-// MySQL的用户变量在UPDATE语句内部把中间计算结果记下来，同一个连接上紧接着SELECT出来——
-// 必须用同一个*sql.Conn(而不是db.ExecContext/QueryContext各自可能从连接池拿到不同的物理
-// 连接)，用户变量是连接级别的会话状态，换一条连接就读不到/读到别的调用留下的脏值
+// 调用方另外读一次快照、事后拿这份读到的快照去反推——两次读写之间账户可能被别的请求并发
+// 改过，反推出来的拆分会跟这条UPDATE实际写入的frozen_margin/frozen_credit不一致，导致这笔
+// 委托记录的来源比例和账户里真实冻结的来源比例对不上，后续撤单/成交按这个错误比例释放，
+// 会让frozen_margin/frozen_credit这两个跨订单共享的资金池分账逐渐失衡
 func (r *AccountRepo) FreezeSpillToCredit(ctx context.Context, id uint64, amount decimal.Decimal) (fromAvailable, fromCredit decimal.Decimal, ok bool, err error) {
 	conn, err := r.db.Conn(ctx)
 	if err != nil {
@@ -105,11 +111,9 @@ func (r *AccountRepo) FreezeSpillToCredit(ctx context.Context, id uint64, amount
 
 	res, err := conn.ExecContext(ctx,
 		`UPDATE accounts SET
-			frozen_margin = frozen_margin + (@perpgo_avail_part := GREATEST(available, 0)),
-			frozen_credit = frozen_credit + (@perpgo_credit_part := (? - GREATEST(available, 0))),
-			credit = credit - @perpgo_credit_part,
-			available = available - @perpgo_avail_part
-		 WHERE id = ? AND available < ? AND GREATEST(available, 0) + credit >= ?`,
+			frozen_margin = frozen_margin + (@perpgo_avail_part := GREATEST(balance - frozen_margin, 0)),
+			frozen_credit = frozen_credit + (@perpgo_credit_part := (? - GREATEST(balance - frozen_margin, 0)))
+		 WHERE id = ? AND (balance - frozen_margin) < ? AND GREATEST(balance - frozen_margin, 0) + (credit - frozen_credit) >= ?`,
 		amount, id, amount, amount)
 	if err != nil {
 		return decimal.Zero, decimal.Zero, false, err
@@ -128,49 +132,38 @@ func (r *AccountRepo) FreezeSpillToCredit(ctx context.Context, id uint64, amount
 	return fromAvailable, fromCredit, true, nil
 }
 
-// available+credit都不够、但账户权益(含持仓浮盈)够覆盖时的
-// 最后一条路径：币安式"持仓浮盈也能当买力开新仓"——没有WHERE守卫，调用方已经在service层用
-// 未实现盈亏验证过权益足够，这里只是把"允许借用浮盈"这个决定落地，available可能因此变负，
-// 全仓模式下这是合法状态(强平穿仓/保险基金垫付走的就是这套)。不动credit：浮盈是不确定、
-// 随时可能反转的钱，不应该跟"已经到账的保险赔付"混在一起算作已用掉
-// FreezeForceIntoNegative 强制冻结、允许available变负——币安式"持仓浮盈也能当买力开新仓"
-// 这条路径本身故意不设available/credit够不够的门槛(允许变负是设计意图，见
-// service.AccountService.FreezeMargin)，但WHERE条件核对expectedAvailable/expectedCredit
-// 没有被改过：调用方(FreezeMargin)判断"值不值得走这条路径"用的是available+credit+浮盈
-// 的合计，其中浮盈来自跨symbol聚合持仓表+标记价格、没法用一条SQL条件表达，只能在Go层
-// 算好门槛判断之后再调这个方法——这中间有一个没法完全消除的窗口，但至少可以保证"调用方
-// 判断时读到的available/credit"和"这条UPDATE真正要改的available/credit"是同一份，没有
-// 在窗口期被另一笔并发操作(比如同一个uid在另一个symbol+side上的FreezeMargin，
-// OrderLockKey只按uid+symbol+side加锁，管不到跨symbol的并发)偷偷改过——改过了就返回
+// free balance+free credit都不够、但账户权益(含持仓浮盈)够覆盖时的最后一条路径：币安式
+// "持仓浮盈也能当买力开新仓"——只加frozen_margin，balance/free balance可能因此变负，全仓
+// 模式下这是合法状态(强平穿仓/保险基金垫付走的就是这套)。不动credit：浮盈是不确定、随时
+// 可能反转的钱，不应该跟"已经到账的保险赔付"混在一起算作已用掉。
+// 这条路径本身故意不设"够不够"的门槛(允许变负是设计意图，见service.AccountService.FreezeMargin)，
+// 但WHERE条件核对expected*没有被改过：调用方(FreezeMargin)判断"值不值得走这条路径"用的是
+// free balance+free credit+浮盈的合计，其中浮盈来自跨symbol聚合持仓表+标记价格、没法用一条
+// SQL条件表达，只能在Go层算好门槛判断之后再调这个方法——这中间有一个没法完全消除的窗口，但
+// 至少可以保证"调用方判断时读到的balance/credit/frozen_margin/frozen_credit"和"这条UPDATE
+// 真正要改的这4列"是同一份，没有在窗口期被另一笔并发操作(比如同一个uid在另一个symbol+side
+// 上的FreezeMargin，OrderLockKey只按uid+symbol+side加锁，管不到跨symbol的并发；或者另一个
+// symbol的仓位刚好在这个窗口期结算了已实现盈亏，改了balance)偷偷改过——改过了就返回
 // ok=false，调用方按"这次没能安全地冻结"处理(不能假装冻结成功了)
-func (r *AccountRepo) FreezeForceIntoNegative(ctx context.Context, id uint64, amount, expectedAvailable, expectedCredit decimal.Decimal) (bool, error) {
+func (r *AccountRepo) FreezeForceIntoNegative(ctx context.Context, id uint64, amount, expectedBalance, expectedCredit, expectedFrozenMargin, expectedFrozenCredit decimal.Decimal) (bool, error) {
 	res, err := r.db.ExecContext(ctx,
-		`UPDATE accounts SET available = available - ?, frozen_margin = frozen_margin + ?
-		 WHERE id = ? AND available = ? AND credit = ?`,
-		amount, amount, id, expectedAvailable, expectedCredit)
+		`UPDATE accounts SET frozen_margin = frozen_margin + ?
+		 WHERE id = ? AND balance = ? AND credit = ? AND frozen_margin = ? AND frozen_credit = ?`,
+		amount, id, expectedBalance, expectedCredit, expectedFrozenMargin, expectedFrozenCredit)
 	return affected(res, err)
 }
 
-// 撤单/未成交部分释放冻结的保证金——availableAmount/creditAmount分别对应
-// 这笔委托当初从available/credit冻结的比例，必须分开还，不能笼统还到available，否则等于
-// 让信用额度经过"冻结再撤单"这个渠道被洗成可提现的available
-func (r *AccountRepo) UnfreezeMargin(ctx context.Context, id uint64, availableAmount, creditAmount decimal.Decimal) (bool, error) {
-	res, err := r.db.ExecContext(ctx,
-		`UPDATE accounts SET
-			available = available + ?,
-			frozen_margin = frozen_margin - ?,
-			credit = credit + ?,
-			frozen_credit = frozen_credit - ?
-		 WHERE id = ? AND frozen_margin >= ? AND frozen_credit >= ?`,
-		availableAmount, availableAmount, creditAmount, creditAmount, id, availableAmount, creditAmount)
-	return affected(res, err)
-}
-
-// 开仓成交：冻结的保证金转移到仓位(只扣frozen_margin/frozen_credit，
-// 全仓下不是真锁定的钱)。availableAmount/creditAmount是这笔成交对应释放的两部分冻结额度，
-// 转正之后这两部分该退回available还是credit，由调用方紧接着分别调SettleToAvailable/
-// SettleToCredit处理——这里只负责解冻记账，不负责钱最终去哪
-func (r *AccountRepo) DecreaseFrozenMargin(ctx context.Context, id uint64, availableAmount, creditAmount decimal.Decimal) (bool, error) {
+// 释放锁定的保证金(减少frozen_margin/frozen_credit)，不touch balance/credit——这两列是
+// 不随冻结变化的总额，见model.Account.Balance。用于撤单/条件单撤销/仓位平仓/降杠杆等
+// 场景，availableAmount/creditAmount分别对应当初从balance/credit两侧冻结的比例，必须
+// 分开释放，不能笼统释放成一边，否则等于让信用额度那一侧的锁定跟balance那一侧的锁定
+// 混起来记账。
+//
+// 两个参数通常是正数(释放锁定)；唯一的例外是settlement.go开仓成交那一处，把"下单时的
+// 保守估算"调整到"按真实成交价算出的properMargin"，如果真实成交价比保守估算更差，delta
+// 会是负数，意味着这笔仓位需要补冻更多而不是释放——两种情况用同一条UPDATE处理：负数时
+// 守卫条件frozen_margin>=负数恒成立，效果是frozen_margin/frozen_credit增加
+func (r *AccountRepo) AdjustFrozenMargin(ctx context.Context, id uint64, availableAmount, creditAmount decimal.Decimal) (bool, error) {
 	res, err := r.db.ExecContext(ctx,
 		`UPDATE accounts SET frozen_margin = frozen_margin - ?, frozen_credit = frozen_credit - ?
 		 WHERE id = ? AND frozen_margin >= ? AND frozen_credit >= ?`,
@@ -178,35 +171,35 @@ func (r *AccountRepo) DecreaseFrozenMargin(ctx context.Context, id uint64, avail
 	return affected(res, err)
 }
 
-// 保证金原样归还——amount可正可负，无守卫(全仓下available允许暂时为负，
-// 这是已经接受的合法状态，不是bug)。只用于"退回原来冻结available的那部分"这种明确知道
-// 钱该回available的场景，不要用来结算亏损——亏损要走SettlePnl，走先available后credit的顺序
-func (r *AccountRepo) SettleToAvailable(ctx context.Context, id uint64, amount decimal.Decimal) error {
-	_, err := r.db.ExecContext(ctx, `UPDATE accounts SET available = available + ? WHERE id = ?`, amount, id)
+// 已实现盈亏/强平清算缓冲结算：盈利(amount>=0)直接进balance，不动credit——赚的
+// 是新钱，没有变现风险。亏损(amount<0)走"先扣balance、balance里属于自己的正数部分耗尽了
+// 再扣credit、credit也耗尽了才让balance继续变负"的顺序——让运营发放的信用额度尽量少被
+// 真实亏损吃掉，用户自己的钱优先兜底，这是运营侧控制赔付成本的取舍，不是"保护用户"的取舍。
+// 这个顺序对手续费扣款(DeductFee)同样适用，两者共用deductWithCreditFallback
+func (r *AccountRepo) SettlePnl(ctx context.Context, id uint64, amount decimal.Decimal) error {
+	if amount.Sign() >= 0 {
+		return r.SettleToBalance(ctx, id, amount)
+	}
+	return r.deductWithCreditFallback(ctx, id, amount.Neg())
+}
+
+// 直接改balance——只用于真实改变总资产的场景(已实现盈亏、资金费、ADL划转保险基金这些)，
+// amount可正可负，无守卫(全仓下balance允许暂时为负，这是已经接受的合法状态，不是bug)
+func (r *AccountRepo) SettleToBalance(ctx context.Context, id uint64, amount decimal.Decimal) error {
+	_, err := r.db.ExecContext(ctx, `UPDATE accounts SET balance = balance + ? WHERE id = ?`, amount, id)
 	return err
 }
 
-// 退回原来冻结credit的那部分，跟SettleToAvailable对称
+// 直接改credit，无守卫——只用于强平穿仓垫付/维持保证金缓冲清算这类"把free credit清零"的
+// 场景(见EngineService.settleLiquidationAftermath)，不要用来结算已实现盈亏(走SettlePnl)
 func (r *AccountRepo) SettleToCredit(ctx context.Context, id uint64, amount decimal.Decimal) error {
 	_, err := r.db.ExecContext(ctx, `UPDATE accounts SET credit = credit + ? WHERE id = ?`, amount, id)
 	return err
 }
 
-// 已实现盈亏/强平清算缓冲结算：盈利(amount>=0)直接进available，不动credit——赚的
-// 是新钱，没有变现风险。亏损(amount<0)走"先扣available、available里属于自己的正数部分耗尽了
-// 再扣credit、credit也耗尽了才让available继续变负"的顺序——让运营发放的信用额度尽量少被
-// 真实亏损吃掉，用户自己的钱优先兜底，这是运营侧控制赔付成本的取舍，不是"保护用户"的取舍。
-// 这个顺序对手续费扣款(DeductFee)同样适用，两者共用deductWithCreditFallback
-func (r *AccountRepo) SettlePnl(ctx context.Context, id uint64, amount decimal.Decimal) error {
-	if amount.Sign() >= 0 {
-		return r.SettleToAvailable(ctx, id, amount)
-	}
-	return r.deductWithCreditFallback(ctx, id, amount.Neg())
-}
-
 // 手续费扣款：这笔手续费对应的成交已经真实发生，不能因为差一点钱扣不出来就不扣，
-// 走跟SettlePnl亏损分支同样的"先available后credit"顺序，credit也不够时allowed继续让
-// available变负
+// 走跟SettlePnl亏损分支同样的"先balance后credit"顺序，credit也不够时allowed继续让
+// balance变负
 func (r *AccountRepo) DeductFee(ctx context.Context, id uint64, fee decimal.Decimal) error {
 	if fee.Sign() <= 0 {
 		return nil
@@ -214,11 +207,11 @@ func (r *AccountRepo) DeductFee(ctx context.Context, id uint64, fee decimal.Deci
 	return r.deductWithCreditFallback(ctx, id, fee)
 }
 
-// 从这个账户扣掉loss(正数)，"先available后credit"：
-// absorbedByCredit = min(credit, max(loss - max(available,0), 0))——available里"属于自己的
+// 从这个账户扣掉loss(正数)，"先balance后credit"：
+// absorbedByCredit = min(credit, max(loss - max(balance,0), 0))——balance里"属于自己的
 // 正数部分"(已经是负数就没有可用的部分)覆盖不了的缺口，先问credit要，credit给不了的剩余部分
-// 由available兜底(可能变得更负)。这里必须用JOIN一份子查询快照(snap)来引用"更新前"的
-// available/credit，不能直接在SET子句里互相引用对方——MySQL对同一条UPDATE语句里的SET
+// 由balance兜底(可能变得更负)。这里必须用JOIN一份子查询快照(snap)来引用"更新前"的
+// balance/credit，不能直接在SET子句里互相引用对方——MySQL对同一条UPDATE语句里的SET
 // 子句是按书写顺序从左到右求值的，后面的子句会看到前面子句已经写入的新值，不是这一行
 // 更新前的快照(这点在其他一些数据库里可能不成立，但MySQL是这样，之前这里直接互相引用
 // 一度写错过，导致credit被多扣，已经用真实MySQL实例验证过这个JOIN写法在多组边界数值下
@@ -226,10 +219,10 @@ func (r *AccountRepo) DeductFee(ctx context.Context, id uint64, fee decimal.Deci
 func (r *AccountRepo) deductWithCreditFallback(ctx context.Context, id uint64, loss decimal.Decimal) error {
 	_, err := r.db.ExecContext(ctx,
 		`UPDATE accounts a
-		 JOIN (SELECT id, available, credit FROM accounts WHERE id = ?) snap ON snap.id = a.id
+		 JOIN (SELECT id, balance, credit FROM accounts WHERE id = ?) snap ON snap.id = a.id
 		 SET
-			a.available = a.available - ? + LEAST(snap.credit, GREATEST(? - GREATEST(snap.available, 0), 0)),
-			a.credit = a.credit - LEAST(snap.credit, GREATEST(? - GREATEST(snap.available, 0), 0))`,
+			a.balance = a.balance - ? + LEAST(snap.credit, GREATEST(? - GREATEST(snap.balance, 0), 0)),
+			a.credit = a.credit - LEAST(snap.credit, GREATEST(? - GREATEST(snap.balance, 0), 0))`,
 		id, loss, loss, loss)
 	return err
 }
@@ -386,10 +379,12 @@ func (r *AccountRepo) applyFundOpOnce(ctx context.Context, op FundOp) (replayed 
 	var res sql.Result
 	switch op.Kind {
 	case FundOpDeposit:
-		res, err = tx.ExecContext(ctx, `UPDATE accounts SET available = available + ? WHERE id = ?`, op.Amount, op.AccountID)
+		res, err = tx.ExecContext(ctx, `UPDATE accounts SET balance = balance + ? WHERE id = ?`, op.Amount, op.AccountID)
 	case FundOpWithdraw:
+		// 只能扣balance里"自由"的那部分(balance-frozen_margin)——锁在挂单/持仓里的钱不能被
+		// 合作方这个资金接口直接划走，不然等于绕过冻结机制凭空抽走用户仓位的保证金
 		res, err = tx.ExecContext(ctx,
-			`UPDATE accounts SET available = available - ? WHERE id = ? AND available >= ?`, op.Amount, op.AccountID, op.Amount)
+			`UPDATE accounts SET balance = balance - ? WHERE id = ? AND balance - frozen_margin >= ?`, op.Amount, op.AccountID, op.Amount)
 	case FundOpGrantCredit:
 		res, err = tx.ExecContext(ctx, `UPDATE accounts SET credit = credit + ? WHERE id = ?`, op.Amount, op.AccountID)
 	default:
@@ -401,8 +396,8 @@ func (r *AccountRepo) applyFundOpOnce(ctx context.Context, op FundOp) (replayed 
 	if n, err := res.RowsAffected(); err != nil {
 		return false, err
 	} else if n == 0 {
-		// 只有扣减的WHERE available >= ?会走到这里(充值/发额度按id更新一定命中)，回滚掉刚才
-		// 写的流水，这个requestId没有被占用，补足余额后可以用同一个requestId重试
+		// 只有扣减的WHERE balance-frozen_margin >= ?会走到这里(充值/发额度按id更新一定命中)，
+		// 回滚掉刚才写的流水，这个requestId没有被占用，补足余额后可以用同一个requestId重试
 		return false, ErrInsufficientBalance
 	}
 	if err := tx.Commit(); err != nil {

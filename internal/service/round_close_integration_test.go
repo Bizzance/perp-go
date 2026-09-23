@@ -49,17 +49,17 @@ func TestCloseRound_SettlesEverything(t *testing.T) {
 	b := e.newAccount(t, 2, "10000")
 	e.setCredit(t, a, "500", true)
 
-	// 建仓：a多头0.1@65000。a先付保证金650、taker手续费3.25 -> available 9346.75
+	// 建仓：a多头0.1@65000。a先付保证金650、taker手续费3.25 -> 可用余额9346.75
 	e.openLongAgainst(t, a, b, testSymbol, "65000", "0.1", "650")
-	mustDec(t, e.account(t, a).Available, "9346.75", "建仓后可用余额")
+	mustDec(t, e.freeBalance(t, a), "9346.75", "建仓后可用余额")
 
-	// 再挂一笔开仓限价单(冻结600)、一笔条件开仓单(冻结300)、一笔条件平仓单(不冻结)
+	// 再挂一笔开仓限价单(锁定600)、一笔条件开仓单(锁定300)、一笔条件平仓单(不锁定)
 	rest := e.insertOrder(t, a, orderOpts{side: model.SideLong, action: model.ActionOpen, price: "60000", amount: "0.1", margin: "600"})
 	if err := e.engine.SubmitOrder(ctx, rest, 3); err != nil {
 		t.Fatal(err)
 	}
 	acc := e.account(t, a)
-	if ok, err := e.accountRepo.FreezeFromAvailable(ctx, acc.ID, decimalOf(t, "300")); err != nil || !ok {
+	if ok, err := e.accountRepo.FreezeFromBalance(ctx, acc.ID, decimalOf(t, "300")); err != nil || !ok {
 		t.Fatalf("冻结条件单保证金: ok=%v err=%v", ok, err)
 	}
 	condOpen := newConditionalOpen(e, a, "90000", "0.05", "300")
@@ -71,7 +71,8 @@ func TestCloseRound_SettlesEverything(t *testing.T) {
 	if err := e.conditional.Insert(ctx, condClose); err != nil {
 		t.Fatal(err)
 	}
-	mustDec(t, e.account(t, a).FrozenMargin, "900", "挂单+条件单冻结的保证金")
+	// frozen_margin现在是仓位占用+挂单+条件单的合计：650(仓位)+600(挂单)+300(条件单)=1550
+	mustDec(t, e.account(t, a).FrozenMargin, "1550", "仓位+挂单+条件单锁定的保证金合计")
 
 	e.setMark(t, testSymbol, "66000")
 	if err := e.engine.CloseRound(ctx, a, 1); err != nil {
@@ -100,8 +101,9 @@ func TestCloseRound_SettlesEverything(t *testing.T) {
 	mustDec(t, e.ledgerSum(t, a, model.TxFee), "-6.55", "手续费流水(建仓3.25+强平3.3)")
 
 	final := e.account(t, a)
-	// 9346.75(建仓后) - 挂单和条件单冻结的900 + 退回900 + 650保证金 + 100盈利 - 3.3手续费
-	mustDec(t, final.Available, "10093.45", "可用余额")
+	// 结束本轮后所有锁定都已释放(frozen_margin=0)，balance本身就是可用余额：
+	// 9996.75(建仓后balance) + 100盈利 - 3.3手续费 = 10093.45
+	mustDec(t, final.Balance, "10093.45", "可用余额")
 	mustDec(t, final.FrozenMargin, "0", "冻结保证金")
 	mustDec(t, final.Credit, "0", "信用额度清零")
 	mustDec(t, e.ledgerSum(t, a, model.TxRoundClose), "-500", "回收信用额度的流水")

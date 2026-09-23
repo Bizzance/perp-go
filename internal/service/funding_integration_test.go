@@ -115,7 +115,7 @@ func TestFunding_LongPaysShortReceivesWhenRatePositive(t *testing.T) {
 	e := newEngineEnv(t)
 	ctx := context.Background()
 	a, b := e.fundingPositions(t)
-	beforeA, beforeB := e.account(t, a).Available, e.account(t, b).Available
+	beforeA, beforeB := e.account(t, a).Balance, e.account(t, b).Balance
 	e.sampleFunding(t, "65065", "65000") // 溢价率0.001
 
 	e.funding.SettleIfDue(ctx, fundingNow1)
@@ -123,8 +123,8 @@ func TestFunding_LongPaysShortReceivesWhenRatePositive(t *testing.T) {
 	// 0.1 * 65065 * 0.001 = 6.5065
 	mustDec(t, e.ledgerSum(t, a, model.TxFundingFee), "-6.5065", "多头资金费流水")
 	mustDec(t, e.ledgerSum(t, b, model.TxFundingFee), "6.5065", "空头资金费流水")
-	mustDec(t, e.account(t, a).Available.Sub(beforeA), "-6.5065", "多头可用余额变化")
-	mustDec(t, e.account(t, b).Available.Sub(beforeB), "6.5065", "空头可用余额变化")
+	mustDec(t, e.account(t, a).Balance.Sub(beforeA), "-6.5065", "多头可用余额变化")
+	mustDec(t, e.account(t, b).Balance.Sub(beforeB), "6.5065", "空头可用余额变化")
 
 	rows := e.fundingHistoryRows(t)
 	if len(rows) != 1 {

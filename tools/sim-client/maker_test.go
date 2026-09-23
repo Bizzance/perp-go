@@ -77,7 +77,7 @@ func (f *fakeAPI) handler() http.Handler {
 			f.accounts[uint64(body["uid"].(float64))] = true
 			reply(map[string]any{})
 		case r.URL.Path == "/account/info":
-			reply(map[string]any{"available": "0", "round": 1})
+			reply(map[string]any{"balance": "0", "round": 1})
 		case r.URL.Path == "/account/balance", r.URL.Path == "/index-price":
 			reply(map[string]any{})
 		case r.URL.Path == "/market/ticker":
