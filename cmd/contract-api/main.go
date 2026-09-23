@@ -1,5 +1,3 @@
-// contract-api：对外HTTP服务(Gin)，负责校验参数+冻结保证金+落库+把下单/撤单事件发到Kafka
-// 给contract-engine处理，查询类接口直接读MySQL——见plan文件"项目结构"一节。
 package main
 
 import (
@@ -73,7 +71,21 @@ func main() {
 
 	auth := api.NewAuth(cfg.AuthDisabled, cfg.APIKeys, rdb)
 
-	srv := api.NewServer(accountSvc, positionSvc, coinRepo, orderRepo, conditionalOrderRepo, tradeRepo, klineRepo, markPriceSvc, fundingSvc, producer, hub, lockSvc, txRepo, auth)
+	srv := api.NewServer(
+		accountSvc,
+		positionSvc,
+		coinRepo,
+		orderRepo,
+		conditionalOrderRepo,
+		tradeRepo,
+		klineRepo,
+		markPriceSvc,
+		fundingSvc,
+		producer,
+		hub,
+		lockSvc,
+		txRepo,
+		auth)
 	// K线来源是外部行情(PERP_KLINE_SOURCE=external)时，POST /kline/sync写入后要把变了的K线推给WebSocket订阅者，
 	// 走的是跟engine同一个Redis频道
 	srv.WithKlineSync(cfg.KlineSource == "external", service.NewPushService(rdb, accountSvc, positionSvc, orderRepo))

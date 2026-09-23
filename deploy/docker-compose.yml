@@ -51,6 +51,16 @@ services:
       PERP_ENGINE_HTTP_ADDR: ":7002"
       PERP_NODE_ID: ${ENGINE_NODE_ID:-1}
       PERP_ENGINE_SYMBOLS: ${PERP_ENGINE_SYMBOLS:-}
+      # 订单簿镜像：把币安的订单簿直接镜像成系统账户的真实挂单，进程内直接调用，不经HTTP/分布式锁，
+      # 见docs/orderbook-sync.md。**生产必须配置PERP_MIRROR_SYMBOLS**，不然订单簿是空的，用户下单没有对手方。
+      # 系统账户uid是固定值(service.UID)，不需要配置
+      PERP_MIRROR_SYMBOLS: ${PERP_MIRROR_SYMBOLS:-}
+      PERP_MIRROR_LEVELS: ${PERP_MIRROR_LEVELS:-}
+      PERP_MIRROR_INTERVAL_MS: ${PERP_MIRROR_INTERVAL_MS:-}
+      PERP_MIRROR_LEVERAGE: ${PERP_MIRROR_LEVERAGE:-}
+      PERP_MIRROR_BALANCE: ${PERP_MIRROR_BALANCE:-}
+      PERP_MIRROR_STALE_SEC: ${PERP_MIRROR_STALE_SEC:-}
+      PERP_MIRROR_BINANCE_URL: ${PERP_MIRROR_BINANCE_URL:-}
     # 默认只绑本机回环地址：目前没有鉴权，不能直接暴露到网络。生产在前面放带鉴权/TLS的
     # 网关，网关和这台机器通网时再把BIND_ADDR改成0.0.0.0(或内网地址)
     ports:
@@ -97,10 +107,10 @@ services:
         condition: service_healthy
     logging: *logging
 
-  # 订单簿同步：把币安的订单簿同步进我们的订单簿，用户下单吃的就是这些挂单，对手方就是系统，见docs/orderbook-sync.md。
-  # **生产必须开**：在deploy/.env里设COMPOSE_PROFILES=booksync。测试环境默认不开，用模拟客户端的做市(两者用同一段uid，不能同时跑)。
-  # 需要一把同时有trade和ops权限的密钥(建系统账户、挂单撤单、给系统账户充值)，BOOKSYNC_API_KEY_ID/BOOKSYNC_API_SECRET
-  # 要跟PERP_API_KEYS里的一把对上。退出时要撤掉全部系统挂单，所以留够退出时间
+  # 订单簿同步：把币安的指数价、K线同步进contract-api，供对外的行情接口用，见docs/orderbook-sync.md。
+  # **订单簿镜像不在这里**——那部分配在engine服务的PERP_MIRROR_*(见上面)。
+  # 在deploy/.env里设COMPOSE_PROFILES=booksync开启。需要一把ops权限的密钥(指数价、K线同步都是运营接口)，
+  # BOOKSYNC_API_KEY_ID/BOOKSYNC_API_SECRET要跟PERP_API_KEYS里的一把对上
   booksync:
     profiles: [ "booksync" ]
     image: perp-go/booksync:${IMAGE_TAG:-latest}
@@ -118,12 +128,7 @@ services:
       BOOKSYNC_API_KEY_ID: ${BOOKSYNC_API_KEY_ID:-}
       BOOKSYNC_API_SECRET: ${BOOKSYNC_API_SECRET:-}
       BOOKSYNC_SYMBOLS: ${BOOKSYNC_SYMBOLS:-}
-      BOOKSYNC_LEVELS: ${BOOKSYNC_LEVELS:-}
       BOOKSYNC_INTERVAL_MS: ${BOOKSYNC_INTERVAL_MS:-}
-      BOOKSYNC_STALE_SEC: ${BOOKSYNC_STALE_SEC:-}
-      BOOKSYNC_UID_BASE: ${BOOKSYNC_UID_BASE:-}
-      BOOKSYNC_BALANCE: ${BOOKSYNC_BALANCE:-}
-      BOOKSYNC_LEVERAGE: ${BOOKSYNC_LEVERAGE:-}
       BOOKSYNC_KLINE_INTERVAL_SEC: ${BOOKSYNC_KLINE_INTERVAL_SEC:-}
       BOOKSYNC_KLINE_BACKFILL: ${BOOKSYNC_KLINE_BACKFILL:-}
     depends_on:

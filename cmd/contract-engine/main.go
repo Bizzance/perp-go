@@ -1,18 +1,19 @@
-// contract-engine：撮合+风控引擎进程。消费Kafka里的下单/撤单事件，维护每个symbol的内存
-// 订单簿，定时扫描做全仓强平判断，定时采样+结算资金费率——见plan文件"项目结构"一节。
 package main
 
 import (
 	"context"
 	"fmt"
 	"log"
+	"net/http"
 	"os/signal"
+	"strings"
 	"syscall"
 	"time"
 
 	"github.com/shopspring/decimal"
 
 	"perp-go/internal/api"
+	"perp-go/internal/binancefeed"
 	"perp-go/internal/cache"
 	"perp-go/internal/config"
 	"perp-go/internal/db"
@@ -51,35 +52,33 @@ func main() {
 	// 拦住"根本没设、还在用默认值"这种最容易犯的错误配置，快速失败比启动后悄悄消费不了
 	// 强得多
 	if len(cfg.EngineSymbols) > 0 && !cfg.NodeIDExplicit {
-		log.Fatalf("开启engine分片(PERP_ENGINE_SYMBOLS)时必须显式设置PERP_NODE_ID，且每个" +
-			"实例的值必须互不相同——否则多个实例会用相同的Kafka consumer group id，导致" +
-			"分区分配失效，见docs/engine-sharding.md")
+		log.Fatalf("开启engine分片时必须显式设置PERP_NODE_ID，且每个实例的值必须互不相同")
 	}
 
-	conn, err := db.Connect(cfg.MySQLDSN)
+	dbConn, err := db.Connect(cfg.MySQLDSN)
 	if err != nil {
 		log.Fatalf("connect mysql: %v", err)
 	}
-	defer conn.Close()
+	defer dbConn.Close()
 
 	rdb, err := cache.Connect(cfg.RedisAddr, cfg.RedisPass)
 	if err != nil {
 		log.Fatalf("connect redis: %v", err)
 	}
 
-	accountRepo := repo.NewAccountRepo(conn)
-	coinRepo := repo.NewCoinRepo(conn)
-	orderRepo := repo.NewOrderRepo(conn)
-	conditionalOrderRepo := repo.NewConditionalOrderRepo(conn)
-	positionRepo := repo.NewPositionRepo(conn)
-	tradeRepo := repo.NewTradeRepo(conn)
-	txRepo := repo.NewTxRepo(conn)
-	fundRepo := repo.NewInsuranceFundRepo(conn)
-	fundingRepo := repo.NewFundingRepo(conn)
-	riskLimitRepo := repo.NewRiskLimitRepo(conn)
-	klineRepo := repo.NewKlineRepo(conn)
-	processedMsgRepo := repo.NewProcessedMessageRepo(conn)
-	roundCloseProgressRepo := repo.NewRoundCloseProgressRepo(conn)
+	accountRepo := repo.NewAccountRepo(dbConn)
+	coinRepo := repo.NewCoinRepo(dbConn)
+	orderRepo := repo.NewOrderRepo(dbConn)
+	conditionalOrderRepo := repo.NewConditionalOrderRepo(dbConn)
+	positionRepo := repo.NewPositionRepo(dbConn)
+	tradeRepo := repo.NewTradeRepo(dbConn)
+	txRepo := repo.NewTxRepo(dbConn)
+	fundRepo := repo.NewInsuranceFundRepo(dbConn)
+	fundingRepo := repo.NewFundingRepo(dbConn)
+	riskLimitRepo := repo.NewRiskLimitRepo(dbConn)
+	klineRepo := repo.NewKlineRepo(dbConn)
+	processedMsgRepo := repo.NewProcessedMessageRepo(dbConn)
+	roundCloseProgressRepo := repo.NewRoundCloseProgressRepo(dbConn)
 
 	markPriceSvc := service.NewMarkPriceService(rdb).WithConfig(service.MarkPriceConfig{
 		MaxIndexAge:  cfg.MarkPriceMaxIndexAge,
@@ -94,24 +93,71 @@ func main() {
 	fundingSvc := service.NewFundingService(rdb, coinRepo, positionRepo, fundingRepo, accountSvc, txRepo, markPriceSvc)
 	klineSvc := service.NewKlineService(klineRepo).WithExternalSource(cfg.KlineSource == "external")
 	if cfg.KlineSource == "external" {
-		log.Printf("K线来源是外部行情(PERP_KLINE_SOURCE=external)：我们自己的成交不再更新K线，见docs/kline.md")
+		log.Printf("K线来源是外部行情(PERP_KLINE_SOURCE=external)：我们自己的成交不再更新K线")
 	}
 	pushSvc := service.NewPushService(rdb, accountSvc, positionSvc, orderRepo)
 	lockSvc := service.NewLockService(rdb)
 
 	if len(cfg.EngineSymbols) > 0 {
-		log.Printf("engine分片模式：这个实例负责的symbol=%v，见docs/engine-sharding.md", cfg.EngineSymbols)
+		log.Printf("engine分片模式：这个实例负责的symbol=%v", cfg.EngineSymbols)
 	}
 
 	matchingEngine := matching.NewEngine()
-	engineSvc := service.NewEngineService(matchingEngine, orderRepo, conditionalOrderRepo, tradeRepo, accountSvc, positionSvc, settlementSvc, markPriceSvc, fundSvc, klineSvc, pushSvc, roundCloseProgressRepo, lockSvc, coinRepo, cfg.EngineSymbols)
+	engineSvc := service.NewEngineService(
+		matchingEngine,
+		orderRepo,
+		conditionalOrderRepo,
+		tradeRepo,
+		accountSvc,
+		positionSvc,
+		settlementSvc,
+		markPriceSvc,
+		fundSvc,
+		klineSvc,
+		pushSvc,
+		roundCloseProgressRepo,
+		lockSvc,
+		coinRepo,
+		cfg.EngineSymbols)
 	// 资金费率采样读订单簿：只有拥有这个symbol的实例才采样，用冲击价格算溢价
-	fundingSvc.WithBook(func(symbol string) bool { return engineSvc.OwnsSymbol(symbol) },
+	fundingSvc.WithBook(
+		func(symbol string) bool {
+			return engineSvc.OwnsSymbol(symbol)
+		},
 		func(symbol string, notional decimal.Decimal) (decimal.Decimal, decimal.Decimal, bool) {
 			return matchingEngine.BookFor(symbol).ImpactPrices(notional)
 		})
-	liquidationSvc := service.NewLiquidationService(engineSvc, orderRepo, positionRepo, positionSvc, markPriceSvc, accountSvc, fundSvc, coinRepo, cfg.LiquidationOrderTimeoutMs)
+	liquidationSvc := service.NewLiquidationService(
+		engineSvc,
+		orderRepo,
+		positionRepo,
+		positionSvc,
+		markPriceSvc,
+		accountSvc,
+		fundSvc,
+		coinRepo,
+		cfg.LiquidationOrderTimeoutMs)
 	conditionalOrderSvc := service.NewConditionalOrderService(conditionalOrderRepo, orderRepo, markPriceSvc, engineSvc)
+
+	// 订单簿镜像：把币安的订单簿直接镜像成系统账户(service.UID，固定值不需要配置)在撮合引擎里的
+	// 真实挂单，进程内直接调用，不经HTTP/Kafka/分布式锁，见docs/orderbook-sync.md。
+	// MirrorSymbols为空(没配PERP_MIRROR_SYMBOLS)表示不开启，本地开发和大多数集成测试不需要
+	var mirrorSvc *service.MirrorService
+	if len(cfg.MirrorSymbols) > 0 {
+		mirrorBinance := &binancefeed.Binance{BaseURL: strings.TrimRight(cfg.MirrorBinanceURL, "/"), Client: &http.Client{Timeout: 5 * time.Second}}
+		mirrorSvc, err = service.NewMirrorService(service.MirrorConfig{
+			Symbols: cfg.MirrorSymbols, Levels: cfg.MirrorLevels, Interval: cfg.MirrorInterval,
+			Leverage: cfg.MirrorLeverage, Balance: cfg.MirrorBalance, StaleAfter: cfg.MirrorStaleAfter,
+		}, mirrorBinance, accountSvc, orderRepo, coinRepo, engineSvc)
+		if err != nil {
+			log.Fatalf("订单簿镜像配置不合法: %v", err)
+		}
+		log.Printf("订单簿镜像已开启: uid=%d symbols=%v 每侧%d档 间隔%s 币安数据%s没更新就撤单",
+			service.UID, cfg.MirrorSymbols, cfg.MirrorLevels, cfg.MirrorInterval, cfg.MirrorStaleAfter)
+	} else {
+		log.Printf("[WARN] 订单簿镜像没有开启(PERP_MIRROR_SYMBOLS没配)：没有其它挂单来源时，订单簿是空的，用户下单没有对手方。" +
+			"只能用于本地开发和测试，生产环境必须配置，见docs/orderbook-sync.md")
+	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
@@ -123,6 +169,12 @@ func main() {
 	// 比进程起不来更糟
 	if err := engineSvc.RecoverOrderBook(ctx); err != nil {
 		log.Fatalf("恢复订单簿失败: %v", err)
+	}
+
+	// 订单簿恢复完之后再开始镜像：镜像的diff逻辑要先知道订单簿里已经有哪些挂单(重启前留下的)，
+	// 不然会把它们当成"不存在"重复挂一遍
+	if mirrorSvc != nil {
+		go mirrorSvc.Run(ctx)
 	}
 
 	submitGroupID := consumerGroupID("contract-engine", cfg)
@@ -176,7 +228,7 @@ func main() {
 
 	if !cfg.MarkPriceRequireIndex {
 		log.Printf("[WARN] PERP_MARK_REQUIRE_INDEX没有开启：没喂过指数价的合约，标记价会退回最新成交价，可以被自成交操纵。" +
-			"只能用于本地开发和测试，生产环境必须开启并持续喂指数价，见docs/mark-price.md")
+			"只能用于本地开发和测试，生产环境必须开启并持续喂指数价")
 	}
 	go func() {
 		ticker := time.NewTicker(time.Duration(cfg.MarkPriceRefreshMs) * time.Millisecond)

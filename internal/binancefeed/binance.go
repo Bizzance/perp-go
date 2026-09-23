@@ -1,7 +1,8 @@
-// Package booksync 把币安的订单簿同步进我们自己的订单簿：定时拉币安USDⓈ-M合约的深度，用两个系统账户
-// 在我们的订单簿里挂出一模一样的价格和数量，用户下单吃的就是这些挂单，对手方就是系统。
-// 不做市商、不对冲、不报自己的价，我们的价格就是币安的价格，见docs/orderbook-sync.md。
-package booksync
+// Package binancefeed 是拉取币安USDⓈ-M合约公开行情的客户端(深度、指数价、K线)，以及"把一份目标
+// 深度跟已有挂单做差异"的纯函数(plan.go)。不碰账户、不碰HTTP鉴权，两个使用方各自决定挂单的
+// 方式：contract-engine内部直接调用撮合/账户服务镜像挂单(internal/service的mirror组件)，
+// orderbook-sync进程调用contract-api的公开接口推送指数价和K线(internal/booksync)。
+package binancefeed
 
 import (
 	"context"
@@ -28,11 +29,11 @@ type Binance struct {
 }
 
 // 币安深度接口允许的档位数，取值不在里面会被拒绝
-var depthLimits = []int{5, 10, 20, 50, 100, 500, 1000}
+var DepthLimits = []int{5, 10, 20, 50, 100, 500, 1000}
 
 // 不小于n的最小的合法档位数，n超过1000返回false
-func depthLimitFor(n int) (int, bool) {
-	for _, l := range depthLimits {
+func DepthLimitFor(n int) (int, bool) {
+	for _, l := range DepthLimits {
 		if l >= n {
 			return l, true
 		}
@@ -101,7 +102,7 @@ type Candle struct {
 }
 
 // 币安K线接口一次最多返回的根数
-const maxKlineLimit = 1500
+const MaxKlineLimit = 1500
 
 // 拉这个合约某个周期最近limit根K线，按开盘时间升序，最后一根是还没走完的当前这一根。
 // interval是币安的周期写法，跟我们的一样(1m/5m/15m/1h/4h/1d)

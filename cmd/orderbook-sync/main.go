@@ -1,7 +1,3 @@
-// orderbook-sync：把币安的订单簿和行情同步进我们系统。定时拉币安合约的深度，用两个系统账户在我们的
-// 订单簿里挂出一模一样的价格和数量，用户下单吃的就是这些挂单，对手方就是系统，没有做市商；
-// 同时把币安的指数价推给contract-api（标记价靠它做锚），把币安的K线推给contract-api（合作方拿到的K线就是币安的）。
-// 币安数据拉不到超过一段时间，撤掉全部挂单、暂停报价，见docs/orderbook-sync.md。
 package main
 
 import (
@@ -15,6 +11,7 @@ import (
 	"syscall"
 	"time"
 
+	"perp-go/internal/binancefeed"
 	"perp-go/internal/booksync"
 )
 
@@ -23,23 +20,23 @@ func main() {
 	keyID := os.Getenv("BOOKSYNC_API_KEY_ID")
 	secret := os.Getenv("BOOKSYNC_API_SECRET")
 	if keyID == "" || secret == "" {
-		log.Fatal("必须设置BOOKSYNC_API_KEY_ID和BOOKSYNC_API_SECRET(需要trade和ops两种权限的API密钥)")
+		log.Fatal("必须设置BOOKSYNC_API_KEY_ID和BOOKSYNC_API_SECRET(只需要ops权限：指数价、K线同步都是运营接口)")
 	}
 	symbols := splitList(envOr("BOOKSYNC_SYMBOLS", "BTCUSDT,ETHUSDT"))
 	cfg := booksync.Config{
-		Symbols:    symbols,
-		BaseUID:    uint64(envInt("BOOKSYNC_UID_BASE", 9000000)),
-		Levels:     int(envInt("BOOKSYNC_LEVELS", 50)),
-		Interval:   time.Duration(envInt("BOOKSYNC_INTERVAL_MS", 1000)) * time.Millisecond,
-		Leverage:   int(envInt("BOOKSYNC_LEVERAGE", 5)),
-		Balance:    envOr("BOOKSYNC_BALANCE", "1000000000"),
-		StaleAfter: time.Duration(envInt("BOOKSYNC_STALE_SEC", 10)) * time.Second,
+		Symbols:  symbols,
+		Interval: time.Duration(envInt("BOOKSYNC_INTERVAL_MS", 1000)) * time.Millisecond,
 		// 币安K线：每2秒同步一次最近几根(只推变了的)，启动时补500根历史(币安接口上限1500)。
 		// BOOKSYNC_KLINE_INTERVAL_SEC=0表示不同步K线(contract-api没设PERP_KLINE_SOURCE=external时用，否则每次同步都会被拒绝)
 		KlineEvery:    time.Duration(envIntOrZero("BOOKSYNC_KLINE_INTERVAL_SEC", 2)) * time.Second,
 		KlineBackfill: int(envInt("BOOKSYNC_KLINE_BACKFILL", 500)),
 	}
-	bn := &booksync.Binance{BaseURL: strings.TrimRight(envOr("BOOKSYNC_BINANCE_URL", "https://fapi.binance.com"), "/"), Client: &http.Client{Timeout: 5 * time.Second}}
+	bn := &binancefeed.Binance{
+		BaseURL: strings.TrimRight(envOr("BOOKSYNC_BINANCE_URL", "https://fapi.binance.com"), "/"),
+		Client: &http.Client{
+			Timeout: 5 * time.Second,
+		},
+	}
 	s, err := booksync.New(cfg, apiURL, keyID, secret, bn)
 	if err != nil {
 		log.Fatalf("配置不合法: %v", err)
@@ -47,10 +44,10 @@ func main() {
 
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
-	log.Printf("orderbook-sync启动: api=%s symbols=%v 每侧%d档 间隔%s 币安数据%s没更新就撤单 系统账户uid=%d/%d K线每%s同步一次(启动补%d根)",
-		apiURL, symbols, cfg.Levels, cfg.Interval, cfg.StaleAfter, cfg.BaseUID, cfg.BaseUID+1, cfg.KlineEvery, cfg.KlineBackfill)
+	log.Printf("orderbook-sync启动: api=%s symbols=%v 指数价间隔%s K线每%s同步一次(启动补%d根)",
+		apiURL, symbols, cfg.Interval, cfg.KlineEvery, cfg.KlineBackfill)
 	s.Run(ctx)
-	log.Println("orderbook-sync退出，系统挂单已撤")
+	log.Println("orderbook-sync退出")
 }
 
 func envOr(key, def string) string {

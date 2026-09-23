@@ -16,7 +16,8 @@ U本位永续合约交易系统，MVP阶段。文档按主题拆分，方便单�
 - [conditional-orders.md](conditional-orders.md) —— 条件单（止盈止损/条件开仓）
 - [risk-limit-tiers.md](risk-limit-tiers.md) —— 保证金分档（风险限额）
 - [leverage.md](leverage.md) —— 独立杠杆设置接口
-- [orderbook-sync.md](orderbook-sync.md) —— 订单簿同步：把币安的订单簿和指数价同步进我们系统，用户下单的对手方就是系统，生产必须部署
+- [orderbook-sync.md](orderbook-sync.md) —— 订单簿镜像与行情同步：contract-engine内部把币安订单簿镜像成系统账户的真实挂单，
+  orderbook-sync进程同步指数价和K线，用户下单的对手方就是系统，生产必须部署
 - [mark-price.md](mark-price.md) —— 标记价：指数价、盘口基差、最新成交价取中位数，抗对敲操纵，喂价断了怎么办
 - [funding-rate.md](funding-rate.md) —— 资金费率机制
 - [liquidation.md](liquidation.md) —— 强平与保险基金

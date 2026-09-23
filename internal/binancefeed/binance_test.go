@@ -1,4 +1,4 @@
-package booksync
+package binancefeed
 
 import (
 	"context"

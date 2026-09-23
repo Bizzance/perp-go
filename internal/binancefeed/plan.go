@@ -1,4 +1,4 @@
-package booksync
+package binancefeed
 
 import (
 	"sort"
@@ -11,7 +11,7 @@ import (
 
 // 币安盘口的前n档(levels已经是最优价在前)：价格和数量都原样，数量向下取到合约允许的小数位、
 // 再向下取到数量步长的整数倍(step为0表示合约不校验步长)，取整后低于最小下单量的档位不挂
-func desiredLevels(levels []Level, n int, qtyDP int32, step, minVolume decimal.Decimal) []Level {
+func DesiredLevels(levels []Level, n int, qtyDP int32, step, minVolume decimal.Decimal) []Level {
 	var out []Level
 	for _, l := range levels {
 		if len(out) == n {
@@ -30,16 +30,16 @@ func desiredLevels(levels []Level, n int, qtyDP int32, step, minVolume decimal.D
 }
 
 // 系统当前挂在订单簿里的一笔委托
-type liveOrder struct {
-	id        string
-	price     decimal.Decimal
-	amount    decimal.Decimal // 下单时的数量
-	remaining decimal.Decimal // 还没成交的数量
+type LiveOrder struct {
+	ID        uint64
+	Price     decimal.Decimal
+	Amount    decimal.Decimal // 下单时的数量
+	Remaining decimal.Decimal // 还没成交的数量
 }
 
-type placement struct {
-	price decimal.Decimal
-	qty   decimal.Decimal
+type Placement struct {
+	Price decimal.Decimal
+	Qty   decimal.Decimal
 }
 
 // 期望的一组档位 vs 已经挂着的委托：
@@ -51,66 +51,66 @@ type placement struct {
 //
 // 只在档位真的变了或者被吃掉时才动，不会为了数量的小幅波动天天撤了重挂：那样每秒几十个请求，
 // 还会让订单簿里的排队位置一直丢
-func plan(desired []Level, existing []liveOrder) (cancels []string, places []placement) {
+func Plan(desired []Level, existing []LiveOrder) (cancels []uint64, places []Placement) {
 	want := make(map[string]Level, len(desired))
 	for _, d := range desired {
 		want[d.Price.String()] = d
 	}
 	kept := make(map[string]bool, len(desired))
 
-	sorted := append([]liveOrder(nil), existing...)
-	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].id < sorted[j].id })
+	sorted := append([]LiveOrder(nil), existing...)
+	sort.SliceStable(sorted, func(i, j int) bool { return sorted[i].ID < sorted[j].ID })
 	for _, o := range sorted {
-		key := o.price.String()
+		key := o.Price.String()
 		_, ok := want[key]
 		switch {
 		case !ok:
-			cancels = append(cancels, o.id)
+			cancels = append(cancels, o.ID)
 		case kept[key]:
-			cancels = append(cancels, o.id) // 这个价位已经有一笔保留了，多余的撤掉
-		case o.remaining.Mul(decimal.NewFromInt(2)).LessThan(o.amount):
-			cancels = append(cancels, o.id) // 被吃掉大半，撤掉后面重挂
+			cancels = append(cancels, o.ID) // 这个价位已经有一笔保留了，多余的撤掉
+		case o.Remaining.Mul(decimal.NewFromInt(2)).LessThan(o.Amount):
+			cancels = append(cancels, o.ID) // 被吃掉大半，撤掉后面重挂
 		default:
 			kept[key] = true
 		}
 	}
 	for _, d := range desired {
 		if !kept[d.Price.String()] && d.Qty.Sign() > 0 {
-			places = append(places, placement{price: d.Price, qty: d.Qty})
+			places = append(places, Placement{Price: d.Price, Qty: d.Qty})
 		}
 	}
 	return cancels, places
 }
 
 // 已经挂着的委托里最低/最高的价格，没有委托时返回ok=false
-func minLivePrice(orders []liveOrder) (decimal.Decimal, bool) {
+func MinLivePrice(orders []LiveOrder) (decimal.Decimal, bool) {
 	var best decimal.Decimal
 	for i, o := range orders {
-		if i == 0 || o.price.LessThan(best) {
-			best = o.price
+		if i == 0 || o.Price.LessThan(best) {
+			best = o.Price
 		}
 	}
 	return best, len(orders) > 0
 }
 
-func maxLivePrice(orders []liveOrder) (decimal.Decimal, bool) {
+func MaxLivePrice(orders []LiveOrder) (decimal.Decimal, bool) {
 	var best decimal.Decimal
 	for i, o := range orders {
-		if i == 0 || o.price.GreaterThan(best) {
-			best = o.price
+		if i == 0 || o.Price.GreaterThan(best) {
+			best = o.Price
 		}
 	}
 	return best, len(orders) > 0
 }
 
 // 只保留价格严格低于limit的补挂档位(买单不能碰到还挂着的卖单)，没有limit(ok=false)就全保留
-func placesBelow(places []placement, limit decimal.Decimal, ok bool) []placement {
+func PlacesBelow(places []Placement, limit decimal.Decimal, ok bool) []Placement {
 	if !ok {
 		return places
 	}
-	var out []placement
+	var out []Placement
 	for _, p := range places {
-		if p.price.LessThan(limit) {
+		if p.Price.LessThan(limit) {
 			out = append(out, p)
 		}
 	}
@@ -118,13 +118,13 @@ func placesBelow(places []placement, limit decimal.Decimal, ok bool) []placement
 }
 
 // 只保留价格严格高于limit的补挂档位(卖单不能碰到还挂着的买单)
-func placesAbove(places []placement, limit decimal.Decimal, ok bool) []placement {
+func PlacesAbove(places []Placement, limit decimal.Decimal, ok bool) []Placement {
 	if !ok {
 		return places
 	}
-	var out []placement
+	var out []Placement
 	for _, p := range places {
-		if p.price.GreaterThan(limit) {
+		if p.Price.GreaterThan(limit) {
 			out = append(out, p)
 		}
 	}

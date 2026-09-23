@@ -52,6 +52,18 @@ type Config struct {
 	// 部署的默认行为，不需要额外配置。见docs/engine-sharding.md
 	EngineSymbols []string
 
+	// 订单簿镜像(service.MirrorService，contract-engine进程内部直接调用账户/撮合服务把币安
+	// 订单簿镜像成系统账户的真实挂单，不经HTTP/Kafka/分布式锁)，见docs/orderbook-sync.md。
+	// 系统账户uid是固定值(service.UID)，不需要配置。MirrorSymbols为空(没设PERP_MIRROR_SYMBOLS)
+	// 表示不开启，本地开发/大多数集成测试不需要；生产环境必须配置
+	MirrorSymbols    []string
+	MirrorLevels     int
+	MirrorInterval   time.Duration
+	MirrorLeverage   int
+	MirrorBalance    string
+	MirrorStaleAfter time.Duration
+	MirrorBinanceURL string
+
 	// AuthDisabled 关闭接口鉴权，只给本地开发用(PERP_AUTH_DISABLED=true)。默认开启：开启但一个
 	// 密钥都没配置时进程拒绝启动，不会悄悄退化成"没有鉴权"，见docs/auth-design.md
 	AuthDisabled bool
@@ -217,6 +229,13 @@ func Load(defaultNodeID uint64) Config {
 		IndexJumpConfirm:          time.Duration(envInt("PERP_INDEX_JUMP_CONFIRM_SEC", 3)) * time.Second,
 		EngineSymbols:             parseEngineSymbols(os.Getenv("PERP_ENGINE_SYMBOLS")),
 		KlineSource:               klineSource(),
+		MirrorSymbols:             parseEngineSymbols(os.Getenv("PERP_MIRROR_SYMBOLS")),
+		MirrorLevels:              int(envInt("PERP_MIRROR_LEVELS", 50)),
+		MirrorInterval:            time.Duration(envInt("PERP_MIRROR_INTERVAL_MS", 1000)) * time.Millisecond,
+		MirrorLeverage:            int(envInt("PERP_MIRROR_LEVERAGE", 5)),
+		MirrorBalance:             envOr("PERP_MIRROR_BALANCE", "1000000000"),
+		MirrorStaleAfter:          time.Duration(envInt("PERP_MIRROR_STALE_SEC", 10)) * time.Second,
+		MirrorBinanceURL:          envOr("PERP_MIRROR_BINANCE_URL", "https://fapi.binance.com"),
 	}
 }
 

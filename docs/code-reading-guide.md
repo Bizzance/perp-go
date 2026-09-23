@@ -32,8 +32,9 @@
 ```
 cmd/
   contract-api/main.go      contract-api进程入口：接线路由、repo、service，起Gin+WS Hub
-  contract-engine/main.go   contract-engine进程入口：接线撮合引擎、消费Kafka、起4个定时任务(含每秒刷新标记价)
-  orderbook-sync/main.go    订单簿同步进程入口：读环境变量，接线币安行情和签名的api客户端，见orderbook-sync.md
+  contract-engine/main.go   contract-engine进程入口：接线撮合引擎、消费Kafka、起4个定时任务(含每秒刷新标记价)、
+                            接线订单簿镜像(service.MirrorService，见下面)
+  orderbook-sync/main.go    指数价/K线同步进程入口：读环境变量，接线币安行情和签名的api客户端，见orderbook-sync.md
 
 internal/
   api/          HTTP handler层。router.go是核心交易链路（下单/撤单/条件单/杠杆/账户）的
@@ -54,7 +55,10 @@ internal/
   pubsub/       WS推送用的Redis channel命名规则，发布端(service/push.go)和订阅端
                 (ws/hub.go)共用同一份，见websocket.md解释过的"两边各自维护一份前缀
                 容易出bug"教训
-  booksync/     订单簿同步的逻辑：拉币安深度和指数价、原样挂进我们的订单簿(先挂新单再撤旧单、不交叉不空侧)、币安数据过期就撤单
+  binancefeed/  币安公开行情客户端(深度/指数价/K线)+"目标深度跟已有挂单做差异"的纯函数，不碰账户/HTTP鉴权，
+                被service.MirrorService(挂单镜像)和booksync(指数价/K线同步)两边共用
+  booksync/     指数价、K线同步的逻辑：把币安的指数价、K线推给contract-api的公开运营接口。订单簿镜像不在这里，
+                见service.MirrorService和orderbook-sync.md
   cache/        Redis封装：标记价格、指数价格、资金费率采样累加器、WS推送的Pub/Sub
   mq/           Kafka生产者/消费者封装，含消息级去重（WithDedup）
   config/       环境变量加载，全部可调参数（扫描间隔、超时阈值、node id等）集中在这里
