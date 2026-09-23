@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 # 端到端冒烟测试：用docker compose拉起一整套一次性的系统(contract-api、contract-engine、MySQL、Redis、
-# Kafka)，跑带e2e构建标签的测试，结束后不管成败都把环境删掉。发布前跑一次，不要放进日常测试——
+# Kafka)，跑带e2e构建标签的测试，结束后不管成败都把环境删掉。本地开发不用每次都跑；CI每次push/PR都会跑——
 # 要构建镜像、起Kafka，冷启动约2到3分钟。依赖docker(compose v2)、go、curl、openssl、python3。
 #
 # 用法：make test-e2e

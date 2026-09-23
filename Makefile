@@ -36,7 +36,7 @@ test-integration:
 	./scripts/test-integration.sh
 
 # 端到端冒烟测试：docker compose拉起整套系统(含Kafka)，通过对外接口和WebSocket验证全链路，
-# 结束自动拆掉。冷启动要2到3分钟，发布前跑，不放进日常测试。E2E_KEEP=1保留环境排查
+# 结束自动拆掉。冷启动要2到3分钟，本地开发不用每次都跑；CI(.github/workflows/ci.yml)每次push/PR都会跑。E2E_KEEP=1保留环境排查
 test-e2e:
 	./scripts/e2e.sh
 

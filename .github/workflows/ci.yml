@@ -1,0 +1,82 @@
+# CI：跟本地`make`用的是同一套脚本，跑三层——格式/vet/单元测试、集成测试(真实MySQL+Redis)、
+# 端到端测试(docker compose拉起整套系统)。三个job互相独立、并行跑，任何一个失败整个workflow标红。
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+# 同一个分支/PR的新提交把还在跑的旧一次取消掉，不用排队等旧的跑完
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  build-and-unit:
+    name: 格式/vet/单元测试(race)
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: gofmt检查
+        run: |
+          out="$(gofmt -l .)"
+          if [ -n "$out" ]; then
+            echo "以下文件没有跑过gofmt："
+            echo "$out"
+            exit 1
+          fi
+
+      - name: go vet
+        run: go vet ./...
+
+      - name: go vet(integration构建标签)
+        run: go vet -tags integration ./...
+
+      - name: go vet(e2e构建标签)
+        run: go vet -tags e2e ./...
+
+      - name: 构建(含-race编译检查和三个二进制)
+        run: make build
+
+      - name: 单元测试(-race)
+        run: make test-race
+
+      - name: 模拟客户端页面脚本语法检查
+        run: node --check tools/sim-client/web/app.js
+
+  integration-test:
+    name: 集成测试(真实MySQL+Redis)
+    needs: build-and-unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: make test-integration
+        run: make test-integration
+
+  e2e-test:
+    name: 端到端测试(docker compose整套系统)
+    needs: build-and-unit
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+      - name: make test-e2e
+        run: make test-e2e

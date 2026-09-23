@@ -6,10 +6,14 @@
 |--------|-------------------------|-----------------------------------|------------------------------------------------------------------------|
 | 单元   | `make test`             | 无                                | 纯逻辑：撮合订单簿、签名/鉴权、参数解析、JSON格式、配置校验            |
 | 集成   | `make test-integration` | docker（自动拉容器）              | 碰数据库/Redis的逻辑：仓库的事务、引擎撮合前的检查、接口的完整处理链路 |
-| 端到端 | `make test-e2e`         | docker compose（整套系统含Kafka） | 通过对外接口和WebSocket验证全链路，发布前跑，不放进日常测试            |
+| 端到端 | `make test-e2e`         | docker compose（整套系统含Kafka） | 通过对外接口和WebSocket验证全链路，本地开发不用每次都跑，CI每次都跑    |
 
 普通的`go test ./...`只跑单元测试，速度快、不需要任何外部依赖。集成测试文件顶部有
 `//go:build integration`，不加标签编译不进去。
+
+## CI
+
+`.github/workflows/ci.yml`：push到`main`和对`main`的PR都会跑，三个job并行——`gofmt`检查、三种构建标签的`go vet`、`make build`、`make test-race`、模拟客户端页面的`node --check`；`make test-integration`；`make test-e2e`。跟本地用的是同一套Makefile/脚本，本地能跑通CI就能过。
 
 ## 跑集成测试
 
