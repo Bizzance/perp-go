@@ -126,6 +126,32 @@ func TestBuyingPower_NoPositionsBehaviorUnchanged(t *testing.T) {
 	}
 }
 
+// 回归：FreezeSpillToCredit的两个SET子句都要从"balance-frozen_margin"算起，但MySQL同一条
+// UPDATE里的SET子句按书写顺序从左到右求值，后面的子句会看到前面子句已经写入的新值——如果第二个
+// 子句重新算一遍GREATEST(balance-frozen_margin,0)，看到的frozen_margin已经被第一个子句加上了
+// avail_part，算出来的credit_part会变成完整的amount而不是"amount-avail_part"这个真正的缺口，
+// 等于把free balance的正数部分在credit那一侧又多锁了一遍。avail_part=0(free balance本来就是
+// 0或负数)时两种算法碰巧结果一样，只有free balance是一个刚好比amount小的正数时才会现出原形——
+// 上面这些用canFreeze的测试只关心冻结成不成功，随手拿返回值原样退回，从没检查过具体拆分对不对，
+// 这个场景之前完全没被测过
+func TestBuyingPower_FreezeSplitsAcrossBalanceAndCreditCorrectly(t *testing.T) {
+	e := newEngineEnv(t)
+	ctx := context.Background()
+	a := e.newAccount(t, 1, "18.9875")
+	e.setCredit(t, a, "498.375", true)
+
+	freeze, err := e.accounts.FreezeMargin(ctx, a, decimalOf(t, "400"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	mustDec(t, freeze.FromAvailable, "18.9875", "free balance的正数部分全部冻结")
+	mustDec(t, freeze.FromCredit, "381.0125", "缺口400-18.9875才从credit冻结，不是整笔400")
+
+	acc := e.account(t, a)
+	mustDec(t, acc.FrozenMargin, "18.9875", "balance那一侧只锁了它该锁的部分")
+	mustDec(t, acc.FrozenCredit, "381.0125", "credit那一侧不能被多锁")
+}
+
 // 多个仓位的浮盈亏合计：一个仓位赚、一个仓位亏，按合计算。BTC多头浮亏100，ETH多头浮盈30，合计-70
 func TestBuyingPower_UsesNetUnrealizedAcrossPositions(t *testing.T) {
 	e := newEngineEnv(t)

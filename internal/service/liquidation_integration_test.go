@@ -563,6 +563,117 @@ func TestLiquidation_AftermathCancelsOrdersPlacedDuringLiquidation(t *testing.T)
 	mustDec(t, e.fundLedgerAmount(t, "强平穿仓垫付"), "0", "没有穿仓，不应该垫付")
 }
 
+// ---- 完整的投保生命周期：强平 → 自动赔付信用额度 → 用赔付的额度继续开仓 → 再次强平 → 结束本轮 ----
+
+// 投保账户第一次强平自动拿到赔付信用额度，用赔付的额度(加上剩余余额)继续开一笔新仓位，
+// 再次触发强平——这次算出来的赔付金额跟第一次不一样，但GrantCredit的幂等键是
+// liq-insurance-{uid}-r{round}，同一轮内两次触发用的是同一个key，金额对不上会撞
+// ErrIdempotencyConflict(GrantCredit只按key去重，不是按key+金额)。checkAndLiquidate对这个
+// 错误只打ERROR日志、不会中断强平流程，也不会重复发钱或者把已经发出去的额度撤销——这是当前
+// 实现的真实行为，不是这个测试期望它"应该"这样，只是把这个边界记录下来。最后结束本轮，
+// 验证balance/credit/is_insured/round的收尾
+func TestLiquidation_InsuredCycle_TriggerPayoutReopenTriggerAgainThenCloseRound(t *testing.T) {
+	e := newEngineEnv(t)
+	ctx := context.Background()
+	a := e.newAccount(t, 1, "1000")
+	b := e.newAccount(t, 2, "10000")
+	c := e.newAccount(t, 3, "10000")
+	e.setCredit(t, a, "0", true) // 投保，credit=0起步
+
+	// ---- 第一次开仓+强平 ----
+	e.openLongAgainst(t, a, b, testSymbol, "65000", "0.1", "650")
+	mustDec(t, e.account(t, a).Balance, "996.75", "第一次开仓后的balance(1000-3.25手续费)")
+
+	e.setMark(t, testSymbol, "55250") // 权益=996.75+0.1*(55250-65000)=21.75<=199.35(投保阈值)，触发
+	e.liq.RiskScanOnce(ctx)
+	e.waitLiquidationDone(t, a, 0) // 没有穿仓，不涉及保险基金
+	// waitLiquidationDone只等仓位volume归零，不能保证这一笔结算(包括手续费扣款)已经完全落地——
+	// SettleFill内部是分开的几条SQL(平仓价盈亏、扣手续费、解锁保证金)，volume可能在手续费扣完
+	// 之前就已经归零，这里额外等balance到达最终值，避免读到手续费还没扣的中间状态
+	waitFor(t, "第一次强平的手续费结算完成", func() bool { return e.account(t, a).Balance.Equal(decimalOf(t, "18.9875")) })
+
+	acc1 := e.account(t, a)
+	mustDec(t, acc1.Balance, "18.9875", "第一次强平结算后balance(没有穿仓，留给用户)")
+	mustDec(t, acc1.Credit, "498.375", "触发时的投保赔付=(996.75+0)*50%")
+	if p := e.position(t, a, model.SideLong); p.Status != model.PositionStatusClosed || p.Volume.Sign() != 0 {
+		t.Fatalf("第一次强平后仓位应该清零, got %+v", p)
+	}
+	if round, insured := e.roundState(t, a); round != 1 || !insured {
+		t.Fatalf("还没结束本轮，round/投保状态不该变: round=%d insured=%v", round, insured)
+	}
+
+	// ---- 用赔付的信用额度+剩余余额继续开仓 ----
+	// 自由余额18.9875+自由信用额度498.375=517.3625，margin=400落在这个范围内，走
+	// FreezeMargin第2级路径(FreezeSpillToCredit)：18.9875从balance冻结、剩下381.0125从credit冻结
+	freeze, err := e.accounts.FreezeMargin(ctx, a, decimalOf(t, "400"))
+	if err != nil {
+		t.Fatalf("继续开仓冻结保证金失败: %v", err)
+	}
+	mustDec(t, freeze.FromAvailable, "18.9875", "冻结的balance部分(自由余额全部用上)")
+	mustDec(t, freeze.FromCredit, "381.0125", "缺口从credit冻结")
+
+	sell := e.insertOrder(t, c, orderOpts{side: model.SideShort, action: model.ActionOpen, price: "50000", amount: "0.08", margin: "400"})
+	if err := e.engine.SubmitOrder(ctx, sell, 10); err != nil {
+		t.Fatal(err)
+	}
+	now := time.Now().UnixMilli()
+	buy := &model.Order{
+		OrderID: e.id(), UID: a, Symbol: testSymbol, Side: model.SideLong, Action: model.ActionOpen,
+		Type: model.OrderTypeLimit, Price: decimalOf(t, "50000"), Amount: decimalOf(t, "0.08"),
+		Leverage: 10, FrozenMargin: freeze.FromAvailable, FrozenCredit: freeze.FromCredit,
+		Status: model.OrderStatusOpen, CreateTime: now, UpdateTime: now,
+	}
+	if err := e.orders.Insert(ctx, buy); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.engine.SubmitOrder(ctx, buy, 11); err != nil {
+		t.Fatal(err)
+	}
+	if got := e.order(t, buy.OrderID).Status; got != model.OrderStatusFilled {
+		t.Fatalf("继续开仓应该全部成交, status=%s", got)
+	}
+	acc2 := e.account(t, a)
+	// 开仓taker手续费=50000*0.08*0.0005=2，balance的自由部分18.9875够扣，不动credit
+	mustDec(t, acc2.Balance, "16.9875", "继续开仓后的balance(扣了2手续费)")
+	mustDec(t, acc2.Credit, "498.375", "继续开仓这一步只是冻结、没有结算，credit不变")
+	mustDec(t, acc2.FrozenMargin, "18.9875", "新仓位锁定的balance部分")
+	mustDec(t, acc2.FrozenCredit, "381.0125", "新仓位锁定的credit部分")
+
+	// ---- 再次触发强平 ----
+	// 权益=(16.9875+498.375)+0.08*(44800-50000)=515.3625-416=99.3625，投保阈值=515.3625*20%=
+	// 103.0725，99.3625<=103.0725触发
+	e.setMark(t, testSymbol, "44800")
+	e.liq.RiskScanOnce(ctx)
+	e.waitLiquidationDone(t, a, 0) // 没有穿仓(见下面最终断言balance=0而不是负数)
+	// 同样要等这一笔的手续费结算落地，不能只看volume归零，见上面第一次强平的注释——这次balance
+	// 在盈亏结算和手续费结算两步都会是0(credit全程够垫)，只有credit的最终值能分辨两步是否都做完
+	waitFor(t, "第二次强平的手续费结算完成", func() bool { return e.account(t, a).Credit.Equal(decimalOf(t, "97.5705")) })
+
+	acc3 := e.account(t, a)
+	mustDec(t, acc3.Balance, "0", "第二次强平结算后balance")
+	// 第二次触发按当时的(balance+credit)*50%算出来的赔付金额是515.3625*50%=257.68125，
+	// 跟第一次的reqId(liq-insurance-uid-r1)撞了幂等键、金额却对不上，GrantCredit返回
+	// ErrIdempotencyConflict(只打日志，不影响强平)：没有额外赔付，credit的变化只来自这次
+	// 平仓亏损本身按"先balance后credit"顺序吃掉的部分
+	mustDec(t, acc3.Credit, "97.5705", "第二次强平没有拿到新赔付，credit只是被这次的亏损/手续费正常吃掉")
+	if p := e.position(t, a, model.SideLong); p.Status != model.PositionStatusClosed || p.Volume.Sign() != 0 {
+		t.Fatalf("第二次强平后仓位应该清零, got %+v", p)
+	}
+	mustDec(t, e.fundBalance(t), "0", "两次强平都没有穿仓，保险基金全程不受影响")
+
+	// ---- 结束本轮 ----
+	if err := e.engine.CloseRound(ctx, a, 1); err != nil {
+		t.Fatalf("结束本轮: %v", err)
+	}
+	final := e.account(t, a)
+	mustDec(t, final.Balance, "0", "结束本轮balance清零(本来就是0)")
+	mustDec(t, final.Credit, "0", "结束本轮信用额度清零")
+	if round, insured := e.roundState(t, a); round != 2 || insured {
+		t.Fatalf("结束本轮后应该round+1、投保状态复位: round=%d insured=%v", round, insured)
+	}
+	mustDec(t, e.ledgerSum(t, a, model.TxRoundClose), "-97.5705", "结束本轮清零信用额度97.5705的流水(balance本来就是0，没有对应流水)")
+}
+
 // CancelAllPendingOrders本身：撤用户委托和条件单，强平单不撤(避免SubmitOrder里先结算后挂剩余量
 // 时留下数据库已撤销、订单簿还挂着的幽灵单)，别的账户不动
 func TestCancelAllPendingOrders_SkipsLiquidationOrdersAndOtherAccounts(t *testing.T) {

@@ -109,10 +109,17 @@ func (r *AccountRepo) FreezeSpillToCredit(ctx context.Context, id uint64, amount
 	}
 	defer conn.Close()
 
+	// 第二个SET子句故意引用@perpgo_avail_part(第一个子句刚赋的值)，不能重新写一遍
+	// GREATEST(balance - frozen_margin, 0)：MySQL同一条UPDATE里的SET子句按书写顺序从左到右
+	// 求值，第二个子句里的frozen_margin会看到第一个子句已经写入的新值(frozen_margin+avail_part)，
+	// 重新算一遍会把avail_part刚加上去的部分吃掉、算出balance-frozen_margin=0，导致credit_part
+	// 变成完整的amount而不是缺口部分——这是真实出现过的bug(avail_part=0时两种算法刚好凑巧
+	// 结果一样，只有avail_part>0时才会现出原形，历史测试从没覆盖到这个场景)，
+	// deductWithCreditFallback那条注释里提前警告过同一类陷阱
 	res, err := conn.ExecContext(ctx,
 		`UPDATE accounts SET
 			frozen_margin = frozen_margin + (@perpgo_avail_part := GREATEST(balance - frozen_margin, 0)),
-			frozen_credit = frozen_credit + (@perpgo_credit_part := (? - GREATEST(balance - frozen_margin, 0)))
+			frozen_credit = frozen_credit + (@perpgo_credit_part := (? - @perpgo_avail_part))
 		 WHERE id = ? AND (balance - frozen_margin) < ? AND GREATEST(balance - frozen_margin, 0) + (credit - frozen_credit) >= ?`,
 		amount, id, amount, amount)
 	if err != nil {
