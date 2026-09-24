@@ -3,7 +3,6 @@
 # 从deploy/.env里取第一把带ops权限的API密钥(页面上有充值、冻结这类运营操作)，后端端口取API_PORT/ENGINE_PORT。
 #
 # 用法：make sim-client                 # 先用 make compose-test-up 把系统拉起来
-#       make sim-client ARGS='-maker'   # 启动时就开启系统做市(镜像币安盘口)
 #       ENV_FILE=/path/to/.env make sim-client
 # 页面地址：http://127.0.0.1:8088，详见docs/sim-client.md
 set -euo pipefail

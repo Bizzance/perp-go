@@ -119,7 +119,7 @@ func premiumFromImpact(index, impactBid, impactAsk decimal.Decimal) decimal.Deci
 }
 
 // 记录这个symbol这一轮采样被跳过的原因(""=采样成功)，只在原因变化时打一条日志：采样每分钟一次，
-// 一个长期没有深度的合约(比如测试环境的做市停了)不能每分钟刷一条
+// 一个长期没有深度的合约(比如测试环境没开订单簿镜像)不能每分钟刷一条
 func (s *FundingService) noteSkip(symbol, reason string) {
 	s.mu.Lock()
 	prev := s.skipReason[symbol]

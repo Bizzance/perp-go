@@ -164,8 +164,7 @@ function renderTicker() {
     `<div><span>24h 涨跌</span><b class="${chg === null ? '' : signCls(chg)}">${chg === null ? '-' : (chg > 0 ? '+' : '') + chg.toFixed(2) + '%'}</b></div>` +
     `<div><span>24h 最高/最低</span><b>${px(t.high24h)} / ${px(t.low24h)}</b></div>` +
     `<div><span>24h 成交量</span><b>${num(t.volume24h, 3)}</b></div>` +
-    `<div><span>预估资金费率 / 倒计时</span><b>${f.estimatedRate === undefined ? '-' : (Number(f.estimatedRate) * 100).toFixed(4) + '%'} / ${countdown}</b></div>` +
-    scenarioBadge();
+    `<div><span>预估资金费率 / 倒计时</span><b>${f.estimatedRate === undefined ? '-' : (Number(f.estimatedRate) * 100).toFixed(4) + '%'} / ${countdown}</b></div>`;
 }
 async function refreshDepth() {
   const d = data(await engine('/depth?symbol=' + state.symbol + '&levels=20', { quiet: true }), null);
@@ -656,62 +655,6 @@ $('opsInsuredBtn').addEventListener('click', async () => { if (needUid()) { awai
 $('opsRoundClose').addEventListener('click', async () => { if (needUid() && state.account) { await api('POST', '/account/round/close', { uid: state.uid, round: state.account.round }, { write: true }); setTimeout(refreshAccount, 1500); } });
 $('opsIndexBtn').addEventListener('click', async () => { await api('POST', '/index-price', { symbol: state.symbol, price: $('opsIndex').value.trim() }, { write: true, ops: true }); refreshTicker(); });
 
-// ---------- 系统做市(币安行情) ----------
-const maker = { available: false, status: null };
-// 当前合约的行情相对币安的偏移(百分点)，没有偏移返回0
-function currentOffset() {
-  const s = maker.status && (maker.status.symbols || []).find((x) => x.symbol === state.symbol);
-  return s ? Number(s.offsetPct) : 0;
-}
-function scenarioBadge() {
-  const off = currentOffset();
-  return off ? `<div><span>行情情景</span><b class="offset">${off > 0 ? '+' : ''}${num(off, 2)}% 偏移</b></div>` : '';
-}
-async function refreshMaker() {
-  let r;
-  try { r = await (await fetch('/sim/maker', { headers: { 'X-Sim-Client': '1' } })).json(); } catch { return; }
-  maker.available = !!r.available; maker.status = r.status || null;
-  renderMaker();
-}
-function renderMaker() {
-  const pill = $('makerPill'), box = $('makerBox'), toggle = $('makerToggle');
-  if (!maker.available) { pill.textContent = '做市: 不可用'; pill.classList.add('off'); box.innerHTML = '<span class="muted">没有配置币安行情地址(-binance-url)</span>'; toggle.disabled = true; $('makerReset').disabled = true; return; }
-  const s = maker.status || {};
-  pill.textContent = s.enabled ? '做市: 开' : '做市: 关';
-  pill.classList.toggle('off', !s.enabled);
-  toggle.textContent = s.enabled ? '关闭做市' : '开启做市';
-  const lines = (s.symbols || []).map((x) => `${x.symbol} 币安 ${num(x.binanceBid, 2)}/${num(x.binanceAsk, 2)} → 我们 ${num(x.ourBestBid, 2)}/${num(x.ourBestAsk, 2)} · 挂单 ${x.liveBids}买 ${x.liveAsks}卖${x.lastPrintPrice ? ' · 对敲价 ' + num(x.lastPrintPrice, 2) : ''}`);
-  const err = s.lastError ? `<div class="err">最近错误 (${fmtClock(s.errorAt)}): ${esc(s.lastError)}</div>` : '';
-  renderScenario();
-  box.innerHTML = (s.enabled ? '' : '<div class="muted">已关闭：系统在订单簿里的挂单已撤掉</div>') + lines.map(esc).join('<br>') + (s.enabled ? `<div class="muted">已刷新 ${s.cycles} 轮 · 系统账户 uid ${(s.uids || []).join(' / ')}</div>` : '') + err;
-}
-function renderScenario() {
-  const s = maker.status || {};
-  const box = $('scenarioBox');
-  if (!s.enabled) { box.innerHTML = '<span class="muted">需要先开启做市</span>'; return; }
-  const target = Number(s.targetPct || 0);
-  const rows = (s.symbols || []).map((x) => `${x.symbol} 当前偏移 ${num(x.offsetPct, 2)}%`);
-  const moving = (s.symbols || []).some((x) => Number(x.offsetPct) !== target);
-  box.innerHTML = `目标偏移 <b>${target > 0 ? '+' : ''}${num(target, 2)}%</b>${moving ? ' <span class="muted">(推进中，每2秒最多1个百分点)</span>' : ''}<br>${rows.map(esc).join('<br>')}`;
-}
-async function setOffset(pct) {
-  const r = await (await fetch('/sim/maker/offset?pct=' + encodeURIComponent(pct), { method: 'POST', headers: { 'X-Sim-Client': '1' } })).json();
-  if (r.code && r.code !== 200) toast('设置失败', r.message, true);
-  else toast('行情情景', Number(pct) === 0 ? '回到币安价格(逐步推进)' : `目标偏移 ${pct}% (逐步推进)`);
-  refreshMaker();
-}
-$('scnBtns').addEventListener('click', (e) => { const b = e.target.closest('button'); if (b) setOffset(b.dataset.pct); });
-$('scnBtn').addEventListener('click', () => { const v = $('scnPct').value.trim(); if (v) setOffset(v); });
-async function makerAction(name) {
-  const r = await (await fetch('/sim/maker/' + name, { method: 'POST', headers: { 'X-Sim-Client': '1' } })).json();
-  if (r.code && r.code !== 200) toast('操作失败', r.message, true);
-  else toast('成功', { start: '做市已开启', stop: '做市已关闭，挂单已撤', reset: '系统账户已重置' }[name]);
-  refreshMaker();
-}
-$('makerToggle').addEventListener('click', () => makerAction(maker.status && maker.status.enabled ? 'stop' : 'start'));
-$('makerReset').addEventListener('click', () => makerAction('reset'));
-$('makerPill').addEventListener('click', () => $('drawer').classList.remove('hidden'));
-
 // ---------- WebSocket ----------
 function wantedChannels() {
   const s = new Set([`depth:${state.symbol}`, `trade:${state.symbol}`, `kline:${state.symbol}:${state.interval}`, `markprice:${state.symbol}`]);
@@ -797,8 +740,6 @@ async function init() {
   connectWS();
   await loadSymbol();
   // WS不保证绝对不丢消息，定期用REST校准(接口文档的建议)；WS断了的时候靠它兜底
-  refreshMaker();
-  setInterval(refreshMaker, 3000);
   setInterval(() => { refreshAccount(); refreshTicker(); if (!state.wsReady) { refreshDepth(); refreshTrades(); } loadTab(); }, 5000);
   setInterval(renderTicker, 1000);
 }

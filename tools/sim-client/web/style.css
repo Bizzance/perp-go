@@ -32,10 +32,6 @@ input:focus, select:focus { outline: none; border-color: var(--accent); }
 .ticker span { font-size: 11px; color: var(--muted); }
 .ticker b { font-family: var(--mono); font-size: 13px; font-weight: 600; }
 .ticker .big { font-size: 20px; }
-.pill { border-radius: 12px; padding: 2px 10px; font-size: 12px; border-color: var(--buy); color: var(--buy); background: var(--buy-bg); }
-.pill.off { border-color: var(--line); color: var(--muted); background: transparent; }
-.maker-box { font-size: 12px; font-family: var(--mono); background: #0e1217; border: 1px solid var(--line); border-radius: 4px; padding: 8px; margin-bottom: 8px; line-height: 1.7; }
-.maker-box .err { color: var(--sell); white-space: normal; }
 .dot { width: 8px; height: 8px; border-radius: 50%; display: inline-block; background: var(--buy); }
 .dot.off { background: var(--sell); }
 
@@ -104,8 +100,6 @@ td.num { text-align: right; }
 .drawer-head { display: flex; justify-content: space-between; align-items: center; padding: 10px 12px; border-bottom: 1px solid var(--line); }
 .drawer-body { padding: 10px 12px; overflow: auto; flex: 1; }
 .drawer h4 { margin: 14px 0 6px; }
-.scn-btns { display: flex; gap: 6px; flex-wrap: wrap; margin-bottom: 8px; }
-.ticker .offset { color: var(--accent); }
 .ops-grid label.check { display: flex; flex-direction: row; align-items: center; gap: 6px; }
 .ops-grid label.check input { width: auto; }
 .ops-grid { display: grid; grid-template-columns: 1fr auto; gap: 6px 8px; align-items: center; }

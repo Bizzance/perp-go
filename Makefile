@@ -41,7 +41,7 @@ test-e2e:
 	./scripts/e2e.sh
 
 # 模拟客户端：内部测试用的交易页面(http://127.0.0.1:8088)，扮演合作方的后端对接我们的系统，可以在页面上
-# 交易、看盘口和K线、做运营操作，还能接币安行情做系统做市。先用compose-test-up把系统拉起来，详见docs/sim-client.md
+# 交易、看盘口和K线、做运营操作。先用compose-test-up把系统拉起来，详见docs/sim-client.md
 sim-client:
 	./scripts/sim-client.sh
 

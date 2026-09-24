@@ -139,7 +139,8 @@
 里加一把 `booksync:<secret>:ops`，再把同一个id和secret填到`BOOKSYNC_API_KEY_ID`、`BOOKSYNC_API_SECRET`。进程不监听端口，
 靠日志和`restart: unless-stopped`。
 
-测试环境默认不开镜像：模拟客户端的做市（[sim-client.md](sim-client.md)）也会往订单簿里挂币安的盘口，**两者用同一段系统账户uid，不能同时跑**。
+测试环境默认不开镜像（`PERP_MIRROR_SYMBOLS`留空）：只有一个用户时订单簿是空的，下单没有对手方。想在测试环境验证
+镜像/交易，按上面"配置"一节设置`PERP_MIRROR_SYMBOLS`。
 
 ## 日志
 

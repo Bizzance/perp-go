@@ -25,7 +25,7 @@ U本位永续合约交易系统，MVP阶段。文档按主题拆分，方便单�
 - [api.md](api.md) —— HTTP接口说明（合作方对接文档：约定、错误码、每个接口的请求/响应）
 - [idempotency.md](idempotency.md) —— 接口幂等性：哪些接口需要、`requestId`/`round`怎么做、业界方案对比
 - [auth-design.md](auth-design.md) —— 接口鉴权：API Key + HMAC 签名协议、权限范围、对接示例
-- [sim-client.md](sim-client.md) —— 模拟客户端：内部测试用的交易页面，接币安行情做系统做市，用户的对手方是系统
+- [sim-client.md](sim-client.md) —— 模拟客户端：内部测试用的交易页面，扮演合作方后端接入contract-api
 - [testing.md](testing.md) —— 测试：单元/集成两层怎么跑、隔离方式、夹具、怎么写新的集成测试
 - [known-limitations.md](known-limitations.md) —— 已知限制、明确排除项、下一步计划
 

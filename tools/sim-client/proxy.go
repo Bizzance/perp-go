@@ -18,7 +18,6 @@ import (
 	"time"
 
 	"github.com/gorilla/websocket"
-	"github.com/shopspring/decimal"
 
 	"perp-go/internal/api"
 )
@@ -40,31 +39,10 @@ type server struct {
 	signer      signer // 主密钥(ops)：没配trade密钥时所有请求都用它
 	tradeSigner signer // trade密钥，keyID为空表示没配
 	client      *http.Client
-	maker       *maker // 没配币安地址时为nil
 }
 
 func newServer(cfg config) *server {
-	s := &server{cfg: cfg, signer: signer{keyID: cfg.keyID, secret: cfg.secret}, tradeSigner: signer{keyID: cfg.tradeKeyID, secret: cfg.tradeSecret}, client: &http.Client{Timeout: 20 * time.Second, CheckRedirect: noRedirect}}
-	if cfg.binanceURL != "" {
-		mc := defaultMakerConfig()
-		if cfg.makerSymbols != "" {
-			mc.symbols = strings.Split(cfg.makerSymbols, ",")
-		}
-		if cfg.makerBaseUID != 0 {
-			mc.baseUID = cfg.makerBaseUID
-		}
-		if cfg.makerLevels > 0 {
-			mc.levels = cfg.makerLevels
-		}
-		if sc, err := decimal.NewFromString(cfg.makerScale); err == nil && sc.Sign() > 0 {
-			mc.scale = sc
-		}
-		if cfg.makerInterval > 0 {
-			mc.interval = cfg.makerInterval
-		}
-		s.maker = newMaker(mc, &apiClient{base: cfg.apiURL, signer: s.signer, http: &http.Client{Timeout: 15 * time.Second, CheckRedirect: noRedirect}}, newBinanceClient(cfg.binanceURL))
-	}
-	return s
+	return &server{cfg: cfg, signer: signer{keyID: cfg.keyID, secret: cfg.secret}, tradeSigner: signer{keyID: cfg.tradeKeyID, secret: cfg.tradeSecret}, client: &http.Client{Timeout: 20 * time.Second, CheckRedirect: noRedirect}}
 }
 
 // 这次请求用哪把密钥签名：页面标了ops的用主密钥；否则配置了trade密钥就用它，没配就还是主密钥
@@ -84,8 +62,6 @@ func (s *server) routes() http.Handler {
 	mux.Handle("/engine/", s.guard(s.forward(s.cfg.engineURL, "/engine")))
 	mux.Handle("/ws", s.guardWS(http.HandlerFunc(s.ws)))
 	mux.Handle("/sim/config", s.guard(http.HandlerFunc(s.simConfig)))
-	mux.Handle("/sim/maker", s.guard(http.HandlerFunc(s.makerStatus)))
-	mux.Handle("/sim/maker/", s.guard(http.HandlerFunc(s.makerAction)))
 	sub, err := fs.Sub(webFS, "web")
 	if err != nil {
 		log.Fatal(err)
@@ -229,51 +205,9 @@ func writeJSON(w http.ResponseWriter, status int, v any) {
 
 func (s *server) simConfig(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, map[string]any{
-		"authEnabled":    s.cfg.keyID != "",
-		"apiURL":         s.cfg.apiURL,
-		"makerAvailable": s.maker != nil,
+		"authEnabled": s.cfg.keyID != "",
+		"apiURL":      s.cfg.apiURL,
 	})
-}
-
-// ---- 系统做市的开关和状态 ----
-
-func (s *server) makerStatus(w http.ResponseWriter, r *http.Request) {
-	if s.maker == nil {
-		writeJSON(w, http.StatusOK, map[string]any{"available": false})
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"available": true, "status": s.maker.snapshot()})
-}
-
-func (s *server) makerAction(w http.ResponseWriter, r *http.Request) {
-	if s.maker == nil || r.Method != http.MethodPost {
-		http.Error(w, "not available", http.StatusNotFound)
-		return
-	}
-	switch strings.TrimPrefix(r.URL.Path, "/sim/maker/") {
-	case "start":
-		s.maker.start()
-	case "stop":
-		s.maker.stop()
-	case "offset":
-		pct, err := decimal.NewFromString(r.URL.Query().Get("pct"))
-		if err == nil {
-			err = s.maker.setTarget(pct)
-		}
-		if err != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"code": 400, "message": err.Error()})
-			return
-		}
-	case "reset":
-		if err := s.maker.reset(); err != nil {
-			writeJSON(w, http.StatusOK, map[string]any{"code": 500, "message": err.Error()})
-			return
-		}
-	default:
-		http.NotFound(w, r)
-		return
-	}
-	writeJSON(w, http.StatusOK, map[string]any{"code": 200, "status": s.maker.snapshot()})
 }
 
 // ---- WebSocket中继 ----

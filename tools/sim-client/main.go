@@ -30,15 +30,6 @@ type config struct {
 	keyID       string
 	secret      string
 	allowRemote bool
-
-	// 系统做市(用币安行情当价格源)，见maker.go
-	binanceURL    string
-	makerAuto     bool
-	makerSymbols  string
-	makerBaseUID  uint64
-	makerLevels   int
-	makerScale    string
-	makerInterval time.Duration
 }
 
 func envOr(name, def string) string {
@@ -57,13 +48,6 @@ func loadConfig() config {
 	flag.StringVar(&c.secret, "key-secret", envOr("SIM_KEY_SECRET", ""), "API Key的secret")
 	flag.StringVar(&c.tradeKeyID, "trade-key-id", envOr("SIM_TRADE_KEY_ID", ""), "只有trade权限的API Key的id：设了以后交易类请求用它签名、页面标了运营的请求用key-id那把(ops)，跟合作方的用法一致；留空=所有请求都用key-id那把")
 	flag.StringVar(&c.tradeSecret, "trade-key-secret", envOr("SIM_TRADE_KEY_SECRET", ""), "trade密钥的secret")
-	flag.StringVar(&c.binanceURL, "binance-url", envOr("SIM_BINANCE_URL", "https://fapi.binance.com"), "币安USDⓈ-M合约公共行情的地址，留空=不提供系统做市")
-	flag.BoolVar(&c.makerAuto, "maker", envOr("SIM_MAKER", "") == "1", "启动时就开启系统做市(也可以在页面上开关)")
-	flag.StringVar(&c.makerSymbols, "maker-symbols", envOr("SIM_MAKER_SYMBOLS", "BTCUSDT,ETHUSDT"), "做市的合约，逗号分隔，必须是币安上也有的合约名")
-	flag.Uint64Var(&c.makerBaseUID, "maker-uid-base", 9000000, "系统账户的uid起点，占用连续4个")
-	flag.IntVar(&c.makerLevels, "maker-levels", 12, "每侧挂多少个价格档")
-	flag.StringVar(&c.makerScale, "maker-scale", "1", "币安数量乘以这个系数得到我们挂的数量")
-	flag.DurationVar(&c.makerInterval, "maker-interval", 2*time.Second, "做市刷新间隔")
 	flag.BoolVar(&c.allowRemote, "allow-remote", false, "允许监听非回环地址(默认拒绝：这个代理持有ops密钥，谁连上来谁就能加钱扣钱)")
 	flag.Parse()
 	return c
@@ -106,18 +90,11 @@ func main() {
 	}
 
 	s := newServer(cfg)
-	if cfg.makerAuto && s.maker != nil {
-		s.maker.start()
-		log.Printf("系统做市已开启(币安=%s，合约=%s)", cfg.binanceURL, cfg.makerSymbols)
-	}
 	srv := &http.Server{Addr: cfg.listen, Handler: s.routes(), ReadHeaderTimeout: 10 * time.Second}
 	ctx, stop := signal.NotifyContext(context.Background(), syscall.SIGINT, syscall.SIGTERM)
 	defer stop()
 	go func() {
 		<-ctx.Done()
-		if s.maker != nil {
-			s.maker.stop() // 退出前撤掉系统在订单簿里的挂单，不留过期报价
-		}
 		shutdownCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 		_ = srv.Shutdown(shutdownCtx)

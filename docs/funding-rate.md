@@ -58,7 +58,7 @@ boundary := (now / intervalMs) * intervalMs
 - `funding_impact_notional`要**小于**盘口两侧各自的深度，按合约调（`UPDATE coins SET funding_impact_notional = ? WHERE symbol = ?`，
   下一轮采样生效）；配成0表示这个合约不采样
 - 采样被跳过时每个合约只在原因变化时打一条`[WARN] 资金费率采样被跳过`（恢复时打`[INFO] 资金费率采样恢复`），
-  不会每分钟刷屏；测试环境做市停了盘口是空的，看到这条是正常的
+  不会每分钟刷屏；测试环境没开订单簿镜像时盘口是空的，看到这条是正常的
 - 已经建过库的环境需要重建库才有这一列（见 [architecture.md](architecture.md)"数据库"一节）
 
 ## 结算顺序：先落审计记录，再转账

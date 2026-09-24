@@ -12,7 +12,6 @@
   <select id="symbol" title="合约"></select>
   <div class="ticker" id="ticker"></div>
   <div class="spacer"></div>
-  <button id="makerPill" class="pill off" title="系统做市(镜像币安盘口)，点击打开详情">做市: -</button>
   <span id="wsDot" class="dot off"></span><span id="wsText" class="muted">WS 未连接</span>
   <button id="btnOps" class="ghost">运营 / API 日志</button>
 </header>
@@ -108,16 +107,6 @@
     <button id="btnCloseDrawer" class="ghost">关闭</button>
   </div>
   <div class="drawer-body">
-    <h4>系统做市 <span class="muted">(用币安行情，用户的对手方是系统)</span></h4>
-    <div id="makerBox" class="maker-box"><span class="muted">未启用</span></div>
-    <div class="row gap"><button id="makerToggle">开启做市</button><button id="makerReset" title="停掉做市，结束本轮：按标记价平掉系统账户累积的全部仓位">重置系统账户</button></div>
-    <h4>行情情景 <span class="muted">(在币安价格之上叠加偏移，测试强平、盈亏)</span></h4>
-    <div id="scenarioBox" class="maker-box"><span class="muted">需要先开启做市</span></div>
-    <div class="scn-btns" id="scnBtns">
-      <button data-pct="-1">-1%</button><button data-pct="-5">-5%</button><button data-pct="-10">-10%</button>
-      <button data-pct="5">+5%</button><button data-pct="10">+10%</button><button data-pct="0" class="ghost">回到币安价</button>
-    </div>
-    <div class="ops-grid"><input id="scnPct" placeholder="自定义偏移 %，如 -7.5" inputmode="decimal"><button id="scnBtn">设置</button></div>
     <h4>账户运营 <span class="muted">(需要 ops 密钥)</span></h4>
     <div class="ops-grid">
       <input id="opsReason" placeholder="冻结原因(可选)">
