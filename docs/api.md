@@ -671,8 +671,8 @@ GET /order/detail?uid=10001&requestId=order-20260919-0001
     "priceTick": "0.1", "volumeStep": "0.001", "minVolume": "0.001", "maxVolume": "0",
     "fundingIntervalHours": 8, "fundingRateCap": "0.0075", "fundingImpactNotional": "10000", "priceProtectionRatio": "0.05",
     "tiers": [
-      { "symbol": "BTCUSDT", "tier": 1, "maxNotional": "50000", "maintenanceMarginRate": "0.004", "maintenanceAmount": "0", "maxLeverage": 125 },
-      { "symbol": "BTCUSDT", "tier": 2, "maxNotional": "250000", "maintenanceMarginRate": "0.005", "maintenanceAmount": "50", "maxLeverage": 100 }
+      { "symbol": "BTCUSDT", "tier": 1, "maxNotional": "300000", "maintenanceMarginRate": "0.004", "maintenanceAmount": "0", "maxLeverage": 150 },
+      { "symbol": "BTCUSDT", "tier": 2, "maxNotional": "800000", "maintenanceMarginRate": "0.005", "maintenanceAmount": "300", "maxLeverage": 100 }
     ]
   }
 }

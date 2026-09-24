@@ -25,7 +25,7 @@ type MirrorConfig struct {
 	Symbols  []string
 	Levels   int           // 每侧镜像币安盘口的前多少档
 	Interval time.Duration // 每一轮的间隔
-	Leverage int           // 镜像挂单的杠杆。全部保证金分档里最低的最大杠杆是5，用5在哪个档位都不会被拒
+	Leverage int           // 镜像挂单的杠杆。默认5倍，覆盖risk_limit_tiers里前面绝大多数档位(名义价值到数千万USDT才会降到5倍以下)，镜像挂单单档的名义价值远够不到那个量级
 	// 币安数据超过这么久没拉成功，就撤掉这个合约的全部镜像挂单、暂停报价：过期的报价留在订单簿里，
 	// 谁比我们更早看到币安的价格，谁就能按旧价成交
 	StaleAfter time.Duration
