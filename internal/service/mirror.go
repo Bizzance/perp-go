@@ -226,15 +226,38 @@ func (m *MirrorService) syncLadders(ctx context.Context, sym string, bids, asks 
 	cancelBids, placeBids := binancefeed.Plan(bids, existingBids)
 	cancelAsks, placeAsks := binancefeed.Plan(asks, existingAsks)
 
-	for _, p := range placeBids {
-		if err := m.placeOrder(ctx, sym, model.SideLong, p); err != nil {
-			return fmt.Errorf("挂买单失败, symbol=%s price=%s: %w", sym, p.Price, err)
+	// 买卖两边并发挂单，不要串行：串行的话一侧要等另一侧全部挂完才开始挂，冷启动时每侧有几十档，
+	// 页面会先看到一侧、隔好一会儿才看到另一侧——每笔挂单只要真的挂进订单簿就会实时推一次深度快照
+	// (EngineService.submitOrder)。两个goroutine挂的是同一个symbol的不同side，NextID()全程持锁、
+	// matching.Book自己的锁序列化真正的撮合/挂单、FreezeUnconditional是一条原子的UPDATE，
+	// 并发是安全的，见本文件顶部doc注释
+	var wg sync.WaitGroup
+	var bidErr, askErr error
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		for _, p := range placeBids {
+			if err := m.placeOrder(ctx, sym, model.SideLong, p); err != nil {
+				bidErr = fmt.Errorf("挂买单失败, symbol=%s price=%s: %w", sym, p.Price, err)
+				return
+			}
 		}
+	}()
+	go func() {
+		defer wg.Done()
+		for _, p := range placeAsks {
+			if err := m.placeOrder(ctx, sym, model.SideShort, p); err != nil {
+				askErr = fmt.Errorf("挂卖单失败, symbol=%s price=%s: %w", sym, p.Price, err)
+				return
+			}
+		}
+	}()
+	wg.Wait()
+	if bidErr != nil {
+		return bidErr
 	}
-	for _, p := range placeAsks {
-		if err := m.placeOrder(ctx, sym, model.SideShort, p); err != nil {
-			return fmt.Errorf("挂卖单失败, symbol=%s price=%s: %w", sym, p.Price, err)
-		}
+	if askErr != nil {
+		return askErr
 	}
 	byID := make(map[uint64]*model.Order, len(live))
 	for i := range live {
