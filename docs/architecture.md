@@ -24,10 +24,12 @@
 - **contract-engine**：消费Kafka里的下单/撤单事件，维护每个symbol一个内存订单簿（价格-时间
   优先），撮合成交后做结算（划保证金、结已实现盈亏、扣手续费），状态变化时顺手通过
   `internal/service.PushService`往Redis Pub/Sub发布（深度/成交/K线/标记价格/账户快照），
-  并且跑三个后台定时任务：
-    - 风控扫描（`RiskScanOnce`）：判断哪些账户需要强平
-    - 资金费率采样+结算（`SampleOnce` / `SettleIfDue`）
-    - 条件单触发扫描（`ConditionalOrderService.ScanOnce`）
+  并且跑几个后台任务：
+    - 风控扫描：标记价格变化时事件驱动触发（`LiquidationService.OnMarkPriceChanged`，主路径，
+      只查这个symbol上有仓位的账户），定时全量扫描兜底（`RiskScanOnce`，默认30秒一次），
+      见 [liquidation.md](liquidation.md)
+    - 资金费率采样+结算（`SampleOnce` / `SettleIfDue`，定时）
+    - 条件单触发扫描（`ConditionalOrderService.ScanOnce`，定时）
     - （撮合本身是事件驱动的，不是定时任务）
 
 币安订单簿的镜像做在contract-engine内部（`service.MirrorService`）：直接调用本进程的账户/撮合服务把币安深度镜像成

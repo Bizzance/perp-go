@@ -137,6 +137,16 @@ func main() {
 		fundSvc,
 		coinRepo,
 		cfg.LiquidationOrderTimeoutMs)
+	// 标记价格变化时：推送给订阅了markprice频道的客户端(不变)，同时触发这个symbol的事件驱动
+	// 强平扫描(新增，见LiquidationService.OnMarkPriceChanged)。MarkPriceService一次只能挂一个
+	// 回调，两件事必须在这一个函数里一起做——这也是为什么这行接线不放在NewEngineService内部
+	// (那时候liquidationSvc还没构造出来)。用context.Background()异步调用：这个回调本身是从
+	// 每笔成交结算的热路径(UpdateFromTrade)同步触发的，不能让强平扫描的MySQL查询拖慢结算延迟，
+	// 也不能用调用方传进来的、可能随请求结束就取消的ctx
+	markPriceSvc.OnChange(func(ctx context.Context, symbol string, mark decimal.Decimal) {
+		pushSvc.PublishMarkPrice(ctx, symbol, mark)
+		go liquidationSvc.OnMarkPriceChanged(context.Background(), symbol)
+	})
 	conditionalOrderSvc := service.NewConditionalOrderService(conditionalOrderRepo, orderRepo, markPriceSvc, engineSvc)
 
 	// 订单簿镜像：把币安的订单簿直接镜像成系统账户(service.UID，固定值不需要配置)在撮合引擎里的

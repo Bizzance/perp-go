@@ -1,9 +1,27 @@
 # 强平与保险基金
 
-## 触发条件：全仓联合强平
+## 什么时候检查强平：事件驱动为主，周期性全量扫描兜底
 
-`LiquidationService.RiskScanOnce`定时扫描全部有仓位的账户（`RiskScanIntervalMs`，默认2秒
-一次），判断标准：
+强平判断本身（`LiquidationService.checkAndLiquidate`）不关心是被谁触发的，但触发路径有两条：
+
+1. **`OnMarkPriceChanged`（主路径）**：标记价格变化时触发，只检查这个symbol上有仓位的账户
+   （`PositionRepo.FindOpenUIDsBySymbol`），不碰别的symbol、别的账户。真正会改变一个账户强平
+   判断结果的是"价格变了"，不是"时间过了"，这也是真实交易所风控引擎的常见做法：账户数再多，
+   一次价格变动要检查的范围也只跟"这个symbol的持仓人数"相关，不跟"全站用户数"相关。
+   接线在`cmd/contract-engine/main.go`：`MarkPriceService.OnChange`一次只能挂一个回调，
+   跟推送标记价格（`PushService.PublishMarkPrice`）合并在同一个回调里，异步调用（`go`+
+   `context.Background()`）——这个回调是从每笔成交结算的热路径（`UpdateFromTrade`）同步触发的，
+   不能让强平扫描的MySQL查询拖慢结算延迟。
+2. **`RiskScanOnce`（兜底路径）**：定时全量扫描全部有仓位的账户（`RiskScanIntervalMs`，默认
+   30秒一次），覆盖事件路径覆盖不到的场景——资金费率结算改了balance、运营发放信用额度/设置
+   投保状态这些不产生"标记价格变化"事件的动作，以及事件路径万一有遗漏。不再是主路径，所以
+   间隔可以调得比价格变化慢得多。
+
+两条路径最终都调同一个`checkAndLiquidate`，并且都用有限并发（`riskScanConcurrency`，默认16）
+处理一批uid，不是顺序一个个查——账户数一多，顺序处理的总耗时会显著拖慢强平判断的实际延迟，
+对交易所来说这是坏账风险，比接口慢严重得多。
+
+判断标准：
 
 ```
 账户权益 <= 维持保证金要求

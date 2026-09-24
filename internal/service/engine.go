@@ -56,9 +56,10 @@ func NewEngineService(
 			owned[s] = true
 		}
 	}
-	markPrice.OnChange(func(ctx context.Context, symbol string, mark decimal.Decimal) {
-		push.PublishMarkPrice(ctx, symbol, mark)
-	})
+	// markPrice.OnChange不在这里设置：MarkPriceService一次只能挂一个回调(见其OnChange注释)，
+	// 这里设的话LiquidationService.OnMarkPriceChanged(构造顺序在EngineService之后，依赖它)
+	// 没法再接上去，会覆盖掉。统一由cmd/contract-engine/main.go在两个服务都造好之后接一次，
+	// 把推送标记价格和触发事件驱动强平扫描合并成一个回调
 	return &EngineService{
 		matchingEngine:     matchingEngine,
 		orders:             orders,

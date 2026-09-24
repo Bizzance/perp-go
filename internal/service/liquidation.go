@@ -15,6 +15,23 @@ import (
 
 const protectPriceBufferMultiplier = 2 // 保护价滑点缓冲=维持保证金率的这个倍数，思路借鉴真实交易所"破产价附近留保护价"
 
+// 强平判断有两条触发路径，见docs/liquidation.md"什么时候检查强平"：
+//  1. 事件驱动(OnMarkPriceChanged，主路径)：标记价格变化时，只检查这个symbol上有仓位的账户——
+//     真正会改变强平判断结果的是价格变了，不是时间过了；检查范围也只是这个symbol的持仓人，
+//     账户数再多也不影响别的symbol，这是真实交易所风控引擎的常见做法
+//  2. 周期性全量扫描(RiskScanOnce，兜底)：事件路径覆盖不到的场景——资金费率结算改了balance、
+//     运营发放信用额度/设置投保状态、条件单触发这些不产生"标记价格变化"事件的动作，
+//     以及事件路径万一有遗漏(比如价格从来没变过、账户却因为其它原因跌破阈值)——间隔调宽到
+//     RiskScanIntervalMs(默认30秒)，因为不再是主路径，不需要跟价格变化一样快
+//
+// 两条路径共用checkAndLiquidate和下面这个有限并发的处理逻辑
+//
+// 并发处理的uid数上限：checkAndLiquidate每个uid要串行做几次MySQL查询+Redis调用，一次扫描的
+// uid一多，顺序处理一遍的总耗时会显著拖慢强平判断的实际延迟，对交易所来说这是坏账风险，
+// 比接口慢严重得多。改成有限并发：不同uid之间没有共享状态、互不依赖，可以放心并发；限流是
+// 为了不让一次扫描直接打满MySQL连接池(internal/db.go设的是20)，跟真实的下单/结算流量抢连接
+const riskScanConcurrency = 16
+
 type LiquidationService struct {
 	engine        *EngineService
 	orders        *repo.OrderRepo
@@ -69,23 +86,52 @@ func (s *LiquidationService) logStaleMark(symbol string) {
 	log.Printf("[ERROR] 标记价过期(指数价断供或没有喂过)，暂停这个合约相关账户的强平判断, symbol=%s", symbol)
 }
 
-// 全部有仓位的账户扫一遍
+// 周期性全量扫描：全部有仓位的账户扫一遍，是兜底路径，见riskScanConcurrency上面的注释
 func (s *LiquidationService) RiskScanOnce(ctx context.Context) {
 	uids, err := s.positions.FindAllOpenUIDs(ctx)
 	if err != nil {
 		log.Printf("[ERROR] risk scan: list uids failed: %v", err)
 		return
 	}
+	s.scanUIDs(ctx, uids, "risk scan")
+}
+
+// 事件驱动扫描：标记价格变化时调用(见cmd/contract-engine/main.go里markPrice.OnChange的接线)，
+// 只查这个symbol上有仓位的账户，不用像RiskScanOnce那样碰全部账户。这是主路径，调用方必须在
+// 单独的goroutine里调(不能同步调用)——标记价格重算发生在每笔成交结算的热路径上
+// (MarkPriceService.UpdateFromTrade)，这里免不了要做MySQL查询，同步调的话会拖慢结算延迟
+func (s *LiquidationService) OnMarkPriceChanged(ctx context.Context, symbol string) {
+	uids, err := s.positions.FindOpenUIDsBySymbol(ctx, symbol)
+	if err != nil {
+		log.Printf("[ERROR] risk scan(mark price changed) symbol=%s: list uids failed: %v", symbol, err)
+		return
+	}
+	s.scanUIDs(ctx, uids, "risk scan(mark price changed)")
+}
+
+// 两条触发路径共用：不同uid的强平判断彼此独立(各自的账户/仓位互不相干)，用有限并发
+// (riskScanConcurrency)处理，不然uid一多，顺序处理一遍的总耗时会显著拖慢强平判断的实际延迟
+func (s *LiquidationService) scanUIDs(ctx context.Context, uids []uint64, logPrefix string) {
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, riskScanConcurrency)
 	for _, uid := range uids {
 		if uid == UID {
 			// 系统账户(镜像挂单用)代表系统自己的资金，不受强平约束，见
 			// AccountService.FreezeMargin对这个uid的特殊路径
 			continue
 		}
-		if err := s.checkAndLiquidate(ctx, uid); err != nil {
-			log.Printf("[ERROR] risk scan uid=%d failed: %v", uid, err)
-		}
+		uid := uid
+		wg.Add(1)
+		sem <- struct{}{}
+		go func() {
+			defer wg.Done()
+			defer func() { <-sem }()
+			if err := s.checkAndLiquidate(ctx, uid); err != nil {
+				log.Printf("[ERROR] %s uid=%d failed: %v", logPrefix, uid, err)
+			}
+		}()
 	}
+	wg.Wait()
 }
 
 // 投保赔付：触发强平线时，按投保基准(账户当前balance+credit)的这个比例发放信用额度，
@@ -114,10 +160,7 @@ func (s *LiquidationService) checkAndLiquidate(ctx context.Context, uid uint64) 
 			return nil
 		}
 	}
-	totalUnrealized, err := s.positionSvc.TotalUnrealizedPnl(ctx, uid)
-	if err != nil {
-		return err
-	}
+	totalUnrealized := s.positionSvc.TotalUnrealizedPnlOf(ctx, positions)
 	// 账户权益见Equity：balance/credit是不随冻结变化的总额，已经包含了挂单冻结/仓位占用的
 	// 保证金，不需要再单独加一遍——加了反而是重复计算
 	equity := Equity(account, totalUnrealized)

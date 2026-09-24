@@ -135,6 +135,13 @@ func (s *PositionService) TotalUnrealizedPnl(ctx context.Context, uid uint64) (d
 	if err != nil {
 		return decimal.Zero, err
 	}
+	return s.TotalUnrealizedPnlOf(ctx, positions), nil
+}
+
+// 跟TotalUnrealizedPnl算的是同一个口径，但接收调用方已经查好的持仓列表，不再重新查一遍
+// FindByUID——LiquidationService.checkAndLiquidate风控扫描时前面已经为了查标记价新鲜度
+// 查过一次持仓，这里不需要为了算浮盈亏再查第二次，风控扫描对每个uid的查询次数直接减半
+func (s *PositionService) TotalUnrealizedPnlOf(ctx context.Context, positions []model.Position) decimal.Decimal {
 	total := decimal.Zero
 	for _, p := range positions {
 		if p.Volume.Sign() <= 0 {
@@ -146,7 +153,7 @@ func (s *PositionService) TotalUnrealizedPnl(ctx context.Context, uid uint64) (d
 		}
 		total = total.Add(p.UnrealizedPnl(mark))
 	}
-	return total, nil
+	return total
 }
 
 // 全部持仓占用的保证金之和(含来自信用额度的部分)，查询接口用于展示——这笔钱一直锁在

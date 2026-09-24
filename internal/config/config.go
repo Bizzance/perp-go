@@ -23,7 +23,10 @@ type Config struct {
 
 	// 撮合/风控相关的可调参数，先用固定默认值
 	LiquidationOrderTimeoutMs int64 // 强平单挂单排队超时兜底阈值
-	RiskScanIntervalMs        int64 // 强平扫描周期
+	// 周期性全量风控扫描的间隔——现在只是兜底路径，主路径是标记价格变化时的事件驱动扫描
+	// (LiquidationService.OnMarkPriceChanged)，不需要跟价格变化一样快，见liquidation.go
+	// riskScanConcurrency的注释
+	RiskScanIntervalMs        int64
 	MarkPriceRefreshMs        int64 // 标记价定时刷新周期(采盘口基差、按最新指数价重算)
 	FundingSampleIntervalMs   int64 // 资金费率溢价采样周期，采样越密集TWAP越准
 	ConditionalScanIntervalMs int64 // 条件单(止盈止损)触发扫描周期
@@ -214,7 +217,7 @@ func Load(defaultNodeID uint64) Config {
 		NodeID:                    nodeID,
 		NodeIDExplicit:            nodeIDExplicit,
 		LiquidationOrderTimeoutMs: 10_000,
-		RiskScanIntervalMs:        2_000,
+		RiskScanIntervalMs:        30_000,
 		MarkPriceRefreshMs:        1_000,
 		FundingSampleIntervalMs:   60_000,
 		ConditionalScanIntervalMs: 2_000,

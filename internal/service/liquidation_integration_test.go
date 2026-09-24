@@ -4,6 +4,7 @@ package service_test
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
@@ -131,6 +132,65 @@ func TestLiquidation_FullyUsedPositionIsNotLiquidatedWithoutPriceMove(t *testing
 	if n := len(e.liquidationOrders(t, a)); n != 0 {
 		t.Fatalf("不应该有强平委托, got %d", n)
 	}
+}
+
+// 回归：RiskScanOnce现在用有限并发处理不同uid(见riskScanConcurrency)，不再是一个个顺序处理——
+// 这里一次扫描同时命中一批互不相干的账户，验证各自都能正确强平、互不干扰，不是靠制造竞态去测，
+// 而是最直接地验证"并发改造没有把不同uid的处理串到一起"
+func TestLiquidation_RiskScanHandlesMultipleAccountsConcurrently(t *testing.T) {
+	e := newEngineEnv(t)
+	ctx := context.Background()
+	const n = 20
+	counterparty := e.newAccount(t, 100, "1000000")
+	uids := make([]uint64, n)
+	for i := 0; i < n; i++ {
+		uids[i] = e.newAccount(t, uint64(i+1), "1000")
+		e.openLongAgainst(t, uids[i], counterparty, testSymbol, "65000", "0.1", "650")
+	}
+	// 未投保，阈值0：标记价55030时权益-0.25<=0，全部触发，见TestLiquidation_TriggerBoundary_Uninsured
+	e.setMark(t, testSymbol, "55030")
+
+	e.liq.RiskScanOnce(ctx)
+
+	for _, uid := range uids {
+		waitFor(t, fmt.Sprintf("uid=%d挂出强平委托", uid), func() bool { return len(e.liquidationOrders(t, uid)) == 1 })
+	}
+	for _, uid := range uids {
+		e.waitLiquidationDone(t, uid, 0)
+		if p := e.position(t, uid, model.SideLong); p.Status != model.PositionStatusClosed || p.Volume.Sign() != 0 {
+			t.Fatalf("uid=%d仓位应该清零, got %+v", uid, p)
+		}
+	}
+}
+
+// 回归：验证cmd/contract-engine/main.go那种"标记价格变化时触发事件驱动强平扫描"的接线方式
+// 本身是正确的。不直接调LiquidationService.OnMarkPriceChanged，而是照main.go的接线方式把它
+// 挂到MarkPriceService.OnChange上，通过真实改变标记价格（SetIndexPrice+Refresh，走真正的
+// recompute路径）来触发——不是像别的测试那样用setMark绕开OnChange直接写Redis。全程不调用
+// RiskScanOnce，仓位如果被强平，只能是这个事件驱动路径起的作用
+func TestLiquidation_MarkPriceChangeTriggersLiquidationViaOnChangeHook(t *testing.T) {
+	e := newEngineEnv(t)
+	ctx := context.Background()
+	a := e.newAccount(t, 1, "1000")
+	b := e.newAccount(t, 2, "10000")
+	e.openLongAgainst(t, a, b, testSymbol, "65000", "0.1", "650")
+
+	// 照main.go的接线方式接上事件驱动扫描(生产代码里这里还会同时推PublishMarkPrice，这里只需要
+	// 验证强平这一半)
+	e.markPrice.OnChange(func(ctx context.Context, symbol string, _ decimal.Decimal) {
+		e.liq.OnMarkPriceChanged(ctx, symbol)
+	})
+
+	// 未投保阈值0：标记价55030时权益-0.25<=0触发，见TestLiquidation_TriggerBoundary_Uninsured
+	if err := e.markPrice.SetIndexPrice(ctx, testSymbol, decimalOf(t, "55030")); err != nil {
+		t.Fatal(err)
+	}
+	if err := e.markPrice.Refresh(ctx, testSymbol, decimal.Zero, decimal.Zero); err != nil {
+		t.Fatal(err)
+	}
+
+	waitFor(t, "标记价格变化应该触发强平委托", func() bool { return len(e.liquidationOrders(t, a)) == 1 })
+	e.waitLiquidationDone(t, a, 1)
 }
 
 // ---- 触发边界：维持保证金要求现在是"账户当前balance+credit亏损达到固定比例"——投保保的是

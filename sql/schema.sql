@@ -144,7 +144,13 @@ CREATE TABLE IF NOT EXISTS conditional_orders (
 ) ENGINE=InnoDB;
 
 -- 持仓：全仓保证金，一个(uid,symbol,side)一行。idx_positions_symbol供资金费率结算按symbol
--- 批量查仓位用，uk_positions_uid_symbol_side因为uid在最前面覆盖不到这个查询
+-- 批量查仓位用，uk_positions_uid_symbol_side因为uid在最前面覆盖不到这个查询。
+-- idx_positions_volume_uid给LiquidationService.RiskScanOnce的FindAllOpenUIDs兜底扫描用
+-- (SELECT DISTINCT uid FROM positions WHERE volume > 0)；idx_positions_symbol_volume_uid给
+-- 事件驱动的OnMarkPriceChanged的FindOpenUIDsBySymbol用(多一个symbol=?过滤)。两条都是
+-- volume/symbol在前能走索引范围扫描，uid跟着放进同一个索引让查询变成覆盖索引不用回表——
+-- 每一行都要么closed(volume=0，但行不会被删)要么是真正持仓中，行数只随uid×symbol×side
+-- 增长、不随成交笔数增长，但这两条查询跑得都很频繁，没有索引就是全表扫描
 CREATE TABLE IF NOT EXISTS positions (
   id                BIGINT UNSIGNED NOT NULL AUTO_INCREMENT,
   uid               BIGINT UNSIGNED NOT NULL,
@@ -160,7 +166,8 @@ CREATE TABLE IF NOT EXISTS positions (
   update_time       BIGINT UNSIGNED NOT NULL,
   PRIMARY KEY (id),
   UNIQUE KEY uk_positions_uid_symbol_side (uid, symbol, side),
-  KEY idx_positions_symbol (symbol)
+  KEY idx_positions_volume_uid (volume, uid),
+  KEY idx_positions_symbol_volume_uid (symbol, volume, uid)
 ) ENGINE=InnoDB;
 
 -- 成交记录

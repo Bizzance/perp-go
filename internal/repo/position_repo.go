@@ -30,10 +30,18 @@ func (r *PositionRepo) FindByUID(ctx context.Context, uid uint64) ([]model.Posit
 	return positions, err
 }
 
-// 风控扫描用：全部还有仓位的账户uid去重列表
+// 周期性风控扫描兜底用：全部还有仓位的账户uid去重列表，见LiquidationService.RiskScanOnce
 func (r *PositionRepo) FindAllOpenUIDs(ctx context.Context) ([]uint64, error) {
 	var uids []uint64
 	err := r.db.SelectContext(ctx, &uids, `SELECT DISTINCT uid FROM positions WHERE volume > 0`)
+	return uids, err
+}
+
+// 事件驱动风控扫描用：只查这一个symbol上还有仓位的账户uid，不用像FindAllOpenUIDs那样扫全表——
+// 标记价格变化只影响持有这个symbol仓位的账户的强平判断，见LiquidationService.OnMarkPriceChanged
+func (r *PositionRepo) FindOpenUIDsBySymbol(ctx context.Context, symbol string) ([]uint64, error) {
+	var uids []uint64
+	err := r.db.SelectContext(ctx, &uids, `SELECT DISTINCT uid FROM positions WHERE symbol = ? AND volume > 0`, symbol)
 	return uids, err
 }
 
